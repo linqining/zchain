@@ -162,7 +162,7 @@ impl FullHandRunner {
         }
 
         // ===== Step 3: start_hand（creator 发起）=====
-        // 先注册聚合公钥 aggregated_pk = pk0 + pk1（真实协议由 join_and_shuffle 累加）。
+        // 先注册由 active join key lineage 派生的聚合公钥 aggregated_pk = pk0 + pk1。
         // submit_shuffle_v2 的 shuffle proof 把 aggregated_pk 作为广义 Schnorr 基点，
         // 禁止 identity，故必须先设非 identity 值。
         let agg_pk = ctx

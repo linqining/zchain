@@ -32,9 +32,9 @@ pub use vm_common::prove_task::MethodInput;
 use crate::method_kind::MethodKind;
 
 /// Current continuous method-batch stream schema.
-pub const METHOD_BATCH_STREAM_VERSION: u8 = 3;
+pub const METHOD_BATCH_STREAM_VERSION: u8 = 4;
 /// Current canonical tagged method-row payload schema.
-pub const METHOD_PAYLOAD_VERSION: u8 = 3;
+pub const METHOD_PAYLOAD_VERSION: u8 = 4;
 /// Maximum method rows in one 1024-row Stage batch.
 pub const MAX_METHOD_BATCH_ROWS: usize = 256;
 
@@ -181,7 +181,7 @@ pub fn dispatch_call_digest(
             ))
         })?;
     let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
-    hasher.update(b"zchain.texas_poker.dispatch_call.v3");
+    hasher.update(b"zchain.texas_poker.dispatch_call.v4");
     hasher.update(&encoded);
     let mut digest = [0u8; 32];
     hasher.finalize_variable(&mut digest).expect("32 <= 64");
@@ -287,6 +287,24 @@ impl ProveTask {
         .map_err(|error| {
             crate::error::TexasAirError::SerializationError(format!(
                 "canonical command input decode failed: {error}"
+            ))
+        })
+    }
+
+    /// Reconstruct the native legacy execution ABI from this authenticated canonical command.
+    ///
+    /// Proof consumers must use this view when decoding full crypto statements. `raw_args`
+    /// deliberately omits actor fields and is only the persisted digest-bound representation.
+    pub fn replay_args(&self) -> crate::error::TexasAirResult<Vec<u8>> {
+        poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+            self.method_kind as u8,
+            &self.raw_args,
+            &self.context,
+            &self.pre_table,
+        )
+        .map_err(|error| {
+            crate::error::TexasAirError::SerializationError(format!(
+                "canonical command replay payload failed: {error}"
             ))
         })
     }
@@ -618,9 +636,7 @@ impl MethodPayloadV2 {
         );
         let crypto_expected = matches!(
             task.method_kind,
-            MethodKind::JoinAndShuffle
-                | MethodKind::LeaveWithProof
-                | MethodKind::SubmitShuffleV2
+            MethodKind::SubmitShuffleV2
                 | MethodKind::SubmitPlayerRevealTokens
                 | MethodKind::SubmitReconstructDeck
                 | MethodKind::FoldWithProof
@@ -986,23 +1002,19 @@ mod tests {
     }
 
     #[test]
-    fn canonical_tick_payload_normalizes_legacy_timestamp_before_digesting() {
-        use poker_l1::vm::contracts::texas_poker::dispatch::{
-            TickArgs, canonical_command_parts, selectors,
-        };
+    fn canonical_deadline_payload_is_empty_and_timestamp_payloads_fail_closed() {
+        use poker_l1::vm::contracts::texas_poker::dispatch::{canonical_command_parts, selectors};
 
         let context = dummy_context();
-        let empty = dispatch_call_digest(&context, &selectors::tick(), &[]).unwrap();
-        let (_, canonical) = canonical_command_parts(
-            &selectors::tick(),
-            &borsh::to_vec(&TickArgs {
-                now_ms: context.block_timestamp,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-        let legacy = dispatch_call_digest(&context, &selectors::tick(), &canonical).unwrap();
-        assert_eq!(empty, legacy);
+        let (_, canonical) = canonical_command_parts(&selectors::advance_deadline(), &[]).unwrap();
+        assert!(canonical.is_empty());
+        assert!(
+            canonical_command_parts(
+                &selectors::advance_deadline(),
+                &borsh::to_vec(&context.block_timestamp).unwrap()
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -36,7 +36,7 @@
 //!
 //! ## 当前覆盖
 //!
-//! 23 个 VM selector 都能进入统一任务格式与 trace/prove/verify 路径。
+//! 19 个 active VM selector 与 2 个内部兼容 MethodKind 进入统一 trace/prove/verify 路径。
 //! `fold_with_proof` 的 mid-round 与 clean last-opponent settlement 路径会绑定 native
 //! DLEq receipt；复合状态变更另外绑定四段独立的 component STARK proof。
 
@@ -56,17 +56,11 @@ use crate::airs::actions::fold::{FoldAir, FoldInput, FoldRow};
 use crate::airs::actions::force_fold::{ForceFoldAir, ForceFoldInput, ForceFoldRow};
 use crate::airs::actions::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use crate::airs::actions::raise::{RaiseAir, RaiseInput, RaiseRow};
-use crate::airs::actions::request_leave_after_hand::{
-    RequestLeaveAfterHandAir, RequestLeaveAfterHandInput, RequestLeaveAfterHandRow,
+use crate::airs::actions::set_leave_after_hand::{
+    SetLeaveAfterHandAir, SetLeaveAfterHandInput, SetLeaveAfterHandRow,
 };
 use crate::airs::crypto::fold_with_proof::{
     FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
-};
-use crate::airs::crypto::join_and_shuffle::{
-    JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
-};
-use crate::airs::crypto::leave_with_proof::{
-    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
 };
 use crate::airs::crypto::submit_player_reveal_tokens::{
     SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
@@ -79,6 +73,9 @@ use crate::airs::crypto::submit_shuffle_v2::{
 };
 use crate::airs::funds::addon::{AddonAir, AddonInput, AddonRow};
 use crate::airs::funds::rebuy::{RebuyAir, RebuyInput, RebuyRow};
+use crate::airs::lifecycle::advance_deadline::{
+    AdvanceDeadlineAir, AdvanceDeadlineRow, canonical_input as canonical_advance_deadline_input,
+};
 use crate::airs::lifecycle::create_table::{CreateTableAir, CreateTableInput, CreateTableRow};
 use crate::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use crate::airs::lifecycle::leave_table::{LeaveTableAir, LeaveTableInput, LeaveTableRow};
@@ -86,14 +83,13 @@ use crate::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use crate::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use crate::airs::lifecycle::tick::{TickAir, TickRow, canonical_input as canonical_tick_input};
 use crate::authorization_binding::AdminAuthorizationBinding;
 use crate::deck_commitment::deck_commitment;
 use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::precompile_binding::{
-    JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PrecompileCallBinding,
-    RevealTokenVerifyRequest, precompile_call_context,
+    LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
+    precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{DispatchOutput, MethodInput, ProveTask};
@@ -495,7 +491,9 @@ impl Orchestrator {
             MethodKind::StartHand => {
                 self.prove_start_hand(task, pre_root, post_root, &pi, backend)?
             }
-            MethodKind::Tick => self.prove_tick(task, pre_root, post_root, &pi, backend)?,
+            MethodKind::AdvanceDeadline => {
+                self.prove_advance_deadline(task, pre_root, post_root, &pi, backend)?
+            }
             MethodKind::ResetForNextHand => {
                 self.prove_reset_for_next_hand(task, pre_root, post_root, &pi, backend)?
             }
@@ -515,14 +513,8 @@ impl Orchestrator {
             MethodKind::Addon => self.prove_addon(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Rebuy => self.prove_rebuy(task, pre_root, post_root, &pi, backend)?,
             MethodKind::Bet => self.prove_bet(task, pre_root, post_root, &pi, backend)?,
-            MethodKind::RequestLeaveAfterHand => {
-                self.prove_request_leave_after_hand(task, pre_root, post_root, &pi, backend)?
-            }
-            MethodKind::JoinAndShuffle => {
-                self.prove_join_and_shuffle(task, pre_root, post_root, &pi, backend)?
-            }
-            MethodKind::LeaveWithProof => {
-                self.prove_leave_with_proof(task, pre_root, post_root, &pi, backend)?
+            MethodKind::SetLeaveAfterHand => {
+                self.prove_set_leave_after_hand(task, pre_root, post_root, &pi, backend)?
             }
             MethodKind::SubmitShuffleV2 => {
                 self.prove_submit_shuffle_v2(task, pre_root, post_root, &pi, backend)?
@@ -931,7 +923,7 @@ impl Orchestrator {
         )
     }
 
-    fn prove_request_leave_after_hand<B: MethodBackend>(
+    fn prove_set_leave_after_hand<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
@@ -940,23 +932,29 @@ impl Orchestrator {
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
         let method_input = task.method_input()?;
-        let MethodInput::RequestLeaveAfterHand { seat_index } = &method_input else {
+        let MethodInput::SetLeaveAfterHand {
+            seat_index,
+            want_leave,
+        } = &method_input
+        else {
             return Err(input_mismatch(
-                "request_leave_after_hand",
-                "RequestLeaveAfterHand",
+                "set_leave_after_hand",
+                "SetLeaveAfterHand",
                 &method_input,
             ));
         };
         let _ = Self::seat(&task.pre_table, *seat_index)?;
         let _ = Self::seat(&task.post_table, *seat_index)?;
-        let input = RequestLeaveAfterHandInput {
+        let input = SetLeaveAfterHandInput {
             seat_index: *seat_index,
+            want_leave: *want_leave,
             pre_want_leave: task.pre_table.seat_wants_leave(*seat_index),
-            post_want_leave: task.post_table.seat_wants_leave(*seat_index),
         };
-        if input.pre_want_leave == input.post_want_leave {
+        if input.pre_want_leave == input.want_leave
+            || task.post_table.seat_wants_leave(*seat_index) != input.want_leave
+        {
             return Err(TexasAirError::SpecViolation(
-                "request_leave_after_hand did not toggle want_leave".into(),
+                "set_leave_after_hand proof task does not match an explicit state change".into(),
             ));
         }
 
@@ -964,7 +962,7 @@ impl Orchestrator {
             u64::from(task.pre_table.call_seq),
             u64::from(task.post_table.call_seq),
         );
-        let row = RequestLeaveAfterHandRow::active(
+        let row = SetLeaveAfterHandRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -980,11 +978,11 @@ impl Orchestrator {
         );
         run(
             backend,
-            RequestLeaveAfterHandAir::num_columns(),
+            SetLeaveAfterHandAir::num_columns(),
             &row,
-            &RequestLeaveAfterHandRow::padding(),
+            &SetLeaveAfterHandRow::padding(),
             pi,
-            move || RequestLeaveAfterHandAir {
+            move || SetLeaveAfterHandAir {
                 log_size: MIN_LOG_SIZE,
                 input,
                 pre_state_root: srm(pre_root),
@@ -1083,7 +1081,7 @@ impl Orchestrator {
         )
     }
 
-    fn prove_tick<B: MethodBackend>(
+    fn prove_advance_deadline<B: MethodBackend>(
         &self,
         task: &ProveTask,
         pre_root: StateRoot,
@@ -1093,13 +1091,13 @@ impl Orchestrator {
     ) -> TexasAirResult<B::Output> {
         let method_input = task.method_input()?;
         let MethodInput::Empty = &method_input else {
-            return Err(input_mismatch("tick", "Empty", &method_input));
+            return Err(input_mismatch("advance_deadline", "Empty", &method_input));
         };
         // Time and every Tick branch witness are reconstructed from the same
         // consensus timestamp and canonical pre/post tables used by the VM
         // replay above.  Never retain an ABI placeholder here: verifier-side
         // Tick validation performs the identical reconstruction.
-        let input = canonical_tick_input(
+        let input = canonical_advance_deadline_input(
             &task.pre_table,
             &task.post_table,
             task.context.block_timestamp,
@@ -1109,7 +1107,7 @@ impl Orchestrator {
             u64::from(task.post_table.call_seq),
         );
         let (pre_r, post_r) = (task.pre_table.round_state(), task.post_table.round_state());
-        let mut row = TickRow::active(
+        let mut row = AdvanceDeadlineRow::active(
             &input,
             srm(pre_root),
             srm(post_root),
@@ -1125,11 +1123,11 @@ impl Orchestrator {
         row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
         run(
             backend,
-            TickAir::num_columns(),
+            AdvanceDeadlineAir::num_columns(),
             &row,
-            &TickRow::padding(),
+            &AdvanceDeadlineRow::padding(),
             pi,
-            move || TickAir {
+            move || AdvanceDeadlineAir {
                 log_size: MIN_LOG_SIZE,
                 input,
                 pre_state_root: srm(pre_root),
@@ -1782,11 +1780,7 @@ impl Orchestrator {
         backend: &mut B,
     ) -> TexasAirResult<B::Output> {
         let method_input = task.method_input()?;
-        let MethodInput::Kick {
-            seat_index,
-            reason: _,
-        } = &method_input
-        else {
+        let MethodInput::Kick { seat_index } = &method_input else {
             return Err(input_mismatch("kick_player", "Kick", &method_input));
         };
         let pre_seat = Self::seat(&task.pre_table, *seat_index)?;
@@ -2025,214 +2019,6 @@ impl Orchestrator {
         )
     }
 
-    fn prove_join_and_shuffle<B: MethodBackend>(
-        &self,
-        task: &ProveTask,
-        pre_root: StateRoot,
-        post_root: StateRoot,
-        pi: &crate::public_inputs::TexasPublicInputs,
-        backend: &mut B,
-    ) -> TexasAirResult<B::Output> {
-        let method_input = task.method_input()?;
-        let MethodInput::JoinAndShuffle {
-            seat_index,
-            player: _,
-            buy_in: _,
-        } = &method_input
-        else {
-            return Err(input_mismatch(
-                "join_and_shuffle",
-                "JoinAndShuffle",
-                &method_input,
-            ));
-        };
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
-                TexasAirError::SerializationError(format!(
-                    "join_and_shuffle raw args borsh: {error}"
-                ))
-            })?;
-        if args.seat_index != *seat_index {
-            return Err(TexasAirError::SpecViolation(
-                "join_and_shuffle method input seat differs from raw args".into(),
-            ));
-        }
-        let call_context = precompile_call_context(
-            MethodKind::JoinAndShuffle,
-            *seat_index,
-            pi.table_id,
-            pi.hand_id,
-            pi.call_seq,
-            pi.pre_version,
-            pi.post_version,
-            pi.pre_state_root,
-            pi.post_state_root,
-            pi.dispatch_call_digest,
-        );
-        let request =
-            JoinAndShuffleVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
-        let binding = PrecompileCallBinding::verify_join_and_shuffle(&request)?;
-        let input = JoinAndShuffleInput {
-            seat_index: *seat_index,
-            old_deck_commitment: deck_commitment(&task.pre_table),
-            new_deck_commitment: deck_commitment(&task.post_table),
-            // The phase is an admission precondition. `advance_shuffle` may complete the last
-            // participant and reset the post-state phase to NONE, so deriving it from post-state
-            // rejects a valid terminal shuffle.
-            shuffle_phase: task.pre_table.shuffle_phase(),
-            precompile: binding.air_binding(),
-        };
-        let (pre_v, post_v) = (
-            u64::from(task.pre_table.call_seq),
-            u64::from(task.post_table.call_seq),
-        );
-        let pre_cc = task.pre_table.shuffle_state().completed_mask.count_ones() as u8;
-        let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
-        let mut row = JoinAndShuffleRow::active(
-            &input,
-            srm(pre_root),
-            srm(post_root),
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            pre_v,
-            post_v,
-            pre_cc,
-            post_cc,
-        );
-        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-        let mut bound_pi = pi.clone();
-        bound_pi.precompile_binding = Some(binding);
-        run(
-            backend,
-            JoinAndShuffleAir::num_columns(),
-            &row,
-            &JoinAndShuffleRow::padding(),
-            &bound_pi,
-            move || JoinAndShuffleAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: srm(pre_root),
-                post_state_root: srm(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: pre_v,
-                post_version: post_v,
-            },
-        )
-    }
-
-    fn prove_leave_with_proof<B: MethodBackend>(
-        &self,
-        task: &ProveTask,
-        pre_root: StateRoot,
-        post_root: StateRoot,
-        pi: &crate::public_inputs::TexasPublicInputs,
-        backend: &mut B,
-    ) -> TexasAirResult<B::Output> {
-        let method_input = task.method_input()?;
-        let MethodInput::LeaveWithProof { seat_index } = &method_input else {
-            return Err(input_mismatch(
-                "leave_with_proof",
-                "LeaveWithProof",
-                &method_input,
-            ));
-        };
-        let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
-                TexasAirError::SerializationError(format!(
-                    "leave_with_proof raw args borsh: {error}"
-                ))
-            })?;
-        if args.seat_index != *seat_index {
-            return Err(TexasAirError::SpecViolation(
-                "leave_with_proof method input seat differs from raw args".into(),
-            ));
-        }
-        let player_pk = task
-            .pre_table
-            .seats
-            .get(usize::from(*seat_index))
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation(
-                    "leave_with_proof seat is outside the canonical pre-table".into(),
-                )
-            })?
-            .pk()
-            .copied()
-            .ok_or_else(|| {
-                TexasAirError::SpecViolation(
-                    "leave_with_proof seat has no live Mental Poker key".into(),
-                )
-            })?;
-        let call_context = precompile_call_context(
-            MethodKind::LeaveWithProof,
-            *seat_index,
-            pi.table_id,
-            pi.hand_id,
-            pi.call_seq,
-            pi.pre_version,
-            pi.post_version,
-            pi.pre_state_root,
-            pi.post_state_root,
-            pi.dispatch_call_digest,
-        );
-        let request = LeaveDleqVerifyRequest::new(
-            call_context,
-            task.pre_table.deck_state.encrypted.to_vec(),
-            args.output_cards,
-            player_pk,
-            args.leave_proof,
-        );
-        let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
-        let input = LeaveWithProofInput {
-            seat_index: *seat_index,
-            leave_kind: 0,
-            shuffle_phase: task.pre_table.shuffle_phase(),
-            precompile: binding.air_binding(),
-        };
-        let (pre_v, post_v) = (
-            u64::from(task.pre_table.call_seq),
-            u64::from(task.post_table.call_seq),
-        );
-        let post_cc = task.post_table.shuffle_state().completed_mask.count_ones() as u8;
-        let mut row = LeaveWithProofRow::active(
-            &input,
-            srm(pre_root),
-            srm(post_root),
-            task.table_id,
-            task.hand_id,
-            task.call_seq,
-            pre_v,
-            post_v,
-            post_cc,
-        );
-        row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-        row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-        let mut bound_pi = pi.clone();
-        bound_pi.precompile_binding = Some(binding);
-        run(
-            backend,
-            LeaveWithProofAir::num_columns(),
-            &row,
-            &LeaveWithProofRow::padding(),
-            &bound_pi,
-            move || LeaveWithProofAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: srm(pre_root),
-                post_state_root: srm(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: pre_v,
-                post_version: post_v,
-            },
-        )
-    }
-
     fn prove_fold_with_proof<B: MethodBackend>(
         &self,
         task: &ProveTask,
@@ -2249,8 +2035,9 @@ impl Orchestrator {
                 &method_input,
             ));
         };
+        let replay_args = task.replay_args()?;
         let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
+            borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "fold_with_proof raw args borsh: {error}"
                 ))
@@ -2369,8 +2156,9 @@ impl Orchestrator {
                 &method_input,
             ));
         };
+        let replay_args = task.replay_args()?;
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
+            borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_shuffle_v2 raw args borsh: {error}"
                 ))
@@ -2382,9 +2170,8 @@ impl Orchestrator {
         }
         let aggregated_pk = task
             .pre_table
-            .deck_state
-            .aggregated_pk
-            .as_ref()
+            .derived_aggregated_pk()
+            .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
             .ok_or_else(|| {
                 TexasAirError::SpecViolation(
                     "submit_shuffle_v2 requires a non-empty aggregated public key".into(),
@@ -2479,8 +2266,9 @@ impl Orchestrator {
                 &method_input,
             ));
         };
+        let replay_args = task.replay_args()?;
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
+            borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_player_reveal_tokens raw args borsh: {error}"
                 ))
@@ -2573,8 +2361,9 @@ impl Orchestrator {
                 &method_input,
             ));
         };
+        let replay_args = task.replay_args()?;
         let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
-            borsh::from_slice(&task.raw_args).map_err(|error| {
+            borsh::from_slice(&replay_args).map_err(|error| {
                 TexasAirError::SerializationError(format!(
                     "submit_reconstruct_deck raw args borsh: {error}"
                 ))
@@ -3092,7 +2881,7 @@ impl_row_to_vec!(
     JoinTableRow,
     LeaveTableRow,
     StartHandRow,
-    TickRow,
+    AdvanceDeadlineRow,
     ResetForNextHandRow,
     CheckRow,
     CallRow,
@@ -3101,12 +2890,10 @@ impl_row_to_vec!(
     AutoFoldRow,
     ForceFoldRow,
     KickPlayerRow,
-    RequestLeaveAfterHandRow,
+    SetLeaveAfterHandRow,
     AddonRow,
     RebuyRow,
     FoldWithProofRow,
-    JoinAndShuffleRow,
-    LeaveWithProofRow,
     SubmitShuffleV2Row,
     SubmitPlayerRevealTokensRow,
     SubmitReconstructDeckRow,
@@ -3119,7 +2906,7 @@ fn input_mismatch(method: &str, expected: &str, actual: &MethodInput) -> TexasAi
     ))
 }
 
-/// 在 post_table 中找到 player 占用的座位（join_table / join_and_shuffle 用）。
+/// 在 post_table 中找到 player 占用的座位（join_table 用）。
 fn find_join_seat(
     table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
     player: &poker_l1::Address,
@@ -3151,8 +2938,8 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::{ROUND_FLOP, ROUND_PREFLOP};
     use poker_l1::vm::contracts::texas_poker::dispatch::{
-        self as texas_dispatch, AddonArgs, BetArgs, CreateTableArgs, KickPlayerArgs, RaiseArgs,
-        RebuyArgs, SeatIndexArgs,
+        self as texas_dispatch, AddonArgs, BetArgs, CreateTableArgs, RaiseArgs, RebuyArgs,
+        SeatIndexArgs, SetLeaveAfterHandArgs,
     };
     use poker_l1::vm::contracts::texas_poker::state_machine;
     use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
@@ -3251,35 +3038,41 @@ mod tests {
     }
 
     #[test]
-    fn request_leave_after_hand_dispatch_proves_and_issues_receipt() {
-        let mut pre = make_table("request-leave");
+    fn set_leave_after_hand_dispatch_proves_and_issues_receipt() {
+        let mut pre = make_table("set-leave");
         seat_fixture::set_player(&mut pre.seats[0], [0x11; 20]);
         seat_fixture::set_stack(&mut pre.seats[0], 1_000);
-        let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
-            .expect("request_leave_after_hand args should serialize");
+        let raw_args = borsh::to_vec(&SetLeaveAfterHandArgs {
+            seat_index: 0,
+            want_leave: true,
+        })
+        .expect("set_leave_after_hand args should serialize");
         let (task, post) = dispatch_task(
             pre,
             [0x11; 20],
-            texas_dispatch::selectors::request_leave_after_hand(),
+            texas_dispatch::selectors::set_leave_after_hand(),
             raw_args,
         );
         assert!(post.seat_wants_leave(0));
         let mut orchestrator = Orchestrator::new();
         let summary = orchestrator
             .prove_and_verify_task(&task)
-            .expect("request_leave_after_hand should produce a verified receipt");
-        assert_eq!(summary.method_kind, MethodKind::RequestLeaveAfterHand);
+            .expect("set_leave_after_hand should produce a verified receipt");
+        assert_eq!(summary.method_kind, MethodKind::SetLeaveAfterHand);
         let (cancel_task, cancelled) = dispatch_task(
             post,
             [0x11; 20],
-            texas_dispatch::selectors::request_leave_after_hand(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
-                .expect("request_leave_after_hand args should serialize"),
+            texas_dispatch::selectors::set_leave_after_hand(),
+            borsh::to_vec(&SetLeaveAfterHandArgs {
+                seat_index: 0,
+                want_leave: false,
+            })
+            .expect("set_leave_after_hand args should serialize"),
         );
         assert!(!cancelled.seat_wants_leave(0));
         orchestrator
             .prove_and_verify_task(&cancel_task)
-            .expect("cancelling request_leave_after_hand should also prove");
+            .expect("cancelling set_leave_after_hand should also prove");
         assert_eq!(orchestrator.proven().len(), 2);
         assert!(orchestrator.verify_chain().is_ok());
     }
@@ -3424,7 +3217,7 @@ mod tests {
     /// placeholder.  A stale timer makes the real VM dispatch valid; proving
     /// the task therefore exercises the full dispatch → task → AIR route.
     #[test]
-    fn orchestrator_proves_auto_fold_with_consensus_timestamp() {
+    fn orchestrator_proves_advance_deadline_auto_fold_with_consensus_timestamp() {
         let mut pre = make_table("auto-fold-consensus-time");
         enter_betting_fixture(&mut pre, ROUND_PREFLOP, BettingRound::new(100, 100), 0, 1);
         for i in 0..3 {
@@ -3433,15 +3226,14 @@ mod tests {
             seat_fixture::set_time_bank_ms(&mut pre.seats[i], 0);
         }
 
-        let creator = pre.creator;
         let (task, post) = dispatch_task(
             pre,
-            creator,
-            texas_dispatch::selectors::auto_fold(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
-                .expect("auto_fold args should serialize"),
+            [0x77; 20],
+            texas_dispatch::selectors::advance_deadline(),
+            Vec::new(),
         );
         assert!(post.seats[0].is_folded());
+        assert_eq!(task.method_kind, MethodKind::AdvanceDeadline);
         assert_eq!(task.context.block_timestamp, 1_000_000);
 
         Orchestrator::new()
@@ -3490,17 +3282,15 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_proves_terminal_auto_fold_settlement_and_archive() {
-        let pre = terminal_admin_fold_table("terminal-auto-fold");
-        let creator = pre.creator;
+    fn orchestrator_proves_terminal_advance_deadline_settlement_and_archive() {
+        let pre = terminal_admin_fold_table("terminal-advance-deadline");
         let (task, post) = dispatch_task(
             pre,
-            creator,
-            texas_dispatch::selectors::auto_fold(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
-                .expect("auto_fold args should serialize"),
+            [0x77; 20],
+            texas_dispatch::selectors::advance_deadline(),
+            Vec::new(),
         );
-        assert_eq!(task.method_kind, MethodKind::AutoFold);
+        assert_eq!(task.method_kind, MethodKind::AdvanceDeadline);
         assert_terminal_admin_fold_archive(&task, &post);
     }
 
@@ -3521,14 +3311,14 @@ mod tests {
 
     #[test]
     fn orchestrator_proves_terminal_tick_settlement_and_archive() {
-        let pre = terminal_admin_fold_table("terminal-tick-fold");
+        let pre = terminal_admin_fold_table("terminal-advance-deadline-fold");
         let (task, post) = dispatch_task(
             pre,
             [0x77; 20],
-            texas_dispatch::selectors::tick(),
+            texas_dispatch::selectors::advance_deadline(),
             Vec::new(),
         );
-        assert_eq!(task.method_kind, MethodKind::Tick);
+        assert_eq!(task.method_kind, MethodKind::AdvanceDeadline);
         assert_eq!(
             post.round_state(),
             poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
@@ -3537,7 +3327,7 @@ mod tests {
         assert_eq!(post.seats[1].stack(), 1_450);
 
         let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
-            .expect("terminal tick should have a canonical composite plan");
+            .expect("terminal advance_deadline should have a canonical composite plan");
         assert!(plan.seat_update.active);
         assert!(plan.bet_collection.active);
         assert!(!plan.round_advance.active);
@@ -3545,19 +3335,19 @@ mod tests {
 
         let archived = Orchestrator::new()
             .prove_verify_and_archive_task(&task)
-            .expect("terminal tick should prove method and component bundle");
+            .expect("terminal advance_deadline should prove method and component bundle");
         let composition = archived
             .composition_archive
             .as_ref()
-            .expect("terminal tick must carry four component proofs");
+            .expect("terminal advance_deadline must carry four component proofs");
         assert_eq!(composition.stages().len(), 4);
         Orchestrator::verify_archived_proven_task(&task, &archived)
-            .expect("terminal tick archive should reverify after restart");
+            .expect("terminal advance_deadline archive should reverify after restart");
     }
 
     #[test]
     fn orchestrator_omits_proof_for_waiting_noop_tick() {
-        let mut pre = make_table("waiting-tick-start-hand");
+        let mut pre = make_table("waiting-advance-deadline-start-hand");
         for i in 0..2 {
             seat_fixture::set_player(&mut pre.seats[i], [u8::try_from(i + 1).unwrap(); 20]);
             seat_fixture::set_stack(&mut pre.seats[i], 1_000);
@@ -3567,9 +3357,13 @@ mod tests {
 
         let context = test_context([0x78; 20]);
         let mut post = pre.clone();
-        let result =
-            texas_dispatch::dispatch(&context, &mut post, &texas_dispatch::selectors::tick(), &[])
-                .expect("waiting tick should be a valid no-op");
+        let result = texas_dispatch::dispatch(
+            &context,
+            &mut post,
+            &texas_dispatch::selectors::advance_deadline(),
+            &[],
+        )
+        .expect("waiting advance_deadline should be a valid no-op");
         let output: DispatchOutput =
             borsh::from_slice(&result.return_value).expect("dispatch output should decode");
         assert_eq!(post, pre);
@@ -3640,12 +3434,9 @@ mod tests {
         let (task, post) = dispatch_task(
             pre,
             creator,
-            texas_dispatch::selectors::kick_player(),
-            borsh::to_vec(&KickPlayerArgs {
-                seat_index: 2,
-                reason: 1,
-            })
-            .expect("kick args should serialize"),
+            texas_dispatch::selectors::kick_player_v2(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 2 })
+                .expect("kick_player_v2 args should serialize"),
         );
         assert_eq!(post.pot, 65_536);
         Orchestrator::new()
@@ -3705,7 +3496,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestrator_binds_reset_for_next_hand_creator_authorization_receipt() {
+    fn source_dispatch_rejects_retired_reset_for_next_hand_before_task_creation() {
         let mut waiting = make_table("reset-admin-binding");
         for seat_index in [0usize, 2] {
             seat_fixture::set_player(
@@ -3722,20 +3513,19 @@ mod tests {
             texas_dispatch::selectors::start_hand(),
             Vec::new(),
         );
-        let (task, post) = dispatch_task(
-            pre,
-            creator,
-            texas_dispatch::selectors::reset_for_next_hand(),
-            Vec::new(),
-        );
-        assert_eq!(task.method_kind, MethodKind::ResetForNextHand);
-        assert_eq!(
-            post.round_state(),
-            poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING
-        );
-        Orchestrator::new()
-            .prove_and_verify_task(&task)
-            .expect("creator-authorized reset_for_next_hand should prove and verify");
+        let mut post = pre.clone();
+        let error = texas_dispatch::dispatch(
+            &test_context(creator),
+            &mut post,
+            &texas_dispatch::selectors::reset_for_next_hand(),
+            &[],
+        )
+        .expect_err("retired reset_for_next_hand must not create a proof task");
+        assert!(matches!(
+            error,
+            poker_l1::error::PokerL1Error::UnknownContractMethod { .. }
+        ));
+        assert_eq!(post, pre);
     }
 
     #[test]
@@ -4149,12 +3939,9 @@ mod tests {
         let (task, post) = dispatch_task(
             pre.clone(),
             creator,
-            texas_dispatch::selectors::kick_player(),
-            borsh::to_vec(&KickPlayerArgs {
-                seat_index: 0,
-                reason: 1,
-            })
-            .expect("kick args should serialize"),
+            texas_dispatch::selectors::kick_player_v2(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("kick_player_v2 args should serialize"),
         );
         assert_eq!(post.call_seq, pre.call_seq.saturating_add(1));
         Orchestrator::new()
@@ -4185,12 +3972,9 @@ mod tests {
         let (task, post) = dispatch_task(
             pre.clone(),
             creator,
-            texas_dispatch::selectors::kick_player(),
-            borsh::to_vec(&KickPlayerArgs {
-                seat_index: 0,
-                reason: 1,
-            })
-            .expect("kick args should serialize"),
+            texas_dispatch::selectors::kick_player_v2(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 0 })
+                .expect("kick_player_v2 args should serialize"),
         );
         assert_eq!(post.call_seq, pre.call_seq.saturating_add(1));
         assert_eq!(
@@ -4235,12 +4019,9 @@ mod tests {
         let (task, post) = dispatch_task(
             pre,
             creator,
-            texas_dispatch::selectors::kick_player(),
-            borsh::to_vec(&KickPlayerArgs {
-                seat_index: 1,
-                reason: 1,
-            })
-            .expect("kick args should serialize"),
+            texas_dispatch::selectors::kick_player_v2(),
+            borsh::to_vec(&SeatIndexArgs { seat_index: 1 })
+                .expect("kick_player_v2 args should serialize"),
         );
         assert_eq!(post.seats[0].stack(), 1_000);
         let plan = crate::airs::composition::derive_composite_transition_plan_from_task(&task)
@@ -4252,7 +4033,7 @@ mod tests {
 
     /// 回归：Check 方法现已接入 Orchestrator（不再返回 NotImplemented）。
     ///
-    /// 之前 Check 是"未实现"的代表；启用的 23 个方法接线后，此测试确认 Check
+    /// 之前 Check 是"未实现"的代表；保留的 21 个 MethodKind 接线后，此测试确认 Check
     /// 走完了 trace 构造路径（成功或返回非 NotImplemented 的业务错误均算通过）。
     #[test]
     fn orchestrator_check_is_now_supported() {

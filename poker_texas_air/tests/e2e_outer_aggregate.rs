@@ -147,8 +147,10 @@ fn sequential_shuffle_tasks(nonce: u64) -> Vec<ProveTask> {
     }
     table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 0b1111;
-    table.sync_aggregated_pk().unwrap();
-    assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
+    assert_eq!(
+        table.derived_aggregated_pk().unwrap(),
+        Some(ECPoint(aggregated_pk))
+    );
     table
         .enter_initial_shuffling(
             ShuffleState {

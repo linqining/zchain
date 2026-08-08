@@ -8,7 +8,7 @@
 //! - [`auto_fold`] — 玩家超时自动 fold
 //! - [`force_fold`] — 管理员强制 fold 玩家
 //! - [`kick_player`] — 踢出玩家（管理员操作）
-//! - [`request_leave_after_hand`] — 切换下一手前离场标记
+//! - [`set_leave_after_hand`] — 显式设置下一手前离场标记
 //!
 //! ## 约束模板
 //!
@@ -27,5 +27,5 @@ pub mod fold;
 pub mod force_fold;
 pub mod kick_player;
 pub mod raise;
-pub mod request_leave_after_hand;
+pub mod set_leave_after_hand;
 pub(crate) mod validation;

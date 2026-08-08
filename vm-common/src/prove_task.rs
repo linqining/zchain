@@ -55,12 +55,10 @@ pub enum MethodInput {
         /// 金额。
         amount: u64,
     },
-    /// `kick_player`（seat_index + reason）。
+    /// Canonical administrator `kick_player` target.
     Kick {
         /// 座位索引。
         seat_index: u8,
-        /// 踢出原因。
-        reason: u8,
     },
     /// `join_table`（player + buy_in）。
     Join {
@@ -80,20 +78,6 @@ pub enum MethodInput {
         /// 大盲注。
         big_blind: u64,
     },
-    /// `join_and_shuffle` 的窄派生输入。完整密码学载荷只保存在 task `raw_args`。
-    JoinAndShuffle {
-        /// 请求中指定的座位索引。
-        seat_index: u8,
-        /// 加入桌台的玩家地址。
-        player: [u8; 20],
-        /// 买入金额。
-        buy_in: u64,
-    },
-    /// `leave_with_proof` 的窄派生输入。
-    LeaveWithProof {
-        /// 离场玩家座位索引。
-        seat_index: u8,
-    },
     /// `submit_shuffle_v2` 的窄派生输入。
     SubmitShuffleV2 {
         /// 提交洗牌的座位索引。
@@ -109,10 +93,12 @@ pub enum MethodInput {
         /// 提交重构牌组的座位索引。
         seat_index: u8,
     },
-    /// `request_leave_after_hand`（切换下一手前离场标记）。
-    RequestLeaveAfterHand {
+    /// `set_leave_after_hand`（显式设置下一手前离场标记）。
+    SetLeaveAfterHand {
         /// 玩家座位索引。
         seat_index: u8,
+        /// 是否在本手结束后离场。
+        want_leave: bool,
     },
     /// `fold_with_proof` 的窄派生输入。
     FoldWithProof {
@@ -143,10 +129,7 @@ mod tests {
                 seat_index: 0,
                 amount: 1000,
             },
-            MethodInput::Kick {
-                seat_index: 4,
-                reason: 1,
-            },
+            MethodInput::Kick { seat_index: 4 },
             MethodInput::Join {
                 player: [0xAB; 20],
                 buy_in: 2000,
@@ -157,16 +140,13 @@ mod tests {
                 small_blind: 50,
                 big_blind: 100,
             },
-            MethodInput::JoinAndShuffle {
-                seat_index: 1,
-                player: [0xCD; 20],
-                buy_in: 3000,
-            },
-            MethodInput::LeaveWithProof { seat_index: 1 },
             MethodInput::SubmitShuffleV2 { seat_index: 2 },
             MethodInput::SubmitPlayerRevealTokens { seat_index: 3 },
             MethodInput::SubmitReconstructDeck { seat_index: 4 },
-            MethodInput::RequestLeaveAfterHand { seat_index: 5 },
+            MethodInput::SetLeaveAfterHand {
+                seat_index: 5,
+                want_leave: true,
+            },
             MethodInput::FoldWithProof { seat_index: 0 },
             MethodInput::Empty,
         ];

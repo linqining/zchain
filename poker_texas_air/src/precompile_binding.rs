@@ -19,8 +19,7 @@ use poker_protocol::precompile_abi::{
     RECONSTRUCTION_V3_ABI_VERSION, ReconstructionV3Verifier, ReconstructionV3VerifyRequest,
     SHUFFLE_ABI_VERSION, ShuffleVerifier, ShuffleVerifyRequest,
 };
-use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 use stwo::core::fields::m31::M31;
@@ -32,139 +31,11 @@ use crate::state_root::StateRoot;
 /// Number of M31 columns used for one full 256-bit digest.
 pub const DIGEST_LIMBS: usize = 16;
 
-/// Canonical ABI version for join ownership + remask + shuffle verification.
-pub const JOIN_AND_SHUFFLE_ABI_VERSION: u8 = 1;
-
 /// Canonical ABI version for a Texas leave-layer DLEq verification request.
 pub const LEAVE_DLEQ_ABI_VERSION: u8 = 1;
 
 /// Canonical ABI version for batched reveal-token DLEq verification.
 pub const REVEAL_TOKEN_ABI_VERSION: u8 = 1;
-
-/// Canonical request for the complete `join_and_shuffle` native proof bundle.
-#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-pub struct JoinAndShuffleVerifyRequest {
-    abi_version: u8,
-    call_context: Vec<u8>,
-    first_player: bool,
-    prior_aggregate_pk: Option<ECPoint>,
-    player_pk: ECPoint,
-    pk_ownership_proof: Vec<u8>,
-    input_cards: Vec<ElGamalCiphertext>,
-    mask_cards: Vec<ElGamalCiphertext>,
-    output_cards: Vec<ElGamalCiphertext>,
-    remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
-    shuffle_proof: ShuffleProof,
-}
-
-impl JoinAndShuffleVerifyRequest {
-    /// Rebuild the exact proof statements consumed by the native L1 dispatch.
-    pub fn from_dispatch(
-        call_context: Vec<u8>,
-        pre_table: &poker_l1::vm::contracts::texas_poker::types::TexasPokerTable,
-        args: &poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs,
-    ) -> TexasAirResult<Self> {
-        use poker_l1::vm::contracts::texas_poker::utils::{
-            g1_generator, g1_is_identity, generate_plaintext_cards,
-        };
-
-        pre_table.validate_state_schema().map_err(|error| {
-            TexasAirError::SpecViolation(format!(
-                "join-and-shuffle pre-table has invalid contributor lineage: {error}"
-            ))
-        })?;
-        let prior_aggregate_pk = pre_table.derived_aggregated_pk().map_err(|error| {
-            TexasAirError::SpecViolation(format!(
-                "join-and-shuffle cannot derive prior aggregate key: {error}"
-            ))
-        })?;
-        let first_player = pre_table.deck_state.encrypted.is_empty()
-            || pre_table
-                .deck_state
-                .encrypted
-                .iter()
-                .all(|card| g1_is_identity(&card.c1) && g1_is_identity(&card.c2));
-        let input_cards = if first_player {
-            let generator = g1_generator();
-            generate_plaintext_cards()
-                .into_iter()
-                .map(|plaintext| ElGamalCiphertext {
-                    c1: generator,
-                    c2: plaintext,
-                })
-                .collect::<Vec<_>>()
-        } else {
-            pre_table.deck_state.encrypted.to_vec()
-        };
-        let request = Self {
-            abi_version: JOIN_AND_SHUFFLE_ABI_VERSION,
-            call_context,
-            first_player,
-            prior_aggregate_pk,
-            player_pk: args.pk,
-            pk_ownership_proof: args.pk_ownership_proof.clone(),
-            input_cards,
-            mask_cards: args.mask_cards.clone(),
-            output_cards: args.output_cards.clone(),
-            remask_proof: args.remask_proof.clone(),
-            shuffle_proof: args.shuffle_proof.clone(),
-        };
-        request.validate_shape()?;
-        Ok(request)
-    }
-
-    /// Strict canonical encoding used by request digests.
-    pub fn encode(&self) -> TexasAirResult<Vec<u8>> {
-        self.validate_shape()?;
-        borsh::to_vec(self).map_err(|error| {
-            TexasAirError::SerializationError(format!(
-                "join-and-shuffle request Borsh encode failed: {error}"
-            ))
-        })
-    }
-
-    /// Strict canonical decoding with trailing-byte and shape rejection.
-    pub fn decode(bytes: &[u8]) -> TexasAirResult<Self> {
-        let request: Self = borsh::from_slice(bytes).map_err(|error| {
-            TexasAirError::SerializationError(format!(
-                "join-and-shuffle request Borsh decode failed: {error}"
-            ))
-        })?;
-        request.validate_shape()?;
-        Ok(request)
-    }
-
-    fn validate_shape(&self) -> TexasAirResult<()> {
-        if self.abi_version != JOIN_AND_SHUFFLE_ABI_VERSION {
-            return Err(TexasAirError::SpecViolation(format!(
-                "unsupported join-and-shuffle ABI version {}",
-                self.abi_version
-            )));
-        }
-        if self.call_context.is_empty() {
-            return Err(TexasAirError::SpecViolation(
-                "join-and-shuffle request requires a non-empty call context".into(),
-            ));
-        }
-        if self.input_cards.len() != N_CARDS
-            || self.mask_cards.len() != N_CARDS
-            || self.output_cards.len() != N_CARDS
-        {
-            return Err(TexasAirError::SpecViolation(format!(
-                "join-and-shuffle requires exactly {N_CARDS} input/mask/output cards, got {}/{}/{}",
-                self.input_cards.len(),
-                self.mask_cards.len(),
-                self.output_cards.len()
-            )));
-        }
-        if !self.first_player && self.prior_aggregate_pk.is_none() {
-            return Err(TexasAirError::SpecViolation(
-                "non-first join-and-shuffle requires the prior aggregate public key".into(),
-            ));
-        }
-        Ok(())
-    }
-}
 
 /// Canonical request for verifying one player's encrypted-deck layer removal.
 ///
@@ -454,8 +325,6 @@ pub enum PokerPrecompileId {
     ReconstructionV3 = 3,
     /// Batched reveal-token Chaum--Pedersen verification.
     RevealToken = 4,
-    /// PK ownership, deck remask, and Bayer--Groth shuffle verification for joining.
-    JoinAndShuffle = 5,
 }
 
 /// Native backend identity committed by the receipt digest.
@@ -506,50 +375,6 @@ pub struct PrecompileCallBinding {
 }
 
 impl PrecompileCallBinding {
-    /// Verify and bind the complete join-and-shuffle native proof bundle.
-    pub fn verify_join_and_shuffle(request: &JoinAndShuffleVerifyRequest) -> TexasAirResult<Self> {
-        use group::Group;
-        use poker_l1::vm::contracts::texas_poker::utils;
-
-        let request_bytes = request.encode()?;
-        if !request.first_player
-            && !utils::verify_pk_ownership(&request.player_pk.0, &request.pk_ownership_proof)
-        {
-            return Err(TexasAirError::SpecViolation(
-                "poker precompile verification failed: public-key ownership proof rejected".into(),
-            ));
-        }
-        let mut remask_transcript = utils::new_mask_shuffle_transcript();
-        if !request.remask_proof.verify(
-            &request.input_cards,
-            &request.mask_cards,
-            &request.player_pk.0,
-            &mut remask_transcript,
-        ) {
-            return Err(TexasAirError::SpecViolation(
-                "poker precompile verification failed: join remask proof rejected".into(),
-            ));
-        }
-        let aggregate_pk = request
-            .prior_aggregate_pk
-            .map_or_else(blstrs::G1Projective::identity, |point| point.0)
-            + request.player_pk.0;
-        request
-            .shuffle_proof
-            .verify(
-                &request.mask_cards,
-                &request.output_cards,
-                &aggregate_pk,
-                &mut utils::new_mask_shuffle_transcript(),
-            )
-            .map_err(precompile_error)?;
-        Ok(Self::issue(
-            PokerPrecompileId::JoinAndShuffle,
-            JOIN_AND_SHUFFLE_ABI_VERSION,
-            request_bytes,
-        ))
-    }
-
     /// Verify and bind a canonical shuffle request with the native backend.
     pub fn verify_shuffle(request: &ShuffleVerifyRequest) -> TexasAirResult<Self> {
         let request_bytes = request.encode().map_err(precompile_error)?;
@@ -667,10 +492,6 @@ impl PrecompileCallBinding {
                 let request = RevealTokenVerifyRequest::decode(&self.request_bytes)?;
                 Self::verify_reveal_tokens(&request)?
             }
-            PokerPrecompileId::JoinAndShuffle => {
-                let request = JoinAndShuffleVerifyRequest::decode(&self.request_bytes)?;
-                Self::verify_join_and_shuffle(&request)?
-            }
         };
         if &rebuilt != self {
             return Err(TexasAirError::SpecViolation(
@@ -715,10 +536,6 @@ impl PrecompileCallBinding {
             PokerPrecompileId::RevealToken => {
                 let request = RevealTokenVerifyRequest::decode(&self.request_bytes)?;
                 (REVEAL_TOKEN_ABI_VERSION, request.encode()?)
-            }
-            PokerPrecompileId::JoinAndShuffle => {
-                let request = JoinAndShuffleVerifyRequest::decode(&self.request_bytes)?;
-                (JOIN_AND_SHUFFLE_ABI_VERSION, request.encode()?)
             }
         };
         if request_bytes != self.request_bytes {

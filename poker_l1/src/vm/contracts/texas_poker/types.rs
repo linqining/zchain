@@ -8,7 +8,7 @@
 //!
 //! # typed 化说明
 //!
-//! 密码学相关字段（pk、token、ciphertext_bytes、plaintext_bytes、aggregated_pk、
+//! 密码学相关字段（pk、token、ciphertext_bytes、plaintext_bytes、
 //! plaintext）已从 `Vec<u8>` 改为 typed `poker_protocol` 类型（`ECPoint` / `ECScalar` /
 //! `ElGamalCiphertext`），消除 state_machine.rs 中的 bytes↔G1 转换样板代码。
 //! `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
@@ -27,6 +27,7 @@ use std::ops::{Deref, DerefMut, Index, IndexMut};
 use borsh::{BorshDeserialize, BorshSerialize};
 use group::Group;
 
+#[cfg(test)]
 use blstrs::G1Projective;
 use poker_protocol::crypto::types::ECPoint;
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
@@ -63,7 +64,7 @@ pub const EMPTY_PLAYER: Address = [0u8; 20];
 pub const MAX_SEATS: u8 = 9;
 
 /// Canonical sentinel for a missing seat index in persisted state and AIR projections.
-pub const NO_SEAT: u8 = u8::MAX;
+pub const NO_SEAT: u8 = 0x0f;
 
 /// Fixed number of ciphertexts in an active mental-poker deck.
 pub const CIPHER_DECK_SIZE: usize = 52;
@@ -1602,8 +1603,6 @@ impl<'a> IntoIterator for &'a CipherDeck {
 pub struct DeckState {
     /// 加密牌组（52 个 ElGamalCiphertext）。
     pub encrypted: CipherDeck,
-    /// 聚合公钥（None = 未初始化，使用 ECPoint newtype 以支持 Borsh）。
-    pub aggregated_pk: Option<ECPoint>,
     /// Seats whose public-key encryption layer is still present in the deck lineage.
     pub contributor_mask: SeatMask,
     /// 已从牌组发出的牌数量。
@@ -1616,7 +1615,6 @@ impl Default for DeckState {
     fn default() -> Self {
         Self {
             encrypted: CipherDeck::Absent,
-            aggregated_pk: None,
             contributor_mask: 0,
             cards_dealt: 0,
             decrypted_cards: vec![],
@@ -2527,6 +2525,12 @@ impl TexasPokerTable {
         current_turn: u8,
         started_at_ms: u64,
     ) -> PokerL1Result<()> {
+        if current_turn != NO_SEAT && current_turn >= self.max_players {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas current turn {current_turn} is outside max_players {}",
+                self.max_players
+            )));
+        }
         let deadline_ms = canonical_absolute_deadline(
             started_at_ms,
             self.timeout_config.betting_timeout_ms,
@@ -2592,13 +2596,7 @@ impl TexasPokerTable {
         self.aggregated_pk_for_contributor_mask(self.deck_state.contributor_mask)
     }
 
-    /// Rebuild the runtime aggregate-key cache from the contributor mask.
-    pub fn sync_aggregated_pk(&mut self) -> PokerL1Result<()> {
-        self.deck_state.aggregated_pk = self.derived_aggregated_pk()?;
-        Ok(())
-    }
-
-    /// Add a seat to the deck-key lineage and refresh the aggregate cache.
+    /// Add a seat to the deck-key lineage after validating the derived aggregate.
     pub fn add_deck_contributor(&mut self, seat_index: u8) -> PokerL1Result<()> {
         if seat_index >= self.max_players {
             return Err(PokerL1Error::Serialization(format!(
@@ -2606,19 +2604,17 @@ impl TexasPokerTable {
             )));
         }
         let contributor_mask = self.deck_state.contributor_mask | seat_mask_bit(seat_index);
-        let aggregated_pk = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
+        let _ = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
         self.deck_state.contributor_mask = contributor_mask;
-        self.deck_state.aggregated_pk = aggregated_pk;
         Ok(())
     }
 
-    /// Remove a seat from the deck-key lineage and refresh the aggregate cache.
+    /// Remove a seat from the deck-key lineage after validating the derived aggregate.
     pub fn remove_deck_contributor(&mut self, seat_index: u8) -> PokerL1Result<()> {
         let mut contributor_mask = self.deck_state.contributor_mask;
         seat_mask_remove(&mut contributor_mask, seat_index);
-        let aggregated_pk = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
+        let _ = self.aggregated_pk_for_contributor_mask(contributor_mask)?;
         self.deck_state.contributor_mask = contributor_mask;
-        self.deck_state.aggregated_pk = aggregated_pk;
         Ok(())
     }
 
@@ -2925,12 +2921,7 @@ impl TexasPokerTable {
                 )));
             }
         }
-        let derived_aggregate = self.derived_aggregated_pk()?;
-        if self.deck_state.aggregated_pk != derived_aggregate {
-            return Err(PokerL1Error::Serialization(
-                "Texas cached aggregate pk does not match contributor mask".into(),
-            ));
-        }
+        let _ = self.derived_aggregated_pk()?;
         self.community_cards.validate_canonical().map_err(|error| {
             PokerL1Error::Serialization(format!("Texas first board is non-canonical: {error}"))
         })?;
@@ -3413,10 +3404,31 @@ mod tests {
 
     #[test]
     fn test_shuffle_state_default() {
+        assert_eq!(NO_SEAT, 0x0f);
         let state = ShuffleState::default();
         assert_eq!(state.derived_current_shuffler(), NO_SEAT);
         assert_eq!(state.pending_mask, 0);
         assert_eq!(state.completed_mask, 0);
+    }
+
+    #[test]
+    fn betting_turn_accepts_only_a_live_seat_or_the_four_bit_sentinel() {
+        let mut table =
+            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
+        assert!(
+            table
+                .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 0), u8::MAX, 1)
+                .is_err()
+        );
+        table
+            .enter_betting(ROUND_PREFLOP, BettingRound::new(100, 0), NO_SEAT, 1)
+            .unwrap();
+        assert!(table.current_turn_option().is_none());
+        assert!(table.set_betting_turn(3).is_ok());
+        assert!(table.set_betting_turn(4).is_err());
+        assert!(table.set_betting_turn(9).is_err());
+        assert!(table.set_betting_turn(u8::MAX).is_err());
+        assert!(table.set_betting_turn(NO_SEAT).is_ok());
     }
 
     #[test]

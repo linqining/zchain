@@ -118,8 +118,8 @@ impl TexasPokerPlugin {
 
     /// Register the occupied seats as the canonical deck-key contributor lineage.
     ///
-    /// 真实协议中每个玩家经 `join_and_shuffle` 入座时会设置 contributor bit；
-    /// `aggregated_pk` 只是由 contributor mask + seat pk 派生的 runtime cache。
+    /// 真实协议中每个玩家经 `join_table` 完成 key ownership 验证并设置 contributor bit；
+    /// aggregate key 只由 contributor mask + seat pk 派生，不进入 canonical state。
     ///
     /// 本驱动用兼容 `join_table` 入座，所以在 `start_hand` 前把所有 occupied、
     /// non-identity seat 纳入 lineage，并要求调用方给出的总公钥与派生结果一致。
@@ -139,12 +139,12 @@ impl TexasPokerPlugin {
         }
         let mut candidate = self.table.clone();
         candidate.deck_state.contributor_mask = contributor_mask;
-        candidate.sync_aggregated_pk().map_err(|error| {
+        let derived = candidate.derived_aggregated_pk().map_err(|error| {
             PluginError::Precondition(format!(
                 "cannot derive aggregate public key from occupied contributor seats: {error}"
             ))
         })?;
-        if candidate.deck_state.aggregated_pk != Some(pk) {
+        if derived != Some(pk) {
             return Err(PluginError::Precondition(
                 "registered aggregate public key does not match contributor seat lineage".into(),
             ));
@@ -336,10 +336,8 @@ impl TexasPokerPlugin {
         for (index, task) in tasks.iter().enumerate() {
             let supported = matches!(
                 task.method_kind,
-                poker_texas_air::method_kind::MethodKind::JoinAndShuffle
-                    | poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
+                poker_texas_air::method_kind::MethodKind::SubmitShuffleV2
                     | poker_texas_air::method_kind::MethodKind::SubmitReconstructDeck
-                    | poker_texas_air::method_kind::MethodKind::LeaveWithProof
                     | poker_texas_air::method_kind::MethodKind::FoldWithProof
                     | poker_texas_air::method_kind::MethodKind::SubmitPlayerRevealTokens
             );
@@ -444,7 +442,7 @@ impl TexasPokerPlugin {
     ) -> PluginResult<DispatchOutcome> {
         if texas_dispatch::CanonicalCommand::from_selector(selector).is_none() {
             return Err(PluginError::Dispatch(format!(
-                "selector {} is retired and may only be used by strict archive replay",
+                "selector {} is retired and rejected by fresh and archive replay",
                 hex::encode(selector)
             )));
         }
@@ -567,7 +565,7 @@ mod tests {
     use super::*;
     use poker_l1::object_model::ObjectID;
     use poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args;
-    use poker_l1::vm::contracts::texas_poker::types::{SeatStatus, ShuffleState};
+    use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, SeatStatus, ShuffleState};
     use poker_protocol::crypto::curve::{
         Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric,
     };
@@ -597,7 +595,7 @@ mod tests {
         permutation: &[usize],
     ) -> (ProveTask, TexasPokerTable) {
         let seat_index = pre_table.shuffle_state().derived_current_shuffler();
-        assert_ne!(seat_index, u8::MAX, "a shuffler should remain");
+        assert_ne!(seat_index, NO_SEAT, "a shuffler should remain");
         let input_cards = pre_table.deck_state.encrypted.to_vec();
         let rerandomizers: Vec<_> = (0..input_cards.len())
             .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
@@ -682,8 +680,10 @@ mod tests {
         }
         table.deck_state.encrypted = input_cards.try_into().unwrap();
         table.deck_state.contributor_mask = 0b11;
-        table.sync_aggregated_pk().unwrap();
-        assert_eq!(table.deck_state.aggregated_pk, Some(ECPoint(aggregated_pk)));
+        assert_eq!(
+            table.derived_aggregated_pk().unwrap(),
+            Some(ECPoint(aggregated_pk))
+        );
         table
             .enter_initial_shuffling(
                 ShuffleState {
@@ -716,11 +716,10 @@ mod tests {
         );
         let mut plugin = TexasPokerPlugin::new(table.clone());
         for selector in [
-            texas_dispatch::selectors::join_and_shuffle(),
-            texas_dispatch::selectors::leave_with_proof(),
-            texas_dispatch::selectors::tick(),
+            texas_dispatch::compute_method_selector("join_and_shuffle"),
+            texas_dispatch::compute_method_selector("leave_with_proof"),
             texas_dispatch::selectors::auto_fold(),
-            texas_dispatch::selectors::kick_player(),
+            texas_dispatch::compute_method_selector("kick_player"),
             texas_dispatch::selectors::reset_for_next_hand(),
         ] {
             let error = match plugin.dispatch_with_context(&context(creator), &selector, &[]) {

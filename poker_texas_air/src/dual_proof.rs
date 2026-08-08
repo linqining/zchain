@@ -29,12 +29,6 @@ use crate::airs::actions::end_without_showdown::derive_fold_outcome;
 use crate::airs::crypto::fold_with_proof::{
     FoldWithProofAir, FoldWithProofInput, FoldWithProofRow,
 };
-use crate::airs::crypto::join_and_shuffle::{
-    JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
-};
-use crate::airs::crypto::leave_with_proof::{
-    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
-};
 use crate::airs::crypto::submit_player_reveal_tokens::{
     SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
 };
@@ -49,9 +43,8 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 use crate::orchestrator::{replay_reveal_settlement_binding, validate_full_dispatch_task};
 use crate::precompile_binding::{
-    JOIN_AND_SHUFFLE_ABI_VERSION, JoinAndShuffleVerifyRequest, LEAVE_DLEQ_ABI_VERSION,
-    LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding, REVEAL_TOKEN_ABI_VERSION,
-    RevealTokenVerifyRequest, precompile_call_context,
+    LEAVE_DLEQ_ABI_VERSION, LeaveDleqVerifyRequest, PokerPrecompileId, PrecompileCallBinding,
+    REVEAL_TOKEN_ABI_VERSION, RevealTokenVerifyRequest, precompile_call_context,
 };
 use crate::proof_archive::ArchivedMethodProof;
 use crate::prove_task::{MethodInput, ProveTask};
@@ -184,7 +177,6 @@ impl DualProofBundle {
             2 => PokerPrecompileId::DleqLeave,
             3 => PokerPrecompileId::ReconstructionV3,
             4 => PokerPrecompileId::RevealToken,
-            5 => PokerPrecompileId::JoinAndShuffle,
             _ => return Err(wire_error("unknown poker precompile id")),
         };
         let abi_version = bytes[11];
@@ -250,29 +242,6 @@ impl VerifiedDualProof {
 /// Stwo proving, or serialization fails.
 pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
     match prepare(task, None)? {
-        PreparedMethod::Join {
-            air,
-            mut public_inputs,
-            row,
-            request_bytes,
-            ..
-        } => {
-            let row_values = row.to_vec();
-            public_inputs.bind_expected_trace_row(&row_values)?;
-            let trace = gen_method_trace(
-                JoinAndShuffleAir::num_columns(),
-                &row_values,
-                &JoinAndShuffleRow::padding().to_vec(),
-            )?;
-            let proof = prove_method(&trace, air, JoinAndShuffleAir::num_columns(), public_inputs)?;
-            bundle_from_stark(
-                MethodKind::JoinAndShuffle,
-                PokerPrecompileId::JoinAndShuffle,
-                JOIN_AND_SHUFFLE_ABI_VERSION,
-                &proof.stark_proof,
-                request_bytes,
-            )
-        }
         PreparedMethod::Shuffle {
             air,
             mut public_inputs,
@@ -325,29 +294,6 @@ pub fn prove_dual_proof(task: &ProveTask) -> TexasAirResult<DualProofBundle> {
                 MethodKind::SubmitReconstructDeck,
                 PokerPrecompileId::ReconstructionV3,
                 RECONSTRUCTION_V3_ABI_VERSION,
-                &proof.stark_proof,
-                request_bytes,
-            )
-        }
-        PreparedMethod::Leave {
-            air,
-            mut public_inputs,
-            row,
-            request_bytes,
-            ..
-        } => {
-            let row_values = row.to_vec();
-            public_inputs.bind_expected_trace_row(&row_values)?;
-            let trace = gen_method_trace(
-                LeaveWithProofAir::num_columns(),
-                &row_values,
-                &LeaveWithProofRow::padding().to_vec(),
-            )?;
-            let proof = prove_method(&trace, air, LeaveWithProofAir::num_columns(), public_inputs)?;
-            bundle_from_stark(
-                MethodKind::LeaveWithProof,
-                PokerPrecompileId::DleqLeave,
-                LEAVE_DLEQ_ABI_VERSION,
                 &proof.stark_proof,
                 request_bytes,
             )
@@ -424,16 +370,6 @@ pub fn dual_proof_from_archived(
     let prepared = prepare(task, None)?;
     let (method_kind, precompile_id, abi_version, request_bytes, num_columns, log_size) =
         match prepared {
-            PreparedMethod::Join {
-                request_bytes, air, ..
-            } => (
-                MethodKind::JoinAndShuffle,
-                PokerPrecompileId::JoinAndShuffle,
-                JOIN_AND_SHUFFLE_ABI_VERSION,
-                request_bytes,
-                JoinAndShuffleAir::num_columns(),
-                air.log_size,
-            ),
             PreparedMethod::Shuffle {
                 request_bytes, air, ..
             } => (
@@ -452,16 +388,6 @@ pub fn dual_proof_from_archived(
                 RECONSTRUCTION_V3_ABI_VERSION,
                 request_bytes,
                 SubmitReconstructDeckAir::num_columns(),
-                air.log_size,
-            ),
-            PreparedMethod::Leave {
-                request_bytes, air, ..
-            } => (
-                MethodKind::LeaveWithProof,
-                PokerPrecompileId::DleqLeave,
-                LEAVE_DLEQ_ABI_VERSION,
-                request_bytes,
-                LeaveWithProofAir::num_columns(),
                 air.log_size,
             ),
             PreparedMethod::Fold {
@@ -525,29 +451,6 @@ pub fn verify_dual_proof(
     validate_route(bundle.method_kind, bundle.precompile_id, bundle.abi_version)?;
 
     match prepare(task, Some(&bundle.crypto_request_bytes))? {
-        PreparedMethod::Join {
-            air,
-            mut public_inputs,
-            row,
-            binding,
-            ..
-        } => {
-            let row_values = row.to_vec();
-            public_inputs.bind_expected_trace_row(&row_values)?;
-            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
-            let proof = MethodProof {
-                stark_proof,
-                air: air.clone(),
-                log_size: air.log_size,
-                num_columns: JoinAndShuffleAir::num_columns(),
-                public_inputs: public_inputs.clone(),
-            };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
-            Ok(VerifiedDualProof {
-                receipt,
-                precompile_binding: binding,
-            })
-        }
         PreparedMethod::Shuffle {
             air,
             mut public_inputs,
@@ -586,29 +489,6 @@ pub fn verify_dual_proof(
                 air: air.clone(),
                 log_size: air.log_size,
                 num_columns: SubmitReconstructDeckAir::num_columns(),
-                public_inputs: public_inputs.clone(),
-            };
-            let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
-            Ok(VerifiedDualProof {
-                receipt,
-                precompile_binding: binding,
-            })
-        }
-        PreparedMethod::Leave {
-            air,
-            mut public_inputs,
-            row,
-            binding,
-            ..
-        } => {
-            let row_values = row.to_vec();
-            public_inputs.bind_expected_trace_row(&row_values)?;
-            let stark_proof = decode_stark(&bundle.stark_proof_bytes)?;
-            let proof = MethodProof {
-                stark_proof,
-                air: air.clone(),
-                log_size: air.log_size,
-                num_columns: LeaveWithProofAir::num_columns(),
                 public_inputs: public_inputs.clone(),
             };
             let receipt = verify_method_against_and_issue_receipt(proof, air, &public_inputs)?;
@@ -667,13 +547,6 @@ pub fn verify_dual_proof(
 }
 
 enum PreparedMethod {
-    Join {
-        air: JoinAndShuffleAir,
-        public_inputs: TexasPublicInputs,
-        row: JoinAndShuffleRow,
-        binding: PrecompileCallBinding,
-        request_bytes: Vec<u8>,
-    },
     Shuffle {
         air: SubmitShuffleV2Air,
         public_inputs: TexasPublicInputs,
@@ -685,13 +558,6 @@ enum PreparedMethod {
         air: SubmitReconstructDeckAir,
         public_inputs: TexasPublicInputs,
         row: SubmitReconstructDeckRow,
-        binding: PrecompileCallBinding,
-        request_bytes: Vec<u8>,
-    },
-    Leave {
-        air: LeaveWithProofAir,
-        public_inputs: TexasPublicInputs,
-        row: LeaveWithProofRow,
         binding: PrecompileCallBinding,
         request_bytes: Vec<u8>,
     },
@@ -740,75 +606,9 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
         task.raw_args.clone(),
     )?;
     let method_input = task.method_input()?;
+    let replay_args = task.replay_args()?;
 
     match task.method_kind {
-        MethodKind::JoinAndShuffle => {
-            let MethodInput::JoinAndShuffle { seat_index, .. } = &method_input else {
-                return Err(TexasAirError::SpecViolation(
-                    "join_and_shuffle task has the wrong MethodInput variant".into(),
-                ));
-            };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
-                    TexasAirError::SerializationError(format!(
-                        "join_and_shuffle raw args borsh: {error}"
-                    ))
-                })?;
-            if args.seat_index != *seat_index {
-                return Err(TexasAirError::SpecViolation(
-                    "join_and_shuffle seat differs between task fields".into(),
-                ));
-            }
-            let expected_request = JoinAndShuffleVerifyRequest::from_dispatch(
-                call_context(task, *seat_index, &public_inputs),
-                &task.pre_table,
-                &args,
-            )?;
-            let request_bytes =
-                require_expected_request(supplied_request, expected_request.encode()?)?;
-            let request = JoinAndShuffleVerifyRequest::decode(&request_bytes)?;
-            let binding = PrecompileCallBinding::verify_join_and_shuffle(&request)?;
-            let input = JoinAndShuffleInput {
-                seat_index: *seat_index,
-                old_deck_commitment: deck_commitment(&task.pre_table),
-                new_deck_commitment: deck_commitment(&task.post_table),
-                shuffle_phase: task.pre_table.shuffle_phase(),
-                precompile: binding.air_binding(),
-            };
-            let mut row = JoinAndShuffleRow::active(
-                &input,
-                state_root_to_air_limbs(pre_root),
-                state_root_to_air_limbs(post_root),
-                task.table_id,
-                task.hand_id,
-                task.call_seq,
-                u64::from(task.pre_table.call_seq),
-                u64::from(task.post_table.call_seq),
-                task.pre_table.shuffle_state().completed_mask.count_ones() as u8,
-                task.post_table.shuffle_state().completed_mask.count_ones() as u8,
-            );
-            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-            let air = JoinAndShuffleAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: state_root_to_air_limbs(pre_root),
-                post_state_root: state_root_to_air_limbs(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: u64::from(task.pre_table.call_seq),
-                post_version: u64::from(task.post_table.call_seq),
-            };
-            public_inputs.precompile_binding = Some(binding.clone());
-            Ok(PreparedMethod::Join {
-                air,
-                public_inputs,
-                row,
-                binding,
-                request_bytes,
-            })
-        }
         MethodKind::SubmitShuffleV2 => {
             let MethodInput::SubmitShuffleV2 { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
@@ -816,7 +616,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_shuffle_v2 raw args borsh: {error}"
                     ))
@@ -828,9 +628,8 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
             }
             let aggregated_pk = task
                 .pre_table
-                .deck_state
-                .aggregated_pk
-                .as_ref()
+                .derived_aggregated_pk()
+                .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation(
                         "submit_shuffle_v2 requires an aggregated public key".into(),
@@ -911,7 +710,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_reconstruct_deck raw args borsh: {error}"
                     ))
@@ -982,98 +781,6 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 request_bytes,
             })
         }
-        MethodKind::LeaveWithProof => {
-            let MethodInput::LeaveWithProof { seat_index } = &method_input else {
-                return Err(TexasAirError::SpecViolation(
-                    "leave_with_proof task has the wrong MethodInput variant".into(),
-                ));
-            };
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
-                    TexasAirError::SerializationError(format!(
-                        "leave_with_proof raw args borsh: {error}"
-                    ))
-                })?;
-            if args.seat_index != *seat_index {
-                return Err(TexasAirError::SpecViolation(
-                    "leave_with_proof seat differs between task fields".into(),
-                ));
-            }
-            let player_pk = task
-                .pre_table
-                .seats
-                .get(usize::from(*seat_index))
-                .ok_or_else(|| {
-                    TexasAirError::SpecViolation(
-                        "leave_with_proof seat is outside the canonical pre-table".into(),
-                    )
-                })?
-                .pk()
-                .copied()
-                .ok_or_else(|| {
-                    TexasAirError::SpecViolation(
-                        "leave_with_proof seat has no live Mental Poker key".into(),
-                    )
-                })?;
-            let call_context = call_context(task, *seat_index, &public_inputs);
-            let expected_request = LeaveDleqVerifyRequest::new(
-                call_context,
-                task.pre_table.deck_state.encrypted.to_vec(),
-                args.output_cards,
-                player_pk,
-                args.leave_proof,
-            );
-            let expected_bytes = expected_request.encode()?;
-            let request_bytes = require_expected_request(supplied_request, expected_bytes)?;
-            let request = LeaveDleqVerifyRequest::decode(&request_bytes)?;
-            let binding = PrecompileCallBinding::verify_leave_dleq(&request)?;
-            let input = LeaveWithProofInput {
-                seat_index: *seat_index,
-                leave_kind: 0,
-                shuffle_phase: task.pre_table.shuffle_phase(),
-                precompile: binding.air_binding(),
-            };
-            let post_completed_count = u8::try_from(
-                task.post_table.shuffle_state().completed_mask.count_ones(),
-            )
-            .map_err(|_| {
-                TexasAirError::SpecViolation(
-                    "leave_with_proof completed player count exceeds u8".into(),
-                )
-            })?;
-            let mut row = LeaveWithProofRow::active(
-                &input,
-                state_root_to_air_limbs(pre_root),
-                state_root_to_air_limbs(post_root),
-                task.table_id,
-                task.hand_id,
-                task.call_seq,
-                u64::from(task.pre_table.call_seq),
-                u64::from(task.post_table.call_seq),
-                post_completed_count,
-            );
-            row.common.pre_pot = crate::airs::common::u64_to_m31_limbs(task.pre_table.pot);
-            row.common.post_pot = crate::airs::common::u64_to_m31_limbs(task.post_table.pot);
-            let air = LeaveWithProofAir {
-                log_size: MIN_LOG_SIZE,
-                input,
-                pre_state_root: state_root_to_air_limbs(pre_root),
-                post_state_root: state_root_to_air_limbs(post_root),
-                table_id: task.table_id,
-                hand_id: task.hand_id,
-                call_seq: task.call_seq,
-                pre_version: u64::from(task.pre_table.call_seq),
-                post_version: u64::from(task.post_table.call_seq),
-            };
-            public_inputs.precompile_binding = Some(binding.clone());
-            Ok(PreparedMethod::Leave {
-                air,
-                public_inputs,
-                row,
-                binding,
-                request_bytes,
-            })
-        }
         MethodKind::FoldWithProof => {
             let MethodInput::FoldWithProof { seat_index } = &method_input else {
                 return Err(TexasAirError::SpecViolation(
@@ -1081,7 +788,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "fold_with_proof raw args borsh: {error}"
                     ))
@@ -1176,7 +883,7 @@ fn prepare(task: &ProveTask, supplied_request: Option<&[u8]>) -> TexasAirResult<
                 ));
             };
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_player_reveal_tokens raw args borsh: {error}"
                     ))
@@ -1329,10 +1036,6 @@ fn validate_route(
             PokerPrecompileId::ReconstructionV3,
             RECONSTRUCTION_V3_ABI_VERSION
         ) | (
-            MethodKind::LeaveWithProof,
-            PokerPrecompileId::DleqLeave,
-            LEAVE_DLEQ_ABI_VERSION
-        ) | (
             MethodKind::FoldWithProof,
             PokerPrecompileId::DleqLeave,
             LEAVE_DLEQ_ABI_VERSION
@@ -1340,10 +1043,6 @@ fn validate_route(
             MethodKind::SubmitPlayerRevealTokens,
             PokerPrecompileId::RevealToken,
             REVEAL_TOKEN_ABI_VERSION
-        ) | (
-            MethodKind::JoinAndShuffle,
-            PokerPrecompileId::JoinAndShuffle,
-            JOIN_AND_SHUFFLE_ABI_VERSION
         )
     );
     if !valid {

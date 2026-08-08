@@ -9,7 +9,7 @@
 use poker_l1::vm::contracts::texas_poker::constants::{
     ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN,
 };
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 
@@ -17,7 +17,7 @@ use crate::airs::common::{CommonConstraints, ZERO, compute_add_carries, u64_to_m
 use crate::error::{TexasAirError, TexasAirResult};
 
 /// Trace sentinel for current_turn None after a completed betting round.
-pub const NO_CURRENT_TURN: u8 = u8::MAX;
+pub const NO_CURRENT_TURN: u8 = NO_SEAT;
 
 /// Number of shared round-completion columns.
 pub const NUM_COLUMNS: usize = 7;

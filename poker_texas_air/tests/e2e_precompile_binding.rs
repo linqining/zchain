@@ -8,8 +8,7 @@ use poker_l1::vm::contracts::texas_poker::constants::{
     RIT_MODE_TWICE, ROUND_PREFLOP, ROUND_SHOWDOWN, ROUND_TURN,
 };
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, LeaveWithProofArgs, SubmitReconstructDeckArgs, SubmitRevealTokensArgs,
-    SubmitShuffleV2Args,
+    self as texas_dispatch, SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
     DecryptedCard, ReconstructState, RevealAssignment, RevealPurpose, RevealTarget,
@@ -23,16 +22,12 @@ use poker_protocol::precompile::{
 };
 use poker_protocol::precompile_abi::TranscriptId;
 use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reconstruction::{
     RECONSTRUCTION_V3_PROOF_LABEL, ReconstructProofV3,
 };
 use poker_protocol::zk_shuffle::reveal_token_proof::{REVEAL_TOKEN_PROOF_LABEL, RevealTokenProof};
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
-};
-use poker_texas_air::airs::crypto::leave_with_proof::{
-    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
 };
 use poker_texas_air::airs::crypto::submit_player_reveal_tokens::{
     SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
@@ -47,8 +42,7 @@ use poker_texas_air::deck_commitment::deck_commitment;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::orchestrator::Orchestrator;
 use poker_texas_air::precompile_binding::{
-    LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
-    precompile_call_context,
+    PrecompileCallBinding, RevealTokenVerifyRequest, precompile_call_context,
 };
 use poker_texas_air::prove_task::{DispatchOutput, ProveTask};
 use poker_texas_air::prover::{MethodProof, prove_method};
@@ -176,7 +170,7 @@ fn fixture(
     );
     table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
-    table.sync_aggregated_pk().unwrap();
+    table.derived_aggregated_pk().unwrap();
     table
         .enter_initial_shuffling(
             ShuffleState {
@@ -308,194 +302,6 @@ fn changing_a_request_digest_limb_invalidates_the_statement() {
     assert!(verify_method_against(proof, air, &public_inputs).is_err());
 }
 
-fn leave_fixture(
-    statement_call_seq: u32,
-    request_scope_call_seq: u32,
-) -> (
-    MethodProof<LeaveWithProofAir>,
-    LeaveWithProofAir,
-    TexasPublicInputs,
-) {
-    let table_id = 61;
-    let hand_id = 9;
-    let seat_index = 1;
-    let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
-    let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
-    let input_cards: Vec<_> = (0..52)
-        .map(|i| {
-            let plaintext = Bls12381Curve::hash_to_curve(format!("air-leave/card/{i}").as_bytes());
-            ElGamalCiphertextGeneric::encrypt(
-                &plaintext,
-                &public_key,
-                &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
-            )
-        })
-        .collect();
-    let output_cards: Vec<_> = input_cards
-        .iter()
-        .map(|ciphertext| ElGamalCiphertextGeneric {
-            c1: ciphertext.c1,
-            c2: ciphertext.decrypt(&secret_key),
-        })
-        .collect();
-    let leave_proof = DLEqProof::<Bls12381Curve, LeaveKind>::prove(
-        &input_cards,
-        &output_cards,
-        &secret_key,
-        &public_key,
-        &mut utils::new_leave_transcript(),
-    );
-
-    let player = [0x61; 20];
-    let mut table = TexasPokerTable::new(
-        ObjectID::new([0xF5; 20], table_id),
-        "precompile-binding-leave".into(),
-        [0xC0; 20],
-        4,
-        50,
-        100,
-    );
-    table.call_seq = statement_call_seq
-        .checked_sub(1)
-        .expect("statement call sequence must be non-zero");
-    table.hand_id = hand_id;
-    seat_fixture::set_player(&mut table.seats[usize::from(seat_index)], player);
-    table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
-    seat_fixture::set_pk(
-        &mut table.seats[usize::from(seat_index)],
-        ECPoint(public_key),
-    );
-    // Keep two canonical participants pending after the legacy completed shuffler leaves.
-    // Otherwise normalization would observe an empty completed shuffle and attempt to deal a
-    // hand with zero players, which is not a valid archive fixture.
-    for other_seat in [0usize, 2usize] {
-        seat_fixture::set_player(&mut table.seats[other_seat], [(other_seat as u8) + 1; 20]);
-        table.seats[other_seat].set_status(SeatStatus::Active);
-    }
-    table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
-    table.deck_state.contributor_mask = 1u16 << seat_index;
-    table.sync_aggregated_pk().unwrap();
-    table
-        .enter_initial_shuffling(
-            ShuffleState {
-                pending_mask: (1u16 << 0) | (1u16 << 2),
-                completed_mask: 1u16 << seat_index,
-            },
-            FIXTURE_TIMESTAMP_MS,
-        )
-        .unwrap();
-    let raw_args = borsh::to_vec(&LeaveWithProofArgs {
-        seat_index,
-        output_cards: output_cards.clone(),
-        leave_proof: leave_proof.clone(),
-    })
-    .expect("leave args should encode");
-    let task = dispatch_task(
-        table,
-        player,
-        texas_dispatch::selectors::leave_with_proof(),
-        raw_args,
-    );
-    assert_eq!(task.call_seq, statement_call_seq);
-    let mut public_inputs = canonical_public_inputs(&task);
-
-    let call_context = precompile_call_context(
-        MethodKind::LeaveWithProof,
-        seat_index,
-        table_id,
-        hand_id,
-        request_scope_call_seq,
-        public_inputs.pre_version,
-        public_inputs.post_version,
-        public_inputs.pre_state_root,
-        public_inputs.post_state_root,
-        public_inputs.dispatch_call_digest,
-    );
-    let request = LeaveDleqVerifyRequest::new(
-        call_context,
-        input_cards,
-        output_cards,
-        ECPoint(public_key),
-        leave_proof,
-    );
-    let binding = PrecompileCallBinding::verify_leave_dleq(&request).unwrap();
-    let input = LeaveWithProofInput {
-        seat_index,
-        leave_kind: 0,
-        shuffle_phase: task.pre_table.shuffle_phase(),
-        precompile: binding.air_binding(),
-    };
-    let pre_root = state_root_to_air_limbs(public_inputs.pre_state_root);
-    let post_root = state_root_to_air_limbs(public_inputs.post_state_root);
-    let row = LeaveWithProofRow::active(
-        &input,
-        pre_root,
-        post_root,
-        table_id,
-        hand_id,
-        statement_call_seq,
-        public_inputs.pre_version,
-        public_inputs.post_version,
-        u8::try_from(task.post_table.shuffle_state().completed_mask.count_ones())
-            .expect("completed player count should fit u8"),
-    );
-    let trace = gen_method_trace(
-        LeaveWithProofAir::num_columns(),
-        &row.to_vec(),
-        &LeaveWithProofRow::padding().to_vec(),
-    )
-    .unwrap();
-    let air = LeaveWithProofAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: pre_root,
-        post_state_root: post_root,
-        table_id,
-        hand_id,
-        call_seq: statement_call_seq,
-        pre_version: public_inputs.pre_version,
-        post_version: public_inputs.post_version,
-    };
-    public_inputs.precompile_binding = Some(binding);
-    public_inputs
-        .bind_expected_trace_row(&row.to_vec())
-        .unwrap();
-    let proof = prove_method(
-        &trace,
-        air.clone(),
-        LeaveWithProofAir::num_columns(),
-        public_inputs.clone(),
-    )
-    .unwrap();
-    (proof, air, public_inputs)
-}
-
-#[test]
-fn honest_leave_dleq_receipt_is_bound_to_exact_dispatch() {
-    let (proof, air, public_inputs) = leave_fixture(5, 5);
-    verify_method_against(proof, air, &public_inputs).unwrap();
-}
-
-#[test]
-fn leave_dleq_fails_closed_without_a_verifier_binding() {
-    let (proof, air, mut public_inputs) = leave_fixture(5, 5);
-    public_inputs.precompile_binding = None;
-    assert!(verify_method_against(proof, air, &public_inputs).is_err());
-}
-
-#[test]
-fn leave_dleq_receipt_cannot_cross_call_sequence_scope() {
-    let (proof, air, public_inputs) = leave_fixture(5, 6);
-    assert!(verify_method_against(proof, air, &public_inputs).is_err());
-}
-
-#[test]
-fn changing_leave_dleq_digest_columns_invalidates_the_statement() {
-    let (proof, mut air, public_inputs) = leave_fixture(5, 5);
-    air.input.precompile.request_digest[7] += stwo::core::fields::m31::M31::from(1u32);
-    assert!(verify_method_against(proof, air, &public_inputs).is_err());
-}
-
 #[derive(Clone, Copy)]
 enum RevealRequestVariant {
     Honest,
@@ -575,7 +381,7 @@ fn reveal_fixture(
     );
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
-    table.sync_aggregated_pk().unwrap();
+    table.derived_aggregated_pk().unwrap();
     table
         .enter_revealing(
             ROUND_PREFLOP,
@@ -856,7 +662,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
     table.deck_state.contributor_mask = 1u16 << 1;
-    table.sync_aggregated_pk().unwrap();
+    table.derived_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = encrypted_cards
         .iter()
         .take(2)
@@ -905,13 +711,16 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     assert!(task.post_table.reveal_assignments().is_empty());
 
     let mut replayed = task.pre_table.clone();
-    let result = texas_dispatch::dispatch(
-        &task.context,
-        &mut replayed,
-        &task.selector(),
+    let replay_args = texas_dispatch::replay_dispatch_args(
+        task.method_kind as u8,
         &task.raw_args,
+        &task.context,
+        &task.pre_table,
     )
     .unwrap();
+    let result =
+        texas_dispatch::dispatch(&task.context, &mut replayed, &task.selector(), &replay_args)
+            .unwrap();
     let output: DispatchOutput = borsh::from_slice(&result.return_value).unwrap();
     assert!(
         poker_texas_air::settlement_binding::SettlementPlanBinding::from_events(&output.events)
@@ -962,7 +771,7 @@ fn honest_reconstruction_v3_receipt_is_bound_to_the_air() {
     seat_fixture::set_stack(&mut table.seats[1], 1_000);
     seat_fixture::set_pk(&mut table.seats[1], ECPoint(public_key));
     table.deck_state.contributor_mask = 1u16 << 1;
-    table.sync_aggregated_pk().unwrap();
+    table.derived_aggregated_pk().unwrap();
     table.deck_state.decrypted_cards = readable_cards
         .iter()
         .cloned()

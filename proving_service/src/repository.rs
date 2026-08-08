@@ -22,7 +22,7 @@ use poker_texas_air::prove_task::ProveTask;
 use crate::proof_package::MAX_SERVICE_PROOF_PACKAGE_BYTES;
 use crate::{ServiceError, ServiceResult};
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 
 /// A table state that can be rehydrated into a `TexasPokerPlugin` after a restart.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]

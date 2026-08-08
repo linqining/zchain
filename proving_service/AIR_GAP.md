@@ -71,29 +71,28 @@ throughput，不会放宽现有持久化 fail-closed 规则。
 - production trace-visible u64 金额已统一为 verifier-reconstructed 4×16-bit limbs；资金运算
   使用完整 carry/borrow。此次补齐了 check 高 limb、kick refund checked-add、start-hand ante
   与 pot checked-add，以及 auto/force-fold、addon/rebuy、reconstruct、create/join/leave/reset、
-  join-and-shuffle/submit-shuffle/leave-with-proof 的真实 pot 投影；不改变 pot 的路径使用完整
+  submit-shuffle/fold-with-proof 的真实 pot 投影；不改变 pot 的路径使用完整
   4-limb equality，create/reset 的 canonical post pot 必须为零。
-- `tick` 的 start-hand、仅启动 timer、shuffle/reconstruct/reveal 修复分支仍依赖 canonical
+- `advance_deadline` 的 shuffle/reconstruct/reveal 修复分支仍依赖 canonical
   native replay 与完整 table/plan digest；当前四段 AIR 对这些 lifecycle 变化保持 inactive，不能
   解释成独立执行了 start-hand、deck rebuild 或 reconstruct 算法。若要消除恶意 host 信任，需新增
   lifecycle-specific component/verifier program。
 - `reset_for_next_hand` 的完整座位与资金约束位于 durable 四段 component bundle；裸
-  method STARK 不能脱离 bundle 当作完整重置证明。`join_and_shuffle` / `leave_with_proof`
-  则是 method STARK + crypto dual-proof package，不携带四段 component proof；完整 deck/seat
-  语义仍由 canonical native replay 和 precompile receipt 绑定。
+  method STARK 不能脱离 bundle 当作完整重置证明。退休的 `join_and_shuffle` / `leave_with_proof`
+  已从 source/task/AIR/package 全链路删除；加入、fresh-deck shuffle、WAITING 离场与 active layer
+  removal 分别由 `join_table`、`submit_shuffle_v2`、`leave_table`、`fold_with_proof` 承担。
 - `start_hand` / `reset_for_next_hand` 的零参数 dispatch 已 fail-closed 拒绝尾随 bytes，
   避免同一授权状态转换存在多个非 canonical 调用编码。
 - showdown settlement projection 严格校验唯一 `HandSettled` marker、固定升序 winners 与
   award 聚合，以及 `RakeCollected` 的唯一性和 pot/rake 数值；不完整或错配的事件集合不会
   进入四段 component plan。
-- `request_leave_after_hand` 已有可签发 receipt 的独立 toggle AIR；`fold_with_proof`
+- `set_leave_after_hand` 已有可签发 receipt 的独立幂等 AIR；`fold_with_proof`
   的 mid-round 与 clean last-opponent settlement 路径均绑定 native DLEq receipt、前后牌组
   commitment 与 canonical fold outcome。terminal reset 同时处理 pending addon/leave 时，
   完整生产 archive 必须携带四段 component proof bundle。
-- stage-3 dual-proof package 已覆盖全部六条 crypto route：`fold_with_proof`、
-  `join_and_shuffle`、
-  `submit_shuffle_v2`、`leave_with_proof`、`submit_player_reveal_tokens` 与
-  `submit_reconstruct_deck`。每条 route 都先对 canonical request 执行一次 host-native
+- stage-3 dual-proof package 已覆盖全部四条 active crypto route：`fold_with_proof`、
+  `submit_shuffle_v2`、`submit_player_reveal_tokens` 与 `submit_reconstruct_deck`。每条 route
+  都先对 canonical request 执行一次 host-native
   BLS12-381 verifier，再签发字段私有、无反序列化入口的 binding；AIR verifier 只重算
   canonical bytes、ABI/backend、request/receipt digest 与 table/hand/call/state scope，
   不重复同一昂贵密码学验证。这不是 BLS12-381 verifier AIR，也不是递归 proof。

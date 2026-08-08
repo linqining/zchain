@@ -15,8 +15,8 @@
 //! - `settlement`：确定性结算计划（side-pot/rake/runout/winner/award）
 //! - `events`：40 种事件类型枚举
 //! - `types`：核心数据结构（TexasPokerTable/Seat/DeckState/ShuffleState/...）
-//! - `state_machine`：状态机推进 + tick + reveal/reconstruct 编排
-//! - `dispatch`：23 个 method selector 路由
+//! - `state_machine`：状态机推进 + deadline + reveal/reconstruct 编排
+//! - `dispatch`：19 个 active method selector 路由
 //! - `utils`：Mental Poker 密码学适配层（包 `poker_protocol` crate，提供 G1/Scalar 自由函数 + verify_or_skip）
 //!
 //! # Mental Poker 协议
@@ -75,14 +75,16 @@ pub const TEXAS_POKER_GOVERNANCE_OBJECT_TYPE: &str = "TexasPokerGovernancePolicy
 /// duplicate flat fields in the hot table state. Version 25 makes the tagged `Seat` enum the
 /// physical runtime and resolved-snapshot representation; version 27 replaces the redundant
 /// numeric reveal phase with a typed purpose whose exact board street comes from `HandPhase`.
+/// Version 28 replaces the byte-wide `0xff` missing-seat marker with the canonical four-bit
+/// sentinel `0x0f`.
 /// Incompatible older layouts are deliberately unsupported.
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 27;
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 28;
 
 /// ObjectDb-only hot-state schema.
 ///
-/// Runtime/proof snapshots use resolved schema v27. The v28 ObjectDb encoding combines immutable
+/// Runtime/proof snapshots use resolved schema v28. The v29 ObjectDb encoding combines immutable
 /// context commitments with the same physical tagged-seat and typed-reveal representation.
-pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 28;
+pub const TEXAS_POKER_HOT_STATE_SCHEMA_VERSION: u8 = 29;
 
 /// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;

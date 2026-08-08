@@ -80,7 +80,7 @@ pub struct AuthenticatedObjectSnapshot {
 /// Complete four-object snapshot of one resolved Texas table endpoint.
 #[derive(Debug, Clone, borsh::BorshSerialize, borsh::BorshDeserialize)]
 pub struct TableSnapshot {
-    /// Mutable hot-v28 table object.
+    /// Mutable hot-v29 table object.
     pub hot_table: AuthenticatedObjectSnapshot,
     /// Immutable display metadata opening.
     pub metadata: AuthenticatedObjectSnapshot,
@@ -413,8 +413,11 @@ pub fn build_anchor_from_consensus(
     let pre_table = verify_table_inclusion(pre_snapshot, &pre_block_header.state_root)?;
     let post_table = verify_table_inclusion(post_snapshot, &post_block_header.state_root)?;
 
-    // 3. 逐调用：重建 DispatchContext、认证 tx ∈ tx_root、重算 digest。
+    // 3. 逐调用：重建 DispatchContext、认证 tx ∈ tx_root、重算 digest，并从认证
+    // pre-state 顺序重放旧 ABI。actor-less canonicalization 只有在旧 player/seat 声明
+    // 已经通过原生 dispatch 校验后才安全。
     let mut dispatch_call_digests = Vec::with_capacity(calls.len());
+    let mut replay_table = pre_table.clone();
     for call in calls {
         if call.tx.chain_id != chain_id {
             return Err(TexasAirError::ConsensusAnchor(format!(
@@ -429,6 +432,41 @@ pub fn build_anchor_from_consensus(
             &pre_block_header.public_tx_root,
             &pre_block_header.gameturn_tx_root,
         )?;
+        let contract_call = call.tx.contract_call.as_ref().ok_or_else(|| {
+            TexasAirError::ConsensusAnchor("dispatch call tx has no contract_call".into())
+        })?;
+        let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+            &context,
+            &mut replay_table,
+            &contract_call.method_selector,
+            &contract_call.args,
+        )
+        .map_err(|error| {
+            TexasAirError::ConsensusAnchor(format!(
+                "authenticated Texas dispatch cannot replay from anchored state: {error}"
+            ))
+        })?;
+        let output: crate::prove_task::DispatchOutput = borsh::from_slice(&result.return_value)
+            .map_err(|error| {
+                TexasAirError::SerializationError(format!(
+                    "authenticated dispatch output borsh: {error}"
+                ))
+            })?;
+        let task = output.prove_task.ok_or_else(|| {
+            TexasAirError::ConsensusAnchor(
+                "authenticated dispatch did not produce a state-changing proof task".into(),
+            )
+        })?;
+        let replay_digest = crate::prove_task::dispatch_call_digest(
+            &task.context,
+            &task.selector(),
+            &task.raw_args,
+        )?;
+        if replay_digest != digest {
+            return Err(TexasAirError::ConsensusAnchor(
+                "authenticated legacy dispatch does not match its canonical proof payload".into(),
+            ));
+        }
         dispatch_call_digests.push(digest);
     }
 
@@ -453,6 +491,11 @@ pub fn build_anchor_from_consensus(
             "post table call_seq {} does not equal pre call_seq {} + authenticated call count {}",
             post_table.call_seq, pre_table.call_seq, call_count
         )));
+    }
+    if replay_table != post_table {
+        return Err(TexasAirError::ConsensusAnchor(
+            "authenticated dispatch sequence does not reproduce the anchored post table".into(),
+        ));
     }
     let hand_id = post_table.hand_id;
     let first_call_seq = pre_table.call_seq.checked_add(1).ok_or_else(|| {
@@ -486,7 +529,7 @@ mod tests {
     use borsh::BorshDeserialize;
     use poker_l1::consensus::ValidatorEntry;
     use poker_l1::consensus::bullshark::assemble_commit_certificate;
-    use poker_l1::object_model::{ObjectID, ObjectStore, Ownership};
+    use poker_l1::object_model::{ObjectID, ObjectStore};
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::signature::tagged_pubkey::{CURRENT_VERSION, SignatureScheme};
     use poker_l1::transaction::{ContractCall, Gas, RouteHint, Transaction, TxLane};
@@ -671,34 +714,64 @@ mod tests {
 
     fn build_fixture(selector_a: [u8; 32], args_a: Vec<u8>) -> ConsensusFixture {
         let (validators, secrets) = make_validators(5); // 2/3 of 5 = 4
-        let table_id = ObjectID::new([0u8; 20], 1);
-
-        // 构造两个 table snapshot（pre/post），call_seq 不同。
-        let mut table = TexasPokerTable::new(table_id, "test".into(), [0x77; 20], 2, 50, 100);
-        table.hand_id = 1;
-        table.call_seq = 10;
-
-        // pre snapshot：四个对象共享同一个 authenticated global state root。
-        let (pre_state_root, pre_snapshot) = build_table_snapshot(&table);
-
-        // post snapshot：call_seq +1，单独 ObjectDb。
-        let mut post_table = table.clone();
-        post_table.call_seq += 1;
-        let (post_state_root, post_snapshot) = build_table_snapshot(&post_table);
-
-        // 一个 dispatch call（GameTurn 通道）。
         let caller_tagged = validators[0].pubkey.clone();
-        let tx = make_dispatch_tx(&caller_tagged, &secrets[0], selector_a, args_a.clone());
-        let (gameturn_tx_root, tx_paths) = build_tx_smt(std::slice::from_ref(&tx));
-
-        // 重算预期 digest（与 build_anchor 内部逻辑独立地重算）。
+        let caller = poker_l1::account::derive_address(&caller_tagged);
         let ctx = DispatchContext {
-            caller: poker_l1::account::derive_address(&caller_tagged),
-            caller_pubkey: caller_tagged,
+            caller,
+            caller_pubkey: caller_tagged.clone(),
             chain_id: poker_l1::DEFAULT_CHAIN_ID,
             block_height: 100,
             block_timestamp: 1_000_000,
         };
+        let table_id = ObjectID::new([0u8; 20], 1);
+
+        // 构造一个可以真实执行 start_hand 的 canonical pre-state。
+        let mut table = TexasPokerTable::new(table_id, "test".into(), caller, 2, 50, 100);
+        table.hand_id = 1;
+        table.call_seq = 10;
+        table.seats[0] = poker_l1::vm::contracts::texas_poker::types::Seat::occupied(
+            caller,
+            1_000,
+            poker_protocol::crypto::types::ECPoint(
+                poker_l1::vm::contracts::texas_poker::utils::g1_generator()
+                    * poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(1),
+            ),
+            poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active,
+        )
+        .unwrap();
+        table.seats[1] = poker_l1::vm::contracts::texas_poker::types::Seat::occupied(
+            [0x22; 20],
+            1_000,
+            poker_protocol::crypto::types::ECPoint(
+                poker_l1::vm::contracts::texas_poker::utils::g1_generator()
+                    * poker_l1::vm::contracts::texas_poker::utils::scalar_from_u64(2),
+            ),
+            poker_l1::vm::contracts::texas_poker::types::SeatStatus::Active,
+        )
+        .unwrap();
+        table.chip_pool = 2_000;
+        table.add_deck_contributor(0).unwrap();
+        table.add_deck_contributor(1).unwrap();
+
+        // pre snapshot：四个对象共享同一个 authenticated global state root。
+        let (pre_state_root, pre_snapshot) = build_table_snapshot(&table);
+
+        // post snapshot：由真实 authenticated dispatch 产生。
+        let mut post_table = table.clone();
+        poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
+            &ctx,
+            &mut post_table,
+            &selector_a,
+            &args_a,
+        )
+        .unwrap();
+        let (post_state_root, post_snapshot) = build_table_snapshot(&post_table);
+
+        // 一个 dispatch call（GameTurn 通道）。
+        let tx = make_dispatch_tx(&caller_tagged, &secrets[0], selector_a, args_a.clone());
+        let (gameturn_tx_root, tx_paths) = build_tx_smt(std::slice::from_ref(&tx));
+
+        // 重算预期 digest（与 build_anchor 内部逻辑独立地重算）。
         let expected_digest =
             dispatch_call_digest_from_legacy_args(&ctx, &selector_a, &args_a).unwrap();
 
@@ -790,7 +863,7 @@ mod tests {
 
         // 端点元数据来自 table snapshot。
         assert_eq!(anchor.table_id(), f.table.id.creation_nonce);
-        assert_eq!(anchor.hand_id(), f.table.hand_id);
+        assert_eq!(anchor.hand_id(), f.table.hand_id + 1);
         assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         // dispatch digests 与独立重算一致。
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
@@ -856,7 +929,7 @@ mod tests {
             .expect("authenticated material must rebuild an anchor");
 
         assert_eq!(anchor.table_id(), f.table.id.creation_nonce);
-        assert_eq!(anchor.hand_id(), f.table.hand_id);
+        assert_eq!(anchor.hand_id(), f.table.hand_id + 1);
         assert_eq!(anchor.first_call_seq(), f.table.call_seq + 1);
         assert_eq!(anchor.dispatch_call_digests(), &f.expected_digests[..]);
     }

@@ -61,7 +61,7 @@ pub struct TexasPokerPrecompile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ContextStorageState {
-    /// The table was already encoded as hot v28 and all three openings were loaded.
+    /// The table was already encoded as hot v29 and all three openings were loaded.
     Existing,
     /// This is the first create-table call.
     NewTable,
@@ -233,7 +233,7 @@ impl Precompile for TexasPokerPrecompile {
 
         let table_id = reserved::texas_poker_contract_id();
 
-        // ObjectDb production state is hot v28 only. Resolved-v27 snapshots remain valid proof
+        // ObjectDb production state is hot v29 only. Resolved-v28 snapshots remain valid proof
         // payloads, but accepting them here would silently bypass independently authenticated
         // metadata/rules/governance openings.
         let (mut table, context_state) = match object_db.read(&table_id) {
@@ -247,7 +247,7 @@ impl Precompile for TexasPokerPrecompile {
                 }
                 if !crate::vm::contracts::texas_poker::state_codec::is_hot_table_state(&obj.data) {
                     return Err(PokerL1Error::Serialization(
-                        "Texas ObjectDb table must use hot v28 state".into(),
+                        "Texas ObjectDb table must use hot v29 state".into(),
                     ));
                 }
                 let openings = Self::read_context_openings(object_db, table_id)?;
@@ -447,9 +447,6 @@ impl Precompile for TexasPokerPrecompile {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use blstrs::G1Projective;
-    use group::Group;
-    use poker_protocol::crypto::ECPoint;
 
     use crate::economics::{
         TREASURY_SYSTEM_ADDRESS, coin_output_nonce, decode_native_coin, genesis_mint,
@@ -556,12 +553,24 @@ mod tests {
         assert!(precompile.supports_selector(&selectors::create_table()));
         assert!(precompile.supports_selector(&selectors::join_table()));
         assert!(precompile.supports_selector(&selectors::fold()));
-        assert!(!precompile.supports_selector(&selectors::tick()));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector("tick")
+        ));
         assert!(precompile.supports_selector(&selectors::advance_deadline()));
-        assert!(!precompile.supports_selector(&selectors::kick_player()));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector("kick_player")
+        ));
         assert!(precompile.supports_selector(&selectors::kick_player_v2()));
-        assert!(!precompile.supports_selector(&selectors::join_and_shuffle()));
-        assert!(!precompile.supports_selector(&selectors::leave_with_proof()));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector(
+                "join_and_shuffle",
+            )
+        ));
+        assert!(!precompile.supports_selector(
+            &crate::vm::contracts::texas_poker::dispatch::compute_method_selector(
+                "leave_with_proof",
+            )
+        ));
         assert!(!precompile.supports_selector(&selectors::auto_fold()));
         assert!(!precompile.supports_selector(&selectors::reset_for_next_hand()));
     }
@@ -917,7 +926,7 @@ mod tests {
                 &mut legacy_db,
             )
             .unwrap_err();
-        assert!(error.to_string().contains("must use hot v28 state"));
+        assert!(error.to_string().contains("must use hot v29 state"));
 
         let mut failed_create_db = ObjectDb::open_inmemory().unwrap();
         let invalid_args = borsh::to_vec(&CreateTableArgs {

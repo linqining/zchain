@@ -1,11 +1,11 @@
-//! Method AIRs — 23 个已启用的专用 AIR。
+//! Method AIRs — 21 个稳定 discriminant 对应的专用 AIR。
 //!
 //! ## 分类
 //!
 //! - [`lifecycle`] — A 档：6 个表台生命周期方法
 //! - [`actions`] — B 档：9 个已启用玩家动作方法
 //! - [`funds`] — B+ 档：2 个资金动作方法（addon/rebuy）
-//! - [`crypto`] — C 档：6 个密码学协议方法
+//! - [`crypto`] — C 档：4 个 active 密码学协议方法
 //!
 //! ## 通用模板
 //!
@@ -132,9 +132,9 @@ impl_validated_texas_air!(
     lifecycle::validation::validate_start_hand
 );
 impl_validated_texas_air!(
-    lifecycle::tick::TickAir,
-    MethodKind::Tick,
-    lifecycle::tick::validate_public_inputs
+    lifecycle::advance_deadline::AdvanceDeadlineAir,
+    MethodKind::AdvanceDeadline,
+    lifecycle::advance_deadline::validate_public_inputs
 );
 impl_validated_texas_air!(
     lifecycle::reset_for_next_hand::ResetForNextHandAir,
@@ -182,9 +182,9 @@ impl_validated_texas_air!(
     actions::validation::validate_kick_player
 );
 impl_validated_texas_air!(
-    actions::request_leave_after_hand::RequestLeaveAfterHandAir,
-    MethodKind::RequestLeaveAfterHand,
-    actions::validation::validate_request_leave_after_hand
+    actions::set_leave_after_hand::SetLeaveAfterHandAir,
+    MethodKind::SetLeaveAfterHand,
+    actions::validation::validate_set_leave_after_hand
 );
 impl_validated_texas_air!(
     funds::addon::AddonAir,
@@ -200,16 +200,6 @@ impl_validated_texas_air!(
     crypto::fold_with_proof::FoldWithProofAir,
     MethodKind::FoldWithProof,
     crypto::validation::validate_fold_with_proof
-);
-impl_validated_texas_air!(
-    crypto::join_and_shuffle::JoinAndShuffleAir,
-    MethodKind::JoinAndShuffle,
-    crypto::validation::validate_join_and_shuffle
-);
-impl_validated_texas_air!(
-    crypto::leave_with_proof::LeaveWithProofAir,
-    MethodKind::LeaveWithProof,
-    crypto::validation::validate_leave_with_proof
 );
 impl_validated_texas_air!(
     crypto::submit_shuffle_v2::SubmitShuffleV2Air,

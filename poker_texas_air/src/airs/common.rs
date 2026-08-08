@@ -1,6 +1,6 @@
 //! Method AIR 通用列布局与约束宏。
 //!
-//! 所有 23 个已启用 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
+//! 所有 21 个稳定 method AIR 共享同一组通用列（state_root / method_kind / is_active 等），
 //! 业务特定列在每个 AIR 的 `*Air` 结构里定义。
 //!
 //! ## 列布局策略

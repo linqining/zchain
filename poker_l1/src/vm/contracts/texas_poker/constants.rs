@@ -72,9 +72,10 @@ pub const REFUND_TYPE_BET_ONLY: u8 = 2;
 
 // ===== 踢人原因 =====
 
-pub const KICK_REASON_TIMEOUT: u8 = 0;
-pub const KICK_REASON_ADMIN: u8 = 1;
-pub const KICK_REASON_RECONSTRUCT_TIMEOUT: u8 = 2;
+pub const KICK_REASON_TIMEOUT: super::events::KickCause = super::events::KickCause::Timeout;
+pub const KICK_REASON_ADMIN: super::events::KickCause = super::events::KickCause::Admin;
+pub const KICK_REASON_RECONSTRUCT_TIMEOUT: super::events::KickCause =
+    super::events::KickCause::ReconstructTimeout;
 
 // ===== 重置原因 =====
 

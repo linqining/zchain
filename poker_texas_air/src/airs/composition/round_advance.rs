@@ -4,6 +4,7 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_l1::vm::contracts::texas_poker::constants::{
     ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN,
 };
+use poker_l1::vm::contracts::texas_poker::types::NO_SEAT;
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 
@@ -11,7 +12,7 @@ use super::{STAGE_HEADER_NUM_COLUMNS, StageHeaderRow, bind_u64, evaluate_stage_h
 use crate::airs::common::{u8_to_m31, u64_to_m31_limbs};
 
 /// Canonical encoding for `Option<u8>::None` in a stage row.
-pub const NO_CURRENT_TURN: u8 = u8::MAX;
+pub const NO_CURRENT_TURN: u8 = NO_SEAT;
 
 /// Number of columns in the round-advance component row.
 pub const NUM_COLUMNS: usize = STAGE_HEADER_NUM_COLUMNS + 6 + 8;

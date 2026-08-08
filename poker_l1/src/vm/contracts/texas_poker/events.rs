@@ -28,10 +28,20 @@ pub const REFUND_TYPE_STACK_ONLY: u8 = 0;
 pub const REFUND_TYPE_STACK_AND_BET: u8 = 1;
 pub const REFUND_TYPE_BET_ONLY: u8 = 2;
 
-// ========== 踢人原因常量 ==========
-pub const KICK_REASON_TIMEOUT: u8 = 0;
-pub const KICK_REASON_ADMIN: u8 = 1;
-pub const KICK_REASON_RECONSTRUCT_TIMEOUT: u8 = 2;
+/// Canonical source of a player removal.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize,
+)]
+#[borsh(use_discriminant = true)]
+#[repr(u8)]
+pub enum KickCause {
+    /// A protocol deadline expired.
+    Timeout = 0,
+    /// The table administrator explicitly removed the player.
+    Admin = 1,
+    /// Reconstruction did not complete before its deadline.
+    ReconstructTimeout = 2,
+}
 
 // ========== 重置原因常量 ==========
 pub const RESET_REASON_TIMEOUT: u8 = 0;
@@ -81,16 +91,16 @@ pub enum TexasPokerEvent {
         seat_index: u8,
         player: Address,
     },
-    /// 玩家请求「下局开始前离场」（sit out next hand，toggle）。
+    /// 玩家显式设置「本手结束后离场」意图。
     ///
-    /// 由 `request_leave_after_hand` 方法发出，`want_leave` 标志切换前后值。
+    /// 由 `set_leave_after_hand` 方法在标志实际变化时发出。
     /// 实际离场（退款 + 座位清空）在下一手 `reset_for_next_hand` 时触发，
     /// 届时另发 `PlayerRefund` + `PlayerLeft`。
     LeaveRequested {
         table_id: ObjectID,
         seat_index: u8,
         player: Address,
-        /// 切换后的标志值（true=已预约下局离场，false=取消预约）。
+        /// 显式目标值（true=已预约下局离场，false=取消预约）。
         want_leave: bool,
     },
 
@@ -295,7 +305,7 @@ pub enum TexasPokerEvent {
         table_id: ObjectID,
         seat_index: u8,
         player: Address,
-        reason: u8,
+        reason: KickCause,
     },
     PlayerRefund {
         table_id: ObjectID,
@@ -547,9 +557,9 @@ mod tests {
         assert_eq!(REFUND_TYPE_STACK_AND_BET, 1);
         assert_eq!(REFUND_TYPE_BET_ONLY, 2);
 
-        assert_eq!(KICK_REASON_TIMEOUT, 0);
-        assert_eq!(KICK_REASON_ADMIN, 1);
-        assert_eq!(KICK_REASON_RECONSTRUCT_TIMEOUT, 2);
+        assert_eq!(KickCause::Timeout as u8, 0);
+        assert_eq!(KickCause::Admin as u8, 1);
+        assert_eq!(KickCause::ReconstructTimeout as u8, 2);
 
         assert_eq!(RESET_REASON_TIMEOUT, 0);
         assert_eq!(RESET_REASON_KICK, 1);
@@ -778,7 +788,7 @@ mod tests {
                 table_id,
                 seat_index: 0,
                 player: [0; 20],
-                reason: 0,
+                reason: KickCause::Timeout,
             },
             TexasPokerEvent::PlayerRefund {
                 table_id,

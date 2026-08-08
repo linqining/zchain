@@ -42,7 +42,7 @@ pub const fn supports_composite_proof(method_kind: MethodKind) -> bool {
             | MethodKind::Bet
             | MethodKind::AutoFold
             | MethodKind::ForceFold
-            | MethodKind::Tick
+            | MethodKind::AdvanceDeadline
             | MethodKind::KickPlayer
             | MethodKind::ResetForNextHand
             | MethodKind::FoldWithProof
@@ -445,7 +445,7 @@ fn acting_seat(
         // Tick has no seat argument. Its only SeatUpdate-compatible branch is
         // the betting-timeout auto-fold, whose actor is the canonical pre-state
         // current turn. Other Tick branches leave SeatUpdate inactive.
-        (MethodKind::Tick, MethodInput::Empty) => pre.current_turn_option(),
+        (MethodKind::AdvanceDeadline, MethodInput::Empty) => pre.current_turn_option(),
         _ => {
             return Err(TexasAirError::SpecViolation(format!(
                 "{} method input does not match composite-plan routing",
@@ -462,7 +462,7 @@ fn derive_seat_update(
     acting_seat: Option<u8>,
     events: &[TexasPokerEvent],
 ) -> TexasAirResult<SeatUpdatePlan> {
-    let tick_auto_fold = method_kind == MethodKind::Tick
+    let tick_auto_fold = method_kind == MethodKind::AdvanceDeadline
         && events.iter().any(|event| {
             matches!(
                 event,
@@ -503,7 +503,7 @@ fn derive_seat_update(
                 MethodKind::Fold
                 | MethodKind::AutoFold
                 | MethodKind::ForceFold
-                | MethodKind::Tick
+                | MethodKind::AdvanceDeadline
                 | MethodKind::FoldWithProof,
                 TexasPokerEvent::PlayerFolded {
                     table_id,
@@ -591,7 +591,7 @@ fn derive_seat_update(
     let expected_fold_reason = match method_kind {
         MethodKind::Fold | MethodKind::FoldWithProof => Some(FOLD_REASON_MANUAL),
         MethodKind::AutoFold => Some(FOLD_REASON_AUTO_TIMEOUT),
-        MethodKind::Tick => Some(FOLD_REASON_AUTO_TIMEOUT),
+        MethodKind::AdvanceDeadline => Some(FOLD_REASON_AUTO_TIMEOUT),
         MethodKind::ForceFold => Some(FOLD_REASON_FORCE_ADMIN),
         _ => None,
     };
@@ -607,7 +607,7 @@ fn derive_seat_update(
         | MethodKind::Fold
         | MethodKind::AutoFold
         | MethodKind::ForceFold
-        | MethodKind::Tick
+        | MethodKind::AdvanceDeadline
         | MethodKind::FoldWithProof => *amount == 0,
         MethodKind::Call | MethodKind::Raise | MethodKind::Bet => !*folded,
         _ => false,
@@ -727,38 +727,40 @@ fn derive_bet_collection(
     // end_without_showdown invokes collect_bets_to_pot. The component still accounts for that
     // pre-state bet in the complete pot delta, while the native PotCollected event correctly
     // lists only the seats scanned by the later collection call.
-    let immediately_collected_kick_seats =
-        if matches!(method_kind, MethodKind::KickPlayer | MethodKind::Tick) {
-            let kicked = events
-                .iter()
-                .filter_map(|event| match event {
-                    TexasPokerEvent::PlayerKicked {
-                        table_id,
-                        seat_index,
-                        ..
-                    } => Some((*table_id, *seat_index)),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            if method_kind == MethodKind::KickPlayer && kicked.len() != 1 {
+    let immediately_collected_kick_seats = if matches!(
+        method_kind,
+        MethodKind::KickPlayer | MethodKind::AdvanceDeadline
+    ) {
+        let kicked = events
+            .iter()
+            .filter_map(|event| match event {
+                TexasPokerEvent::PlayerKicked {
+                    table_id,
+                    seat_index,
+                    ..
+                } => Some((*table_id, *seat_index)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if method_kind == MethodKind::KickPlayer && kicked.len() != 1 {
+            return Err(TexasAirError::SpecViolation(
+                "active kick collection requires exactly one PlayerKicked event".into(),
+            ));
+        }
+        let mut seats = [false; COMPOSITION_SEATS];
+        for (table_id, seat_index) in kicked {
+            let index = usize::from(seat_index);
+            if table_id != pre.id || index >= pre.seats.len() || seats[index] {
                 return Err(TexasAirError::SpecViolation(
-                    "active kick collection requires exactly one PlayerKicked event".into(),
+                    "PlayerKicked event does not match collection table scope".into(),
                 ));
             }
-            let mut seats = [false; COMPOSITION_SEATS];
-            for (table_id, seat_index) in kicked {
-                let index = usize::from(seat_index);
-                if table_id != pre.id || index >= pre.seats.len() || seats[index] {
-                    return Err(TexasAirError::SpecViolation(
-                        "PlayerKicked event does not match collection table scope".into(),
-                    ));
-                }
-                seats[index] = true;
-            }
-            seats
-        } else {
-            [false; COMPOSITION_SEATS]
-        };
+            seats[index] = true;
+        }
+        seats
+    } else {
+        [false; COMPOSITION_SEATS]
+    };
     let expected_seats = seat_bets
         .iter()
         .enumerate()
@@ -947,13 +949,13 @@ fn derive_settlement(
                 "settlement side events exist without a canonical settlement event".into(),
             ));
         }
-        let tick_started_hand = method_kind == MethodKind::Tick
+        let tick_started_hand = method_kind == MethodKind::AdvanceDeadline
             && events
                 .iter()
                 .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }));
         let reset_only = matches!(
             method_kind,
-            MethodKind::KickPlayer | MethodKind::ResetForNextHand | MethodKind::Tick
+            MethodKind::KickPlayer | MethodKind::ResetForNextHand | MethodKind::AdvanceDeadline
         ) && !tick_started_hand
             && post.round_state() == ROUND_WAITING
             && post.betting_round().is_none()

@@ -153,7 +153,7 @@ pub fn reconstruction_v3_prior_state_digest(
     table: &super::types::TexasPokerTable,
     seat_index: u8,
 ) -> PokerL1Result<[u8; 32]> {
-    let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
+    let aggregate_pk = table.derived_aggregated_pk()?.ok_or_else(|| {
         PokerL1Error::Serialization(
             "reconstruction V3 prior state requires aggregate public key".into(),
         )
@@ -205,12 +205,6 @@ fn blake2b_256(payload: &[u8]) -> [u8; 32] {
     let mut digest = [0u8; 32];
     hasher.finalize_variable(&mut digest).expect("32 <= 64");
     digest
-}
-
-/// 创建 remask + shuffle 共享 Transcript（用于 join_and_shuffle 场景）。
-#[must_use]
-pub fn new_mask_shuffle_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(b"zk_mask_shuffle_proof_v2")
 }
 
 // ========== ZK skip 回退 ==========

@@ -1,4 +1,4 @@
-//! E2E 测试 — lifecycle 模块（join_table/leave_table/start_hand/tick/reset_for_next_hand）
+//! E2E 测试 — lifecycle 模块（join_table/leave_table/start_hand/advance_deadline/reset_for_next_hand）
 //! prove + verify + soundness。
 //!
 //! 验证流程：
@@ -11,6 +11,9 @@
 use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::common::MAX_TOTAL_BET;
+use poker_texas_air::airs::lifecycle::advance_deadline::{
+    AdvanceDeadlineAir as TickAir, AdvanceDeadlineInput as TickInput, AdvanceDeadlineRow as TickRow,
+};
 use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use poker_texas_air::airs::lifecycle::leave_table::{
     LeaveTableAir, LeaveTableInput, LeaveTableRow,
@@ -19,7 +22,6 @@ use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
     ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
-use poker_texas_air::airs::lifecycle::tick::{TickAir, TickInput, TickRow};
 use poker_texas_air::authorization_binding::AdminAuthorizationAirBinding;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::prover::prove_method;
@@ -817,7 +819,7 @@ fn test_e2e_tick_prove_verify() {
         &trace,
         air,
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     )
     .expect("prove 失败");
     verify_method(proof).expect("verify 失败");
@@ -858,7 +860,7 @@ fn test_soundness_tick_tampered_kind() {
         &trace,
         air,
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     )
     .expect("prove 失败");
 
@@ -914,7 +916,7 @@ fn test_soundness_tick_tampered_lifecycle_receipt() {
             post_version: 1,
         },
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     );
     assert!(
         result.is_err(),
@@ -958,7 +960,7 @@ fn test_soundness_tick_tampered_high_limb_time() {
         &trace,
         air,
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     )
     .expect("prove 失败");
 
@@ -1010,7 +1012,7 @@ fn test_soundness_tick_tampered_time_bank() {
         &trace,
         air,
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     )
     .expect("prove 失败");
 
@@ -1065,7 +1067,7 @@ fn test_soundness_tick_tampered_rake() {
         &trace,
         air,
         TickAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::Tick, 42, 0, 4),
+        TexasPublicInputs::synthetic_for_test(MethodKind::AdvanceDeadline, 42, 0, 4),
     )
     .expect("prove 失败");
 
@@ -1223,7 +1225,7 @@ fn test_soundness_reset_for_next_hand_tampered_authorization_digest() {
 fn test_lifecycle_air_column_consistency() {
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::lifecycle::{
-        join_table, leave_table, reset_for_next_hand, start_hand, tick,
+        advance_deadline as tick, join_table, leave_table, reset_for_next_hand, start_hand,
     };
 
     // join_table: 通用 + 46 业务
@@ -1271,6 +1273,6 @@ fn test_lifecycle_method_kinds() {
     assert_eq!(MethodKind::JoinTable.tier(), MethodTier::Lifecycle);
     assert_eq!(MethodKind::LeaveTable.tier(), MethodTier::Lifecycle);
     assert_eq!(MethodKind::StartHand.tier(), MethodTier::Lifecycle);
-    assert_eq!(MethodKind::Tick.tier(), MethodTier::Lifecycle);
+    assert_eq!(MethodKind::AdvanceDeadline.tier(), MethodTier::Lifecycle);
     assert_eq!(MethodKind::ResetForNextHand.tier(), MethodTier::Lifecycle);
 }

@@ -103,9 +103,14 @@ fn e2e_dispatch_output_events_only() {
         100,
     );
 
-    // tick：空 args，selector == tick()
-    let _ = dispatch::dispatch(&ctx_as(creator), &mut table, &selectors::tick(), &[])
-        .expect("tick dispatch 应成功");
+    // advance_deadline：空 args。
+    let _ = dispatch::dispatch(
+        &ctx_as(creator),
+        &mut table,
+        &selectors::advance_deadline(),
+        &[],
+    )
+    .expect("advance_deadline dispatch 应成功");
 
     // tick 不产生 prove_task（build_method_input 返回 None）
     // 此处仅验证 dispatch 不 panic；return_value 反序列化应得到 events_only。

@@ -1,4 +1,4 @@
-//! `tick` AIR — 超时驱动（permissionless）。
+//! `advance_deadline` AIR — 超时驱动（permissionless）。
 //!
 //! ## 业务规约
 //! 1. 根据当前 `round_state` 和超时配置触发状态转换
@@ -27,52 +27,52 @@ use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{HandPhase, NO_SEAT, TexasPokerTable};
 
-/// `timeout_kind` values used in the tick statement.  The value denotes the
+/// `timeout_kind` values used in the advance-deadline statement. The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
-/// tick transition such as waiting/start-hand, showdown, or the consistency
+/// advance-deadline transition such as waiting/start-hand, showdown, or the consistency
 /// fallback.  Zero is deliberately invalid so the AIR has no all-zero
 /// "timeout happened" witness.
-pub const TICK_KIND_SHUFFLE: u8 = 1;
-/// The canonical tick branch is governed by the reveal timer.
-pub const TICK_KIND_REVEAL: u8 = 2;
-/// The canonical tick branch is governed by the reconstruction timer.
-pub const TICK_KIND_RECONSTRUCT: u8 = 3;
-/// The canonical tick branch is governed by the betting-turn timer.
-pub const TICK_KIND_BETTING: u8 = 4;
-/// The canonical tick branch has no timer predicate (e.g. hand start/reset).
-pub const TICK_KIND_NON_TIMER: u8 = 5;
+pub const ADVANCE_DEADLINE_KIND_SHUFFLE: u8 = 1;
+/// The canonical advance-deadline branch is governed by the reveal timer.
+pub const ADVANCE_DEADLINE_KIND_REVEAL: u8 = 2;
+/// The canonical advance-deadline branch is governed by the reconstruction timer.
+pub const ADVANCE_DEADLINE_KIND_RECONSTRUCT: u8 = 3;
+/// The canonical advance-deadline branch is governed by the betting-turn timer.
+pub const ADVANCE_DEADLINE_KIND_BETTING: u8 = 4;
+/// The canonical advance-deadline branch has no timer predicate (e.g. hand start/reset).
+pub const ADVANCE_DEADLINE_KIND_NON_TIMER: u8 = 5;
 
-/// Canonical Tick lifecycle receipt ABI.
-pub const TICK_LIFECYCLE_ABI_VERSION: u8 = 1;
+/// Canonical advance-deadline lifecycle receipt ABI.
+pub const ADVANCE_DEADLINE_LIFECYCLE_ABI_VERSION: u8 = 1;
 /// Reserved legacy ABI value. Schema v15 never commits an active phase with
-/// an unset deadline, so canonical Tick receipts must never issue this branch.
-pub const TICK_BRANCH_TIMER_STARTED: u8 = 1;
-/// Tick started a new hand from WAITING.
-pub const TICK_BRANCH_HAND_STARTED: u8 = 2;
-/// Tick advanced the shuffle protocol without a timeout.
-pub const TICK_BRANCH_SHUFFLE_ADVANCED: u8 = 3;
-/// Tick handled a shuffle timeout.
-pub const TICK_BRANCH_SHUFFLE_TIMEOUT: u8 = 4;
-/// Tick completed or advanced a reveal phase without a timeout.
-pub const TICK_BRANCH_REVEAL_ADVANCED: u8 = 5;
-/// Tick handled a reveal timeout or its reconstruct/reset cascade.
-pub const TICK_BRANCH_REVEAL_TIMEOUT: u8 = 6;
-/// Tick handled a reconstruction timeout.
-pub const TICK_BRANCH_RECONSTRUCT_TIMEOUT: u8 = 7;
-/// Tick collected bets and advanced a completed betting round.
-pub const TICK_BRANCH_BETTING_ROUND_ADVANCED: u8 = 8;
-/// Tick consumed the current actor's time bank.
-pub const TICK_BRANCH_TIME_BANK_CONSUMED: u8 = 9;
-/// Tick auto-folded the current actor after a betting timeout.
-pub const TICK_BRANCH_BETTING_TIMEOUT: u8 = 10;
-/// Tick settled/reset a completed showdown display period.
-pub const TICK_BRANCH_SHOWDOWN_SETTLED: u8 = 11;
-/// Tick repaired an inconsistent non-WAITING table by refunding/resetting it.
-pub const TICK_BRANCH_INCONSISTENT_RESET: u8 = 12;
+/// an unset deadline, so canonical advance-deadline receipts must never issue this branch.
+pub const ADVANCE_DEADLINE_BRANCH_TIMER_STARTED: u8 = 1;
+/// AdvanceDeadline started a new hand from WAITING.
+pub const ADVANCE_DEADLINE_BRANCH_HAND_STARTED: u8 = 2;
+/// AdvanceDeadline advanced the shuffle protocol without a timeout.
+pub const ADVANCE_DEADLINE_BRANCH_SHUFFLE_ADVANCED: u8 = 3;
+/// AdvanceDeadline handled a shuffle timeout.
+pub const ADVANCE_DEADLINE_BRANCH_SHUFFLE_TIMEOUT: u8 = 4;
+/// AdvanceDeadline completed or advanced a reveal phase without a timeout.
+pub const ADVANCE_DEADLINE_BRANCH_REVEAL_ADVANCED: u8 = 5;
+/// AdvanceDeadline handled a reveal timeout or its reconstruct/reset cascade.
+pub const ADVANCE_DEADLINE_BRANCH_REVEAL_TIMEOUT: u8 = 6;
+/// AdvanceDeadline handled a reconstruction timeout.
+pub const ADVANCE_DEADLINE_BRANCH_RECONSTRUCT_TIMEOUT: u8 = 7;
+/// AdvanceDeadline collected bets and advanced a completed betting round.
+pub const ADVANCE_DEADLINE_BRANCH_BETTING_ROUND_ADVANCED: u8 = 8;
+/// AdvanceDeadline consumed the current actor's time bank.
+pub const ADVANCE_DEADLINE_BRANCH_TIME_BANK_CONSUMED: u8 = 9;
+/// AdvanceDeadline auto-folded the current actor after a betting timeout.
+pub const ADVANCE_DEADLINE_BRANCH_BETTING_TIMEOUT: u8 = 10;
+/// AdvanceDeadline settled/reset a completed showdown display period.
+pub const ADVANCE_DEADLINE_BRANCH_SHOWDOWN_SETTLED: u8 = 11;
+/// AdvanceDeadline repaired an inconsistent non-WAITING table by refunding/resetting it.
+pub const ADVANCE_DEADLINE_BRANCH_INCONSISTENT_RESET: u8 = 12;
 
-/// AIR projection of a verifier-issued canonical Tick lifecycle receipt.
+/// AIR projection of a verifier-issued canonical advance-deadline lifecycle receipt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TickLifecycleAirBinding {
+pub struct AdvanceDeadlineLifecycleAirBinding {
     /// Lifecycle receipt ABI version.
     pub abi_version: u8,
     /// Exact canonical lifecycle branch.
@@ -83,7 +83,7 @@ pub struct TickLifecycleAirBinding {
     pub receipt_digest: [M31; DIGEST_LIMBS],
 }
 
-impl TickLifecycleAirBinding {
+impl AdvanceDeadlineLifecycleAirBinding {
     const fn zero() -> Self {
         Self {
             abi_version: 0,
@@ -94,7 +94,7 @@ impl TickLifecycleAirBinding {
     }
 }
 
-/// `tick` 业务特定列布局。
+/// `advance_deadline` 业务特定列布局。
 pub mod cols {
     use super::COMMON_NUM_COLUMNS;
     /// `INPUT_CURRENT_TIME` 起始列（4 limb）。
@@ -134,9 +134,9 @@ pub mod cols {
     pub const TIME_SUB_BORROW_BASE: usize = COMMON_NUM_COLUMNS + 48;
     /// `timeout_started_at != 0` 的非零 inverse witness。
     pub const TIMEOUT_STARTED_AT_INV: usize = COMMON_NUM_COLUMNS + 52;
-    /// Tick lifecycle receipt ABI version.
+    /// AdvanceDeadline lifecycle receipt ABI version.
     pub const LIFECYCLE_ABI_VERSION: usize = COMMON_NUM_COLUMNS + 53;
-    /// Canonical Tick lifecycle branch kind.
+    /// Canonical AdvanceDeadline lifecycle branch kind.
     pub const LIFECYCLE_BRANCH_KIND: usize = COMMON_NUM_COLUMNS + 54;
     /// Complete lifecycle request digest.
     pub const LIFECYCLE_REQUEST_DIGEST_BASE: usize = COMMON_NUM_COLUMNS + 55;
@@ -147,9 +147,9 @@ pub mod cols {
     pub const NUM_COLUMNS: usize = LIFECYCLE_RECEIPT_DIGEST_BASE + super::DIGEST_LIMBS;
 }
 
-/// `tick` 输入参数。
+/// `advance_deadline` 输入参数。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TickInput {
+pub struct AdvanceDeadlineInput {
     /// 当前时间戳。
     pub current_time: u64,
     /// 超时类型。
@@ -157,9 +157,9 @@ pub struct TickInput {
     /// Whether the selected branch requires `current_time >= started + timeout`.
     /// This is a verifier-reconstructed AIR constant, not a prover witness.
     pub timeout_required: bool,
-    /// Timer start timestamp selected by the canonical tick branch.
+    /// Timer start timestamp selected by the canonical advance-deadline branch.
     pub timeout_started_at: u64,
-    /// Timeout configuration selected by the canonical tick branch.
+    /// Timeout configuration selected by the canonical advance-deadline branch.
     pub timeout_ms: u64,
     /// Time Bank 消耗量（毫秒，0 = 未消耗）。
     pub time_bank_consumed: u64,
@@ -172,19 +172,19 @@ pub struct TickInput {
     pub rake_mode: u8,
     /// Rake 抽水金额。
     pub rake_amount: u64,
-    /// Exact native `bump_version` count for this tick transition.  Some tick
+    /// Exact native `bump_version` count for this transition. Some deadline
     /// helpers alter state without bumping the table version, so treating every
-    /// tick as `+1` was an invalid proof precondition.
+    /// transitions as `+1` was an invalid proof precondition.
     pub version_increment: u8,
-    /// Verifier-issued receipt for the exact lifecycle branch executed by Tick.
-    pub lifecycle: TickLifecycleAirBinding,
+    /// Verifier-issued receipt for the exact lifecycle branch executed by AdvanceDeadline.
+    pub lifecycle: AdvanceDeadlineLifecycleAirBinding,
 }
 
-impl Default for TickInput {
+impl Default for AdvanceDeadlineInput {
     fn default() -> Self {
         Self {
             current_time: 0,
-            timeout_kind: TICK_KIND_NON_TIMER,
+            timeout_kind: ADVANCE_DEADLINE_KIND_NON_TIMER,
             timeout_required: false,
             timeout_started_at: 0,
             timeout_ms: 0,
@@ -194,27 +194,27 @@ impl Default for TickInput {
             rake_mode: 0,
             rake_amount: 0,
             version_increment: 1,
-            lifecycle: TickLifecycleAirBinding::zero(),
+            lifecycle: AdvanceDeadlineLifecycleAirBinding::zero(),
         }
     }
 }
 
-/// Canonically reconstruct all business constants for a state-changing `tick`.
+/// Canonically reconstruct all business constants for a state-changing `advance_deadline`.
 ///
-/// The native VM deliberately has several `tick` branches that are not timer
+/// The native VM deliberately has several deadline branches that are not timer
 /// expirations (advance a completed protocol phase, start a hand, or repair an
 /// inconsistent table). This helper follows the same
-/// priority order as [`state_machine::tick`], replays it, and derives the
+/// priority order as [`state_machine::advance_deadline`], replays it, and derives the
 /// input constants from the resulting VM events and post-state.  It is shared
-/// by the prover and production verifier so no Tick witness is selected by the
+/// by the prover and production verifier so no AdvanceDeadline witness is selected by the
 /// prover.
 pub fn canonical_input(
     pre: &TexasPokerTable,
     post: &TexasPokerTable,
     current_time: u64,
-) -> TexasAirResult<TickInput> {
+) -> TexasAirResult<AdvanceDeadlineInput> {
     let (timeout_kind, timeout_started_at, timeout_ms, timer_is_pending, actor) =
-        select_tick_timer(pre)?;
+        select_deadline_timer(pre)?;
     let timeout_required = timer_is_pending
         && timeout_started_at != 0
         && current_time >= timeout_started_at.saturating_add(timeout_ms);
@@ -230,34 +230,38 @@ pub fn canonical_input(
 
     let mut replay = pre.clone();
     let mut events = Vec::new();
-    state_machine::tick(&mut replay, current_time, &mut events).map_err(|error| {
+    state_machine::advance_deadline(&mut replay, current_time, &mut events).map_err(|error| {
         TexasAirError::SpecViolation(format!(
-            "tick: canonical state-machine replay failed: {error}"
+            "advance_deadline: canonical state-machine replay failed: {error}"
         ))
     })?;
     if replay == *pre {
         return Err(TexasAirError::SpecViolation(
-            "tick: canonical replay made no state change, so dispatch must not issue a proof task"
+            "advance_deadline: canonical replay made no state change, so dispatch must not issue a proof task"
                 .into(),
         ));
     }
 
     replay.call_seq = pre.call_seq.checked_add(1).ok_or_else(|| {
-        TexasAirError::SpecViolation("tick: call_seq overflow during canonical replay".into())
+        TexasAirError::SpecViolation(
+            "advance_deadline: call_seq overflow during canonical replay".into(),
+        )
     })?;
     if events
         .iter()
         .any(|event| matches!(event, TexasPokerEvent::HandStarted { .. }))
     {
         replay.hand_id = pre.hand_id.checked_add(1).ok_or_else(|| {
-            TexasAirError::SpecViolation("tick: hand_id overflow during canonical replay".into())
+            TexasAirError::SpecViolation(
+                "advance_deadline: hand_id overflow during canonical replay".into(),
+            )
         })?;
     } else {
         replay.hand_id = pre.hand_id;
     }
     if replay != *post {
         return Err(TexasAirError::SpecViolation(
-            "tick: canonical post-table differs from VM replay".into(),
+            "advance_deadline: canonical post-table differs from VM replay".into(),
         ));
     }
 
@@ -275,12 +279,12 @@ pub fn canonical_input(
             } => {
                 if *table_id != pre.id {
                     return Err(TexasAirError::SpecViolation(
-                        "tick: TimeBankConsumed event references another table".into(),
+                        "advance_deadline: TimeBankConsumed event references another table".into(),
                     ));
                 }
                 if Some(*seat_index) != actor || event_post_time_bank.is_some() {
                     return Err(TexasAirError::SpecViolation(
-                        "tick: invalid TimeBankConsumed event for the selected betting actor"
+                        "advance_deadline: invalid TimeBankConsumed event for the selected betting actor"
                             .into(),
                     ));
                 }
@@ -295,11 +299,11 @@ pub fn canonical_input(
             } => {
                 if *table_id != pre.id {
                     return Err(TexasAirError::SpecViolation(
-                        "tick: RakeCollected event references another table".into(),
+                        "advance_deadline: RakeCollected event references another table".into(),
                     ));
                 }
                 rake_amount = rake_amount.checked_add(*amount).ok_or_else(|| {
-                    TexasAirError::SpecViolation("tick: rake event sum overflow".into())
+                    TexasAirError::SpecViolation("advance_deadline: rake event sum overflow".into())
                 })?;
                 rake_mode = *mode;
             }
@@ -311,34 +315,36 @@ pub fn canonical_input(
             .checked_sub(time_bank_consumed)
             .ok_or_else(|| {
                 TexasAirError::SpecViolation(
-                    "tick: Time Bank consumption exceeds pre balance".into(),
+                    "advance_deadline: Time Bank consumption exceeds pre balance".into(),
                 )
             })?
             != remaining
             || post_time_bank != remaining
         {
             return Err(TexasAirError::SpecViolation(
-                "tick: Time Bank event is inconsistent with canonical table balances".into(),
+                "advance_deadline: Time Bank event is inconsistent with canonical table balances"
+                    .into(),
             ));
         }
     } else if time_bank_consumed != 0 {
         return Err(TexasAirError::SpecViolation(
-            "tick: non-zero Time Bank consumption lacks a canonical event".into(),
+            "advance_deadline: non-zero Time Bank consumption lacks a canonical event".into(),
         ));
     }
 
-    let expected_version = u64::from(pre.call_seq)
-        .checked_add(1)
-        .ok_or_else(|| TexasAirError::SpecViolation("tick: pre-call-seq overflow".into()))?;
+    let expected_version = u64::from(pre.call_seq).checked_add(1).ok_or_else(|| {
+        TexasAirError::SpecViolation("advance_deadline: pre-call-seq overflow".into())
+    })?;
     if u64::from(post.call_seq) != expected_version {
         return Err(TexasAirError::SpecViolation(
-            "tick: a committed external command must increment call_seq exactly once".into(),
+            "advance_deadline: a committed external command must increment call_seq exactly once"
+                .into(),
         ));
     }
     let version_increment = 1;
     let lifecycle = issue_lifecycle_binding(pre, post, current_time, &events)?;
 
-    Ok(TickInput {
+    Ok(AdvanceDeadlineInput {
         current_time,
         timeout_kind,
         timeout_required,
@@ -359,7 +365,7 @@ fn issue_lifecycle_binding(
     post: &TexasPokerTable,
     current_time: u64,
     events: &[TexasPokerEvent],
-) -> TexasAirResult<TickLifecycleAirBinding> {
+) -> TexasAirResult<AdvanceDeadlineLifecycleAirBinding> {
     use poker_l1::vm::contracts::texas_poker::constants::{
         FOLD_REASON_AUTO_TIMEOUT, RESET_REASON_STATE_INCONSISTENT,
     };
@@ -367,13 +373,13 @@ fn issue_lifecycle_binding(
     let has = |predicate: fn(&TexasPokerEvent) -> bool| events.iter().any(predicate);
     let pre_reveal = pre.reveal_token_state();
     let branch_kind = if has(|event| matches!(event, TexasPokerEvent::ReconstructTimeout { .. })) {
-        TICK_BRANCH_RECONSTRUCT_TIMEOUT
+        ADVANCE_DEADLINE_BRANCH_RECONSTRUCT_TIMEOUT
     } else if has(|event| matches!(event, TexasPokerEvent::ShuffleTimeout { .. })) {
-        TICK_BRANCH_SHUFFLE_TIMEOUT
+        ADVANCE_DEADLINE_BRANCH_SHUFFLE_TIMEOUT
     } else if has(|event| matches!(event, TexasPokerEvent::RevealTimeout { .. })) {
-        TICK_BRANCH_REVEAL_TIMEOUT
+        ADVANCE_DEADLINE_BRANCH_REVEAL_TIMEOUT
     } else if has(|event| matches!(event, TexasPokerEvent::TimeBankConsumed { .. })) {
-        TICK_BRANCH_TIME_BANK_CONSUMED
+        ADVANCE_DEADLINE_BRANCH_TIME_BANK_CONSUMED
     } else if events.iter().any(|event| {
         matches!(
             event,
@@ -383,9 +389,9 @@ fn issue_lifecycle_binding(
             }
         )
     }) {
-        TICK_BRANCH_BETTING_TIMEOUT
+        ADVANCE_DEADLINE_BRANCH_BETTING_TIMEOUT
     } else if has(|event| matches!(event, TexasPokerEvent::HandStarted { .. })) {
-        TICK_BRANCH_HAND_STARTED
+        ADVANCE_DEADLINE_BRANCH_HAND_STARTED
     } else if events.iter().any(|event| {
         matches!(
             event,
@@ -395,29 +401,30 @@ fn issue_lifecycle_binding(
             }
         )
     }) {
-        TICK_BRANCH_INCONSISTENT_RESET
+        ADVANCE_DEADLINE_BRANCH_INCONSISTENT_RESET
     } else if pre.round_state() == ROUND_SHOWDOWN
         && (has(|event| matches!(event, TexasPokerEvent::SettlementPlanCommitted { .. }))
             || has(|event| matches!(event, TexasPokerEvent::HandEndedWithoutShowdown { .. })))
     {
-        TICK_BRANCH_SHOWDOWN_SETTLED
+        ADVANCE_DEADLINE_BRANCH_SHOWDOWN_SETTLED
     } else if matches!(
         pre.shuffle_phase(),
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
-        TICK_BRANCH_SHUFFLE_ADVANCED
+        ADVANCE_DEADLINE_BRANCH_SHUFFLE_ADVANCED
     } else if pre_reveal.is_some() {
-        TICK_BRANCH_REVEAL_ADVANCED
+        ADVANCE_DEADLINE_BRANCH_REVEAL_ADVANCED
     } else if state_machine::is_betting_round(pre) && pre.current_turn() == NO_SEAT {
-        TICK_BRANCH_BETTING_ROUND_ADVANCED
+        ADVANCE_DEADLINE_BRANCH_BETTING_ROUND_ADVANCED
     } else {
         return Err(TexasAirError::SpecViolation(
-            "tick: state-changing canonical replay has no supported lifecycle branch".into(),
+            "advance_deadline: state-changing canonical replay has no supported lifecycle branch"
+                .into(),
         ));
     };
 
     let payload = borsh::to_vec(&(
-        TICK_LIFECYCLE_ABI_VERSION,
+        ADVANCE_DEADLINE_LIFECYCLE_ABI_VERSION,
         branch_kind,
         current_time,
         pre,
@@ -426,28 +433,34 @@ fn issue_lifecycle_binding(
     ))
     .map_err(|error| {
         TexasAirError::SerializationError(format!(
-            "tick: lifecycle request borsh encoding failed: {error}"
+            "advance_deadline: lifecycle request borsh encoding failed: {error}"
         ))
     })?;
-    let request_digest = tick_lifecycle_hash(b"zchain.texas.tick.lifecycle.request.v1", &payload);
+    let request_digest = advance_deadline_lifecycle_hash(
+        b"zchain.texas.advance_deadline.lifecycle.request.v1",
+        &payload,
+    );
     let mut receipt = Vec::with_capacity(4 + request_digest.len());
     receipt.extend_from_slice(&[
-        TICK_LIFECYCLE_ABI_VERSION,
+        ADVANCE_DEADLINE_LIFECYCLE_ABI_VERSION,
         branch_kind,
-        1, // canonical native Tick replay backend
+        1, // canonical native AdvanceDeadline replay backend
         1, // verified-success result
     ]);
     receipt.extend_from_slice(&request_digest);
-    let receipt_digest = tick_lifecycle_hash(b"zchain.texas.tick.lifecycle.receipt.v1", &receipt);
-    Ok(TickLifecycleAirBinding {
-        abi_version: TICK_LIFECYCLE_ABI_VERSION,
+    let receipt_digest = advance_deadline_lifecycle_hash(
+        b"zchain.texas.advance_deadline.lifecycle.receipt.v1",
+        &receipt,
+    );
+    Ok(AdvanceDeadlineLifecycleAirBinding {
+        abi_version: ADVANCE_DEADLINE_LIFECYCLE_ABI_VERSION,
         branch_kind,
         request_digest: digest_to_m31_limbs(request_digest),
         receipt_digest: digest_to_m31_limbs(receipt_digest),
     })
 }
 
-fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
+fn advance_deadline_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
     let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
     hasher.update(domain);
     hasher.update(&(payload.len() as u64).to_le_bytes());
@@ -458,12 +471,14 @@ fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 }
 
 /// Return the canonical timer family that has priority in the pre-state.
-fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
+fn select_deadline_timer(
+    table: &TexasPokerTable,
+) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
     let shuffle = table.shuffle_state();
     let reveal = table.reveal_token_state();
     if let HandPhase::Reconstructing { epoch_ms, .. } = &table.hand_phase {
         return Ok((
-            TICK_KIND_RECONSTRUCT,
+            ADVANCE_DEADLINE_KIND_RECONSTRUCT,
             *epoch_ms,
             u64::from(table.timeout_config.reconstruct_timeout_ms),
             true,
@@ -480,10 +495,12 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             .shuffle_deadline_ms()
             .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
             .ok_or_else(|| {
-                TexasAirError::SpecViolation("tick shuffle phase is missing its deadline".into())
+                TexasAirError::SpecViolation(
+                    "advance_deadline shuffle phase is missing its deadline".into(),
+                )
             })?;
         return Ok((
-            TICK_KIND_SHUFFLE,
+            ADVANCE_DEADLINE_KIND_SHUFFLE,
             timer_started_at(deadline_ms, timeout_ms, "shuffle")?,
             timeout_ms,
             pending,
@@ -500,10 +517,12 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             .reveal_deadline_ms()
             .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
             .ok_or_else(|| {
-                TexasAirError::SpecViolation("tick reveal phase is missing its deadline".into())
+                TexasAirError::SpecViolation(
+                    "advance_deadline reveal phase is missing its deadline".into(),
+                )
             })?;
         return Ok((
-            TICK_KIND_REVEAL,
+            ADVANCE_DEADLINE_KIND_REVEAL,
             timer_started_at(deadline_ms, timeout_ms, "reveal")?,
             timeout_ms,
             pending,
@@ -522,11 +541,11 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
                 .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation(
-                        "tick betting phase is missing its deadline".into(),
+                        "advance_deadline betting phase is missing its deadline".into(),
                     )
                 })?;
             return Ok((
-                TICK_KIND_BETTING,
+                ADVANCE_DEADLINE_KIND_BETTING,
                 timer_started_at(deadline_ms, timeout_ms, "betting")?,
                 timeout_ms,
                 true,
@@ -538,15 +557,21 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         // `showdown_at` is already a deadline in the native VM. Model it as
         // `started_at + 0` so the common 64-bit comparison AIR remains exact.
         let deadline_ms = table.showdown_deadline_ms().unwrap_or(0);
-        return Ok((TICK_KIND_NON_TIMER, deadline_ms, 0, deadline_ms != 0, None));
+        return Ok((
+            ADVANCE_DEADLINE_KIND_NON_TIMER,
+            deadline_ms,
+            0,
+            deadline_ms != 0,
+            None,
+        ));
     }
-    Ok((TICK_KIND_NON_TIMER, 0, 0, false, None))
+    Ok((ADVANCE_DEADLINE_KIND_NON_TIMER, 0, 0, false, None))
 }
 
 fn timer_started_at(deadline_ms: u64, timeout_ms: u64, label: &str) -> TexasAirResult<u64> {
     deadline_ms.checked_sub(timeout_ms).ok_or_else(|| {
         TexasAirError::SpecViolation(format!(
-            "tick {label} deadline is earlier than its configured timeout"
+            "advance_deadline {label} deadline is earlier than its configured timeout"
         ))
     })
 }
@@ -558,18 +583,18 @@ fn seat_time_bank(table: &TexasPokerTable, seat: u8, label: &str) -> TexasAirRes
         .map(|entry| u64::from(entry.time_bank_ms()))
         .ok_or_else(|| {
             TexasAirError::SpecViolation(format!(
-                "tick: {label}-state current_turn {seat} is outside the table seats"
+                "advance_deadline: {label}-state current_turn {seat} is outside the table seats"
             ))
         })
 }
 
-/// `tick` AIR。
+/// `advance_deadline` AIR。
 #[derive(Debug, Clone)]
-pub struct TickAir {
+pub struct AdvanceDeadlineAir {
     /// log2(行数)。
     pub log_size: u32,
     /// 输入参数。
-    pub input: TickInput,
+    pub input: AdvanceDeadlineInput,
     /// 调用前 state_root。
     pub pre_state_root: [M31; 4],
     /// 调用后 state_root。
@@ -586,7 +611,7 @@ pub struct TickAir {
     pub post_version: u64,
 }
 
-impl TickAir {
+impl AdvanceDeadlineAir {
     /// 列数。
     #[must_use]
     pub const fn num_columns() -> usize {
@@ -594,7 +619,7 @@ impl TickAir {
     }
 }
 
-impl FrameworkEval for TickAir {
+impl FrameworkEval for AdvanceDeadlineAir {
     fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -745,9 +770,9 @@ impl FrameworkEval for TickAir {
             is_active.clone() * (output_new_round_state - common.post_round_state.clone()),
         );
 
-        // 注：tick 会驱动状态机阶段转换（SHUFFLE→DEAL→BETTING 等），
+        // 注：advance_deadline 会驱动状态机阶段转换（SHUFFLE→DEAL→BETTING 等），
         // round_state 可合法变化，故不施加 round_state 不变约束。
-        // tick 的 Lean 反例「version 不递增」已由通用层 version+=1 约束消除。
+        // 旧 Lean 反例「version 不递增」已由通用层 version+=1 约束消除。
         // 约束 7（Gap 5，degree-2）：timeout_kind * inv == 1 — 证明 timeout_kind ≠ 0
         // （即存在真实超时）。诚实 host 必须 timeout_kind > 0 才存在逆元。
         let one: E::F = M31::from(1u32).into();
@@ -767,7 +792,7 @@ impl FrameworkEval for TickAir {
         }
 
         // Timeout branches prove Rust's exact `saturating_add` deadline and
-        // unsigned `current_time >= deadline` comparison.  Non-timeout tick
+        // unsigned `current_time >= deadline` comparison. Non-timeout deadline
         // branches intentionally do not claim a timeout predicate.
         if self.input.timeout_required {
             let started_sum = timeout_started_at[0].clone()
@@ -858,9 +883,9 @@ impl FrameworkEval for TickAir {
     }
 }
 
-/// `tick` trace 行。
+/// `advance_deadline` trace 行。
 #[derive(Debug, Clone)]
-pub struct TickRow {
+pub struct AdvanceDeadlineRow {
     /// 通用列。
     pub common: CommonRow,
     /// 当前时间。
@@ -900,14 +925,14 @@ pub struct TickRow {
     /// `timeout_started_at` 非零性 witness。
     pub timeout_started_at_inv: M31,
     /// Verifier-issued canonical lifecycle branch receipt.
-    pub lifecycle: TickLifecycleAirBinding,
+    pub lifecycle: AdvanceDeadlineLifecycleAirBinding,
 }
 
-impl TickRow {
+impl AdvanceDeadlineRow {
     /// active 行。
     #[must_use]
     pub fn active(
-        input: &TickInput,
+        input: &AdvanceDeadlineInput,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
         table_id: u64,
@@ -964,7 +989,7 @@ impl TickRow {
         };
         Self {
             common: CommonRow::active(
-                MethodKind::Tick,
+                MethodKind::AdvanceDeadline,
                 pre_state_root,
                 post_state_root,
                 table_id,
@@ -1023,7 +1048,7 @@ impl TickRow {
             time_elapsed: [ZERO; 4],
             time_sub_borrow: [ZERO; 4],
             timeout_started_at_inv: ZERO,
-            lifecycle: TickLifecycleAirBinding::zero(),
+            lifecycle: AdvanceDeadlineLifecycleAirBinding::zero(),
         }
     }
     /// 转列向量。
@@ -1057,19 +1082,19 @@ impl TickRow {
     }
 }
 
-/// Reconstruct the canonical native Tick transition and its complete AIR row.
+/// Reconstruct the canonical native advance-deadline transition and its complete AIR row.
 ///
-/// This closes the gap between the trace's Tick business columns and the
+/// This closes the gap between the trace's AdvanceDeadline business columns and the
 /// public table images.  A verifier now rejects a proof whose timer family,
 /// Time Bank accounting, rake receipt, version delta, or trusted trace row was
 /// not derived from the same VM transition as the committed pre/post tables.
 pub fn validate_public_inputs(
-    air: &TickAir,
+    air: &AdvanceDeadlineAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
-    if public_inputs.kind != MethodKind::Tick {
+    if public_inputs.kind != MethodKind::AdvanceDeadline {
         return Err(TexasAirError::SpecViolation(
-            "tick: public-input method kind mismatch".into(),
+            "advance_deadline: public-input method kind mismatch".into(),
         ));
     }
     let pre = table_from_state_preimage(&public_inputs.pre_image)?;
@@ -1083,17 +1108,17 @@ pub fn validate_public_inputs(
         || public_inputs.call_seq != post.call_seq
     {
         return Err(TexasAirError::SpecViolation(
-            "tick: public metadata does not match canonical pre/post tables".into(),
+            "advance_deadline: public metadata does not match canonical pre/post tables".into(),
         ));
     }
 
     let expected_input = canonical_input(&pre, &post, air.input.current_time)?;
     if air.input != expected_input {
         return Err(TexasAirError::SpecViolation(
-            "tick: AIR constants do not match the canonical VM transition".into(),
+            "advance_deadline: AIR constants do not match the canonical VM transition".into(),
         ));
     }
-    let mut expected_row = TickRow::active(
+    let mut expected_row = AdvanceDeadlineRow::active(
         &expected_input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),
@@ -1111,7 +1136,8 @@ pub fn validate_public_inputs(
     let trusted_row = public_inputs.require_expected_trace_row(expected_row.len())?;
     if trusted_row != expected_row {
         return Err(TexasAirError::SpecViolation(
-            "tick: trusted trace row was not reconstructed from canonical public inputs".into(),
+            "advance_deadline: trusted trace row was not reconstructed from canonical public inputs"
+                .into(),
         ));
     }
     Ok(())
@@ -1120,8 +1146,8 @@ pub fn validate_public_inputs(
 #[cfg(test)]
 mod tests {
     use super::{
-        TICK_BRANCH_BETTING_TIMEOUT, TICK_BRANCH_TIME_BANK_CONSUMED, TICK_KIND_BETTING,
-        canonical_input,
+        ADVANCE_DEADLINE_BRANCH_BETTING_TIMEOUT, ADVANCE_DEADLINE_BRANCH_TIME_BANK_CONSUMED,
+        ADVANCE_DEADLINE_KIND_BETTING, canonical_input,
     };
     use crate::test_support as seat_fixture;
     use poker_l1::object_model::ObjectID;
@@ -1136,7 +1162,7 @@ mod tests {
     fn table() -> TexasPokerTable {
         TexasPokerTable::new(
             ObjectID::new([0xA1; 20], 42),
-            "canonical-tick".into(),
+            "canonical-advance-deadline".into(),
             [0xB2; 20],
             4,
             50,
@@ -1158,11 +1184,15 @@ mod tests {
     /// The state machine owns call/hand sequence maintenance at the dispatch
     /// layer.  Mirror that small dispatch step so `canonical_input` receives
     /// the exact pre/post tables used by a real prove task.
-    fn execute_tick(pre: &TexasPokerTable, now_ms: u64) -> (TexasPokerTable, Vec<TexasPokerEvent>) {
+    fn execute_advance_deadline(
+        pre: &TexasPokerTable,
+        now_ms: u64,
+    ) -> (TexasPokerTable, Vec<TexasPokerEvent>) {
         let mut post = pre.clone();
         let mut events = Vec::new();
-        state_machine::tick(&mut post, now_ms, &mut events).expect("fixture tick must succeed");
-        assert_ne!(post, *pre, "fixture tick must change the table");
+        state_machine::advance_deadline(&mut post, now_ms, &mut events)
+            .expect("fixture advance_deadline must succeed");
+        assert_ne!(post, *pre, "fixture advance_deadline must change the table");
         post.call_seq = pre.call_seq.checked_add(1).expect("fixture call sequence");
         post.hand_id = if events
             .iter()
@@ -1198,7 +1228,7 @@ mod tests {
         pre.enter_betting(ROUND_PREFLOP, BettingRound::new(100, 100), 0, u64::MAX - 20)
             .unwrap();
         let now_ms = u64::MAX - 10;
-        let (post, events) = execute_tick(&pre, now_ms);
+        let (post, events) = execute_advance_deadline(&pre, now_ms);
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -1215,8 +1245,8 @@ mod tests {
         );
         assert!(!post.seats[0].is_folded());
 
-        let input = canonical_input(&pre, &post, now_ms).expect("canonical betting tick");
-        assert_eq!(input.timeout_kind, TICK_KIND_BETTING);
+        let input = canonical_input(&pre, &post, now_ms).expect("canonical betting deadline");
+        assert_eq!(input.timeout_kind, ADVANCE_DEADLINE_KIND_BETTING);
         assert!(input.timeout_required);
         assert_eq!(input.timeout_started_at, u64::MAX - 20);
         assert_eq!(input.timeout_ms, 10);
@@ -1225,7 +1255,10 @@ mod tests {
         assert_eq!(input.time_bank_post, 0);
         assert_eq!(input.rake_amount, 0);
         assert_eq!(input.version_increment, 1);
-        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_TIME_BANK_CONSUMED);
+        assert_eq!(
+            input.lifecycle.branch_kind,
+            ADVANCE_DEADLINE_BRANCH_TIME_BANK_CONSUMED
+        );
     }
 
     #[test]
@@ -1246,7 +1279,7 @@ mod tests {
         pre.rake_cap = 20;
 
         let now_ms = 1_030_001;
-        let (post, events) = execute_tick(&pre, now_ms);
+        let (post, events) = execute_advance_deadline(&pre, now_ms);
         assert!(events.iter().any(|event| matches!(
             event,
             TexasPokerEvent::RakeCollected {
@@ -1264,13 +1297,16 @@ mod tests {
             }
         )));
 
-        let input = canonical_input(&pre, &post, now_ms).expect("canonical rake tick");
-        assert_eq!(input.timeout_kind, TICK_KIND_BETTING);
+        let input = canonical_input(&pre, &post, now_ms).expect("canonical rake deadline");
+        assert_eq!(input.timeout_kind, ADVANCE_DEADLINE_KIND_BETTING);
         assert!(input.timeout_required);
         assert_eq!(input.time_bank_consumed, 0);
         assert_eq!(input.rake_mode, RAKE_MODE_PERCENTAGE);
         assert_eq!(input.rake_amount, 10);
-        assert_eq!(input.lifecycle.branch_kind, TICK_BRANCH_BETTING_TIMEOUT);
+        assert_eq!(
+            input.lifecycle.branch_kind,
+            ADVANCE_DEADLINE_BRANCH_BETTING_TIMEOUT
+        );
     }
 
     #[test]
@@ -1284,7 +1320,8 @@ mod tests {
 
         let mut post = pre.clone();
         let mut events = Vec::new();
-        state_machine::tick(&mut post, 2_000_000, &mut events).expect("waiting tick");
+        state_machine::advance_deadline(&mut post, 2_000_000, &mut events)
+            .expect("waiting advance_deadline");
         assert_eq!(post, pre);
         assert!(events.is_empty());
         assert!(canonical_input(&pre, &post, 2_000_000).is_err());
@@ -1293,7 +1330,7 @@ mod tests {
     #[test]
     fn canonical_input_rejects_post_state_not_produced_by_native_tick() {
         let pre = betting_table(30_000);
-        let (mut post, _) = execute_tick(&pre, 1_030_000);
+        let (mut post, _) = execute_advance_deadline(&pre, 1_030_000);
         post.enter_betting(
             ROUND_PREFLOP,
             post.betting_round().unwrap(),

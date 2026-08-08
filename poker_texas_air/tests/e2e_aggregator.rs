@@ -334,7 +334,7 @@ fn test_soundness_aggregator_tampered_left_kind() {
     let mut proof = prove_aggregator_unchecked_for_tests(children).expect("prove 失败");
 
     // 篡改 left.method_kind：trace 中是 CreateTable (0)，AIR 声明 Tick (4)
-    proof.air.left.method_kind = MethodKind::Tick;
+    proof.air.left.method_kind = MethodKind::AdvanceDeadline;
 
     let result = verify_aggregator_unchecked_for_tests(proof);
     assert!(

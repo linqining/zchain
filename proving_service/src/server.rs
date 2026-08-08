@@ -1689,7 +1689,7 @@ mod tests {
     use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
     use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
     use poker_l1::vm::contracts::texas_poker::dispatch::{
-        CreateTableArgs, JoinTableArgs, SeatIndexArgs, selectors,
+        CreateTableArgs, JoinTableArgs, SeatIndexArgs, SetLeaveAfterHandArgs, selectors,
     };
     use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
     use poker_l1::vm::contracts::texas_poker::utils;
@@ -2534,8 +2534,14 @@ mod tests {
             chain_id: None,
             block_height: None,
             block_timestamp_ms: None,
-            selector_hex: hex::encode(selectors::request_leave_after_hand()),
-            args_hex: hex::encode(borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap()),
+            selector_hex: hex::encode(selectors::set_leave_after_hand()),
+            args_hex: hex::encode(
+                borsh::to_vec(&SetLeaveAfterHandArgs {
+                    seat_index: 0,
+                    want_leave: true,
+                })
+                .unwrap(),
+            ),
             idempotency_key: Some("leave".into()),
         };
         let leave = dispatch_legacy(State(state.clone()), Json(leave))

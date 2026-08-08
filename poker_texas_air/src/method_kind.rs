@@ -1,14 +1,14 @@
-//! 23 个方法的枚举与 selector 计算。
+//! 当前 method AIR 的枚举与 selector 计算。
 //!
-//! 严格对齐 [`poker_l1::vm::contracts::texas_poker::dispatch`] 的 23 个方法选择器，
-//! 用 `blake2b_256(method_name)[0..32]` 计算（与 L1 dispatch 算法一致）。
+//! 保留与 [`poker_l1::vm::contracts::texas_poker::dispatch`] 一致的稳定 discriminant 空间，
+//! 当前包含 19 个 active selector 与 2 个仅内部兼容 tag；15/16 已退休且不重排。
 //!
 //! # 分类
 //!
 //! - **A 档（生命周期，6 个）**：表台创建/入座/离座/开局/超时/重置
 //! - **B 档（玩家动作，9 个）**：9 个启用 AIR
 //! - **B+ 档（资金动作，2 个）**：addon（下一手生效）/rebuy（立即生效）
-//! - **C 档（密码学协议，6 个）**：6 个启用 AIR
+//! - **C 档（密码学协议，4 个）**：4 个启用 AIR
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
@@ -32,9 +32,9 @@ pub fn compute_method_selector(method_name: &str) -> [u8; METHOD_SELECTOR_LEN] {
     out
 }
 
-/// 23 个方法种类的枚举。
+/// 当前方法种类的枚举。
 ///
-/// 每个 variant 对应 `poker_l1` 的一个公开 dispatch selector，并拥有启用的专用 AIR。
+/// Active variant 对应 `poker_l1` 的公开 dispatch selector；内部兼容 variant 只保留专用 AIR。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, BorshSerialize, BorshDeserialize)]
 #[borsh(use_discriminant = true)]
 #[repr(u8)]
@@ -48,8 +48,8 @@ pub enum MethodKind {
     LeaveTable = 2,
     /// `start_hand` — 开始新一局（投盲注 + 进入 shuffle 阶段）。
     StartHand = 3,
-    /// `tick` — 超时驱动（permissionless）。
-    Tick = 4,
+    /// `advance_deadline` — 超时驱动（permissionless）。
+    AdvanceDeadline = 4,
     /// `reset_for_next_hand` — 显式重置桌台到 WAITING。
     ResetForNextHand = 5,
 
@@ -66,7 +66,7 @@ pub enum MethodKind {
     AutoFold = 10,
     /// `force_fold` — 管理员强制 fold 玩家。
     ForceFold = 11,
-    /// `kick_player` — 踢出玩家（管理员操作）。
+    /// `kick_player_v2` — 踢出玩家（管理员操作，原因固定为 Admin）。
     KickPlayer = 12,
 
     // ===== B+ 档：资金动作（2 个）=====
@@ -75,11 +75,7 @@ pub enum MethodKind {
     /// `rebuy` — 玩家重购（立即生效，MTT 早期用）。
     Rebuy = 14,
 
-    // ===== C 档：Mental Poker 协议（6 个）=====
-    /// `join_and_shuffle` — 玩家加入并完成首洗牌。
-    JoinAndShuffle = 15,
-    /// `leave_with_proof` — 玩家带 proof 离场。
-    LeaveWithProof = 16,
+    // ===== C 档：Mental Poker 协议（4 个）=====
     /// `submit_shuffle_v2` — 玩家提交洗牌结果（V2）。
     SubmitShuffleV2 = 17,
     /// `submit_player_reveal_tokens` — 提交揭牌令牌。
@@ -90,19 +86,19 @@ pub enum MethodKind {
     // ===== B 档扩展：bet 动作（1 个）=====
     /// `bet` — 玩家主动下注（postflop 第一个下注者，语义等同 raise 但更清晰）。
     Bet = 20,
-    /// `request_leave_after_hand` — 切换下一手前离场标记。
-    RequestLeaveAfterHand = 21,
+    /// `set_leave_after_hand` — 显式设置下一手前离场标记。
+    SetLeaveAfterHand = 21,
     /// `fold_with_proof` — 局中 fold 并剥离自己的加密层。
     FoldWithProof = 22,
 }
 
 impl MethodKind {
-    /// 方法总数（23）。
-    pub const COUNT: usize = 23;
+    /// 当前方法总数。
+    pub const COUNT: usize = 21;
 
     /// Whether the repository ships an enabled production AIR for this selector.
     ///
-    /// All 23 registered VM selectors currently have an enabled production AIR.
+    /// All 21 retained MethodKind variants currently have an enabled production AIR.
     #[must_use]
     pub const fn is_production_air_enabled(self) -> bool {
         true
@@ -116,7 +112,7 @@ impl MethodKind {
             Self::JoinTable => "join_table",
             Self::LeaveTable => "leave_table",
             Self::StartHand => "start_hand",
-            Self::Tick => "tick",
+            Self::AdvanceDeadline => "advance_deadline",
             Self::ResetForNextHand => "reset_for_next_hand",
             Self::Fold => "fold",
             Self::Check => "check",
@@ -124,16 +120,14 @@ impl MethodKind {
             Self::Raise => "raise",
             Self::AutoFold => "auto_fold",
             Self::ForceFold => "force_fold",
-            Self::KickPlayer => "kick_player",
+            Self::KickPlayer => "kick_player_v2",
             Self::Addon => "addon",
             Self::Rebuy => "rebuy",
-            Self::JoinAndShuffle => "join_and_shuffle",
-            Self::LeaveWithProof => "leave_with_proof",
             Self::SubmitShuffleV2 => "submit_shuffle_v2",
             Self::SubmitPlayerRevealTokens => "submit_player_reveal_tokens",
             Self::SubmitReconstructDeck => "submit_reconstruct_deck",
             Self::Bet => "bet",
-            Self::RequestLeaveAfterHand => "request_leave_after_hand",
+            Self::SetLeaveAfterHand => "set_leave_after_hand",
             Self::FoldWithProof => "fold_with_proof",
         }
     }
@@ -152,7 +146,7 @@ impl MethodKind {
             | Self::JoinTable
             | Self::LeaveTable
             | Self::StartHand
-            | Self::Tick
+            | Self::AdvanceDeadline
             | Self::ResetForNextHand => MethodTier::Lifecycle,
             Self::Fold
             | Self::Check
@@ -162,11 +156,9 @@ impl MethodKind {
             | Self::ForceFold
             | Self::KickPlayer
             | Self::Bet
-            | Self::RequestLeaveAfterHand => MethodTier::Action,
+            | Self::SetLeaveAfterHand => MethodTier::Action,
             Self::Addon | Self::Rebuy => MethodTier::Funds,
-            Self::JoinAndShuffle
-            | Self::LeaveWithProof
-            | Self::SubmitShuffleV2
+            Self::SubmitShuffleV2
             | Self::SubmitPlayerRevealTokens
             | Self::SubmitReconstructDeck
             | Self::FoldWithProof => MethodTier::Crypto,
@@ -177,7 +169,7 @@ impl MethodKind {
     ///
     /// # Errors
     ///
-    /// 当 `value >= 23` 时返回 `None`。
+    /// 未注册或已退休的 discriminant 返回 `None`。
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
@@ -185,7 +177,7 @@ impl MethodKind {
             1 => Some(Self::JoinTable),
             2 => Some(Self::LeaveTable),
             3 => Some(Self::StartHand),
-            4 => Some(Self::Tick),
+            4 => Some(Self::AdvanceDeadline),
             5 => Some(Self::ResetForNextHand),
             6 => Some(Self::Fold),
             7 => Some(Self::Check),
@@ -196,19 +188,18 @@ impl MethodKind {
             12 => Some(Self::KickPlayer),
             13 => Some(Self::Addon),
             14 => Some(Self::Rebuy),
-            15 => Some(Self::JoinAndShuffle),
-            16 => Some(Self::LeaveWithProof),
+            15 | 16 => None,
             17 => Some(Self::SubmitShuffleV2),
             18 => Some(Self::SubmitPlayerRevealTokens),
             19 => Some(Self::SubmitReconstructDeck),
             20 => Some(Self::Bet),
-            21 => Some(Self::RequestLeaveAfterHand),
+            21 => Some(Self::SetLeaveAfterHand),
             22 => Some(Self::FoldWithProof),
             _ => None,
         }
     }
 
-    /// 返回所有 23 个方法（用于迭代）。
+    /// 返回所有当前方法（用于迭代）。
     #[must_use]
     pub const fn all() -> [Self; Self::COUNT] {
         [
@@ -216,7 +207,7 @@ impl MethodKind {
             Self::JoinTable,
             Self::LeaveTable,
             Self::StartHand,
-            Self::Tick,
+            Self::AdvanceDeadline,
             Self::ResetForNextHand,
             Self::Fold,
             Self::Check,
@@ -227,13 +218,11 @@ impl MethodKind {
             Self::KickPlayer,
             Self::Addon,
             Self::Rebuy,
-            Self::JoinAndShuffle,
-            Self::LeaveWithProof,
             Self::SubmitShuffleV2,
             Self::SubmitPlayerRevealTokens,
             Self::SubmitReconstructDeck,
             Self::Bet,
-            Self::RequestLeaveAfterHand,
+            Self::SetLeaveAfterHand,
             Self::FoldWithProof,
         ]
     }
@@ -248,7 +237,7 @@ pub enum MethodTier {
     Action,
     /// B+ 档：资金动作（2 个：addon/rebuy）。
     Funds,
-    /// C 档：Mental Poker 协议（6 个，全部启用 AIR）。
+    /// C 档：Mental Poker 协议（4 个，全部启用 AIR）。
     Crypto,
 }
 
@@ -271,8 +260,8 @@ mod tests {
 
     #[test]
     fn test_method_count() {
-        assert_eq!(MethodKind::COUNT, 23);
-        assert_eq!(MethodKind::all().len(), 23);
+        assert_eq!(MethodKind::COUNT, 21);
+        assert_eq!(MethodKind::all().len(), 21);
     }
 
     #[test]
@@ -297,11 +286,10 @@ mod tests {
             let v = kind as u8;
             assert_eq!(MethodKind::from_u8(v), Some(kind));
         }
-        assert_eq!(
-            MethodKind::from_u8(21),
-            Some(MethodKind::RequestLeaveAfterHand)
-        );
+        assert_eq!(MethodKind::from_u8(21), Some(MethodKind::SetLeaveAfterHand));
         assert_eq!(MethodKind::from_u8(22), Some(MethodKind::FoldWithProof));
+        assert_eq!(MethodKind::from_u8(15), None);
+        assert_eq!(MethodKind::from_u8(16), None);
         assert_eq!(MethodKind::from_u8(23), None);
         assert_eq!(MethodKind::from_u8(255), None);
     }
@@ -310,9 +298,9 @@ mod tests {
     fn test_tier_classification() {
         assert_eq!(MethodKind::CreateTable.tier(), MethodTier::Lifecycle);
         assert_eq!(MethodKind::Raise.tier(), MethodTier::Action);
-        assert_eq!(MethodKind::JoinAndShuffle.tier(), MethodTier::Crypto);
+        assert_eq!(MethodKind::SubmitShuffleV2.tier(), MethodTier::Crypto);
         assert!(MethodKind::Bet.is_production_air_enabled());
-        assert!(MethodKind::RequestLeaveAfterHand.is_production_air_enabled());
+        assert!(MethodKind::SetLeaveAfterHand.is_production_air_enabled());
         assert!(MethodKind::FoldWithProof.is_production_air_enabled());
     }
 

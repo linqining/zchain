@@ -1,9 +1,7 @@
 //! E2E 测试 — crypto 模块（Mental Poker 协议方法）prove + verify + soundness。
 //!
-//! 覆盖 6 个 crypto 协议方法：
+//! 覆盖 4 个 active crypto 协议方法：
 //! - `fold_with_proof`
-//! - `join_and_shuffle`
-//! - `leave_with_proof`
 //! - `submit_shuffle_v2`
 //! - `submit_player_reveal_tokens`
 //! - `submit_reconstruct_deck`
@@ -23,12 +21,6 @@ use stwo::core::fields::m31::M31;
 
 use poker_texas_air::airs::TexasAir;
 use poker_texas_air::airs::crypto::fold_with_proof::{FoldWithProofAir, FoldWithProofInput};
-use poker_texas_air::airs::crypto::join_and_shuffle::{
-    JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
-};
-use poker_texas_air::airs::crypto::leave_with_proof::{
-    LeaveWithProofAir, LeaveWithProofInput, LeaveWithProofRow,
-};
 use poker_texas_air::airs::crypto::submit_player_reveal_tokens::{
     SubmitPlayerRevealTokensAir, SubmitPlayerRevealTokensInput, SubmitPlayerRevealTokensRow,
 };
@@ -95,55 +87,6 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
         ),
         (
             Box::new(|public_inputs| {
-                JoinAndShuffleAir {
-                    log_size: 10,
-                    input: JoinAndShuffleInput {
-                        seat_index: 0,
-                        old_deck_commitment: 51,
-                        new_deck_commitment: 52,
-                        shuffle_phase: 1,
-                        precompile: PrecompileAirBinding::synthetic_unverified(),
-                    },
-                    pre_state_root: zero_root(),
-                    post_state_root: one_root(),
-                    table_id: 42,
-                    hand_id: 1,
-                    call_seq: 1,
-                    pre_version: 0,
-                    post_version: 1,
-                }
-                .validate_public_inputs(public_inputs)
-                .unwrap_err()
-                .to_string()
-            }),
-            TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-        ),
-        (
-            Box::new(|public_inputs| {
-                LeaveWithProofAir {
-                    log_size: 10,
-                    input: LeaveWithProofInput {
-                        seat_index: 0,
-                        leave_kind: 0,
-                        shuffle_phase: 1,
-                        precompile: PrecompileAirBinding::synthetic_unverified(),
-                    },
-                    pre_state_root: zero_root(),
-                    post_state_root: one_root(),
-                    table_id: 42,
-                    hand_id: 1,
-                    call_seq: 2,
-                    pre_version: 0,
-                    post_version: 1,
-                }
-                .validate_public_inputs(public_inputs)
-                .unwrap_err()
-                .to_string()
-            }),
-            TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
-        ),
-        (
-            Box::new(|public_inputs| {
                 SubmitPlayerRevealTokensAir {
                     log_size: 10,
                     input: SubmitPlayerRevealTokensInput {
@@ -174,346 +117,6 @@ fn production_crypto_validators_require_an_exact_dispatch_call() {
         let error = validate(&public_inputs);
         assert!(error.contains("dispatch-call preimage"), "{error}");
     }
-}
-
-// ========== join_and_shuffle AIR ==========
-
-/// E2E: join_and_shuffle → trace → prove → verify（happy path）。
-#[test]
-fn test_e2e_join_and_shuffle_prove_verify() {
-    let input = JoinAndShuffleInput {
-        seat_index: 0,
-        old_deck_commitment: 0x1020_3040,
-        new_deck_commitment: 0xABCD_1234,
-        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = JoinAndShuffleRow::active(
-        &input,
-        zero_root(),
-        one_root(),
-        42, // table_id
-        1,  // hand_id
-        1,  // call_seq
-        0,  // pre_version
-        1,  // post_version
-        0,  // pre_completed_count（占位）
-        1,  // post_completed_count
-    );
-    let trace = gen_method_trace(
-        JoinAndShuffleAir::num_columns(),
-        &row.to_vec(),
-        &JoinAndShuffleRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = JoinAndShuffleAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 1,
-        pre_version: 0,
-        post_version: 1,
-    };
-
-    let proof = prove_method(
-        &trace,
-        air,
-        JoinAndShuffleAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-    )
-    .expect("prove 失败");
-    verify_method(proof).expect("verify 失败");
-}
-
-/// Soundness: 篡改 join_and_shuffle 的 `seat_index` 公开输入后，verify 应失败。
-#[test]
-fn test_soundness_join_and_shuffle_tampered_seat() {
-    let input = JoinAndShuffleInput {
-        seat_index: 0,
-        old_deck_commitment: 0x1020_3040,
-        new_deck_commitment: 0xABCD_1234,
-        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
-    let trace = gen_method_trace(
-        JoinAndShuffleAir::num_columns(),
-        &row.to_vec(),
-        &JoinAndShuffleRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = JoinAndShuffleAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 1,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        JoinAndShuffleAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-    )
-    .expect("prove 失败");
-
-    // 篡改 seat_index：trace 中是 0，AIR 声明 5
-    proof.air = JoinAndShuffleAir {
-        input: JoinAndShuffleInput {
-            seat_index: 5, // 篡改！
-            ..proof.air.input.clone()
-        },
-        ..proof.air.clone()
-    };
-
-    let result = verify_method(proof);
-    assert!(
-        result.is_err(),
-        "篡改 seat_index 后 verify 应失败，但成功了 — soundness 漏洞！"
-    );
-}
-
-/// Soundness: 篡改 join_and_shuffle 的 `new_deck_commitment` 公开输入后，verify 应失败。
-#[test]
-fn test_soundness_join_and_shuffle_tampered_commitment() {
-    let input = JoinAndShuffleInput {
-        seat_index: 0,
-        old_deck_commitment: 0x1020_3040,
-        new_deck_commitment: 0xABCD_1234,
-        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
-    let trace = gen_method_trace(
-        JoinAndShuffleAir::num_columns(),
-        &row.to_vec(),
-        &JoinAndShuffleRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = JoinAndShuffleAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 1,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        JoinAndShuffleAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-    )
-    .expect("prove 失败");
-
-    // 篡改 new_deck_commitment：trace 中是 0xABCD_1234，AIR 声明 0xFFFF_FFFF
-    proof.air = JoinAndShuffleAir {
-        input: JoinAndShuffleInput {
-            new_deck_commitment: 0xFFFF_FFFF, // 篡改！
-            ..proof.air.input.clone()
-        },
-        ..proof.air.clone()
-    };
-
-    let result = verify_method(proof);
-    assert!(
-        result.is_err(),
-        "篡改 new_deck_commitment 后 verify 应失败，但成功了 — soundness 漏洞！"
-    );
-}
-
-/// Soundness: 仅篡改高位 limb、保持低 16 位不变也必须失败。
-#[test]
-fn test_soundness_join_and_shuffle_tampered_high_commitment_limb() {
-    let input = JoinAndShuffleInput {
-        seat_index: 0,
-        old_deck_commitment: 0x1020_3040,
-        new_deck_commitment: 0x0001_0000_ABCD_1234,
-        shuffle_phase: 1,
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
-    let trace = gen_method_trace(
-        JoinAndShuffleAir::num_columns(),
-        &row.to_vec(),
-        &JoinAndShuffleRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-    let air = JoinAndShuffleAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 1,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        JoinAndShuffleAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-    )
-    .expect("prove 失败");
-    proof.air.input.new_deck_commitment = 0x0002_0000_ABCD_1234;
-    assert!(verify_method(proof).is_err());
-}
-
-/// Soundness: 原牌组承诺也必须绑定到 trace，不能被替换。
-#[test]
-fn test_soundness_join_and_shuffle_tampered_old_commitment() {
-    let input = JoinAndShuffleInput {
-        seat_index: 0,
-        old_deck_commitment: 0x0001_0000_1020_3040,
-        new_deck_commitment: 0x0001_0000_ABCD_1234,
-        shuffle_phase: 1,
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = JoinAndShuffleRow::active(&input, zero_root(), one_root(), 42, 1, 1, 0, 1, 0, 1);
-    let trace = gen_method_trace(
-        JoinAndShuffleAir::num_columns(),
-        &row.to_vec(),
-        &JoinAndShuffleRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-    let air = JoinAndShuffleAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 1,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        JoinAndShuffleAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::JoinAndShuffle, 42, 1, 1),
-    )
-    .expect("prove 失败");
-    proof.air.input.old_deck_commitment = 0x0002_0000_1020_3040;
-    assert!(verify_method(proof).is_err());
-}
-
-// ========== leave_with_proof AIR ==========
-
-/// E2E: leave_with_proof → trace → prove → verify（happy path）。
-#[test]
-fn test_e2e_leave_with_proof_prove_verify() {
-    let input = LeaveWithProofInput {
-        seat_index: 1,
-        leave_kind: 0,    // LeaveKind::Normal
-        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = LeaveWithProofRow::active(
-        &input,
-        zero_root(),
-        one_root(),
-        42,
-        1,
-        2,
-        0,
-        1,
-        0, // post_completed_count（玩家离场后）
-    );
-    let trace = gen_method_trace(
-        LeaveWithProofAir::num_columns(),
-        &row.to_vec(),
-        &LeaveWithProofRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = LeaveWithProofAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 2,
-        pre_version: 0,
-        post_version: 1,
-    };
-
-    let proof = prove_method(
-        &trace,
-        air,
-        LeaveWithProofAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
-    )
-    .expect("prove 失败");
-    verify_method(proof).expect("verify 失败");
-}
-
-/// Soundness: 篡改 leave_with_proof 的 `leave_kind` 公开输入后，verify 应失败。
-#[test]
-fn test_soundness_leave_with_proof_tampered_kind() {
-    let input = LeaveWithProofInput {
-        seat_index: 1,
-        leave_kind: 0,
-        shuffle_phase: 1, // Gap 6：∈ {1,2,3}（非 NONE）
-        precompile: PrecompileAirBinding::synthetic_unverified(),
-    };
-    let row = LeaveWithProofRow::active(&input, zero_root(), one_root(), 42, 1, 2, 0, 1, 0);
-    let trace = gen_method_trace(
-        LeaveWithProofAir::num_columns(),
-        &row.to_vec(),
-        &LeaveWithProofRow::padding().to_vec(),
-    )
-    .expect("trace 生成失败");
-
-    let air = LeaveWithProofAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: zero_root(),
-        post_state_root: one_root(),
-        table_id: 42,
-        hand_id: 1,
-        call_seq: 2,
-        pre_version: 0,
-        post_version: 1,
-    };
-    let mut proof = prove_method(
-        &trace,
-        air,
-        LeaveWithProofAir::num_columns(),
-        TexasPublicInputs::synthetic_for_test(MethodKind::LeaveWithProof, 42, 1, 2),
-    )
-    .expect("prove 失败");
-
-    // 篡改 leave_kind：trace 中是 0，AIR 声明 2
-    proof.air = LeaveWithProofAir {
-        input: LeaveWithProofInput {
-            leave_kind: 2, // 篡改！
-            ..proof.air.input.clone()
-        },
-        ..proof.air.clone()
-    };
-
-    let result = verify_method(proof);
-    assert!(
-        result.is_err(),
-        "篡改 leave_kind 后 verify 应失败，但成功了 — soundness 漏洞！"
-    );
 }
 
 // ========== submit_shuffle_v2 AIR ==========
@@ -945,8 +548,7 @@ fn test_crypto_air_column_consistency() {
     use poker_texas_air::airs::actions::end_without_showdown;
     use poker_texas_air::airs::common::COMMON_NUM_COLUMNS;
     use poker_texas_air::airs::crypto::{
-        fold_with_proof, join_and_shuffle, leave_with_proof, submit_player_reveal_tokens,
-        submit_reconstruct_deck, submit_shuffle_v2,
+        fold_with_proof, submit_player_reveal_tokens, submit_reconstruct_deck, submit_shuffle_v2,
     };
 
     // fold_with_proof: 通用 + 47 基础/precompile binding + 34 终局结算业务。
@@ -957,20 +559,6 @@ fn test_crypto_air_column_consistency() {
     assert_eq!(
         FoldWithProofAir::num_columns(),
         fold_with_proof::cols::NUM_COLUMNS
-    );
-
-    // join_and_shuffle: 原 16 业务列 + precompile id/version + 两个 256-bit digest。
-    assert_eq!(join_and_shuffle::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);
-    assert_eq!(
-        JoinAndShuffleAir::num_columns(),
-        join_and_shuffle::cols::NUM_COLUMNS
-    );
-
-    // leave_with_proof: 通用 + 5 业务（含 Gap 6 shuffle_phase + q witness）= 42
-    assert_eq!(leave_with_proof::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
-    assert_eq!(
-        LeaveWithProofAir::num_columns(),
-        leave_with_proof::cols::NUM_COLUMNS
     );
 
     // submit_shuffle_v2: 原 8 业务列 + id/version + 2×16 full digest limbs。
@@ -1010,8 +598,6 @@ fn test_crypto_air_column_consistency() {
 fn test_crypto_method_kinds() {
     use poker_texas_air::method_kind::{MethodKind, MethodTier};
 
-    assert_eq!(MethodKind::JoinAndShuffle.tier(), MethodTier::Crypto);
-    assert_eq!(MethodKind::LeaveWithProof.tier(), MethodTier::Crypto);
     assert_eq!(MethodKind::SubmitShuffleV2.tier(), MethodTier::Crypto);
     assert_eq!(
         MethodKind::SubmitPlayerRevealTokens.tier(),

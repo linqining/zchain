@@ -9,7 +9,7 @@
 use poker_l1::vm::contracts::texas_poker::constants::{
     FOLD_REASON_AUTO_TIMEOUT, FOLD_REASON_FORCE_ADMIN,
 };
-use poker_l1::vm::contracts::texas_poker::dispatch::KickPlayerArgs;
+use poker_l1::vm::contracts::texas_poker::dispatch::SeatIndexArgs;
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{Seat, TexasPokerTable};
 use stwo::core::fields::m31::M31;
@@ -24,7 +24,7 @@ use super::fold::{FoldAir, FoldRow};
 use super::force_fold::{ForceFoldAir, ForceFoldRow};
 use super::kick_player::{KickPlayerAir, KickPlayerInput, KickPlayerRow};
 use super::raise::{RaiseAir, RaiseRow};
-use super::request_leave_after_hand::{RequestLeaveAfterHandAir, RequestLeaveAfterHandRow};
+use super::set_leave_after_hand::{SetLeaveAfterHandAir, SetLeaveAfterHandRow};
 use crate::airs::validation::{
     validate_canonical_dispatch, validate_row as validate_canonical_row,
 };
@@ -631,19 +631,19 @@ pub(crate) fn validate_kick_player(
     air: &KickPlayerAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
-    const METHOD: &str = "kick_player";
+    const METHOD: &str = "kick_player_v2";
     let canonical = validate_canonical_dispatch(public_inputs, MethodKind::KickPlayer)?;
-    let args: KickPlayerArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+    let args: SeatIndexArgs = borsh::from_slice(&canonical.replay_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
-    let MethodInput::Kick { seat_index, reason } = canonical.method_input else {
+    let MethodInput::Kick { seat_index } = canonical.method_input else {
         return Err(TexasAirError::SpecViolation(
             "kick_player: replayed task has the wrong MethodInput variant".into(),
         ));
     };
-    if seat_index != args.seat_index || reason != args.reason {
+    if seat_index != args.seat_index {
         return Err(TexasAirError::SpecViolation(
-            "kick_player: replayed MethodInput does not match raw args".into(),
+            "kick_player_v2: replayed MethodInput does not match raw args".into(),
         ));
     }
 
@@ -754,8 +754,8 @@ pub(crate) fn validate_kick_player(
     validate_canonical_row(public_inputs, &row.to_vec(), METHOD)
 }
 
-/// Reconstruct and bind the complete single-seat toggle performed by
-/// `request_leave_after_hand`.
+/// Reconstruct and bind the complete explicit single-seat update performed by
+/// `set_leave_after_hand`.
 ///
 /// The method is valid in every table phase, but must leave every table-level
 /// field unchanged apart from the selected occupied seat's `want_leave`, the
@@ -763,12 +763,12 @@ pub(crate) fn validate_kick_player(
 /// checked by the full dispatch replay in the Orchestrator; the raw state
 /// preimages here provide the same canonical-row protection used by betting
 /// actions for direct verifier callers.
-pub(crate) fn validate_request_leave_after_hand(
-    air: &RequestLeaveAfterHandAir,
+pub(crate) fn validate_set_leave_after_hand(
+    air: &SetLeaveAfterHandAir,
     public_inputs: &TexasPublicInputs,
 ) -> TexasAirResult<()> {
-    const METHOD: &str = "request_leave_after_hand";
-    if public_inputs.kind != MethodKind::RequestLeaveAfterHand {
+    const METHOD: &str = "set_leave_after_hand";
+    if public_inputs.kind != MethodKind::SetLeaveAfterHand {
         return Err(TexasAirError::SpecViolation(format!(
             "{METHOD}: public-input method kind mismatch"
         )));
@@ -811,9 +811,20 @@ pub(crate) fn validate_request_leave_after_hand(
     }
     let mut replay = pre.clone();
     let mut events = Vec::new();
-    state_machine::apply_request_leave(&mut replay, air.input.seat_index, &mut events).map_err(
-        |error| TexasAirError::SpecViolation(format!("{METHOD}: native VM replay failed: {error}")),
-    )?;
+    let changed = state_machine::apply_set_leave_after_hand(
+        &mut replay,
+        air.input.seat_index,
+        air.input.want_leave,
+        &mut events,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!("{METHOD}: native VM replay failed: {error}"))
+    })?;
+    if !changed {
+        return Err(TexasAirError::SpecViolation(format!(
+            "{METHOD}: proof-bearing transition must change want_leave"
+        )));
+    }
     replay.call_seq = expected_call_seq;
     replay.hand_id = pre.hand_id;
     if replay != post {
@@ -824,15 +835,15 @@ pub(crate) fn validate_request_leave_after_hand(
 
     let _ = seat(&post, air.input.seat_index, METHOD)?;
     if air.input.pre_want_leave != pre.seat_wants_leave(air.input.seat_index)
-        || air.input.post_want_leave != post.seat_wants_leave(air.input.seat_index)
-        || air.input.post_want_leave == air.input.pre_want_leave
+        || air.input.want_leave != post.seat_wants_leave(air.input.seat_index)
+        || air.input.want_leave == air.input.pre_want_leave
     {
         return Err(TexasAirError::SpecViolation(format!(
-            "{METHOD}: AIR input does not match canonical want_leave toggle"
+            "{METHOD}: AIR input does not match canonical explicit want_leave update"
         )));
     }
 
-    let row = RequestLeaveAfterHandRow::active(
+    let row = SetLeaveAfterHandRow::active(
         &air.input,
         state_root_to_air_limbs(public_inputs.pre_state_root),
         state_root_to_air_limbs(public_inputs.post_state_root),

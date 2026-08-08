@@ -6,7 +6,7 @@
 //! the complete reset and binds its full pre/post state images.
 
 use poker_l1::vm::contracts::texas_poker::constants::ROUND_WAITING;
-use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
+use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
 use stwo::core::fields::m31::M31;
 use stwo_constraint_framework::EvalAtRow;
 
@@ -17,7 +17,7 @@ use crate::airs::composition::settlement::{SettlementKind, SettlementStagePlan};
 use crate::error::{TexasAirError, TexasAirResult};
 
 /// Sentinel trace value for `current_turn: None`.
-pub const NO_CURRENT_TURN: u8 = u8::MAX;
+pub const NO_CURRENT_TURN: u8 = NO_SEAT;
 
 /// Number of shared terminal-settlement columns.
 pub const NUM_COLUMNS: usize = 34;

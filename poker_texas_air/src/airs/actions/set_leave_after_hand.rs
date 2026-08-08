@@ -1,6 +1,6 @@
-//! `request_leave_after_hand` AIR — 玩家预约在下一手开始前离场。
+//! `set_leave_after_hand` AIR — 显式设置玩家是否在本手结束后离场。
 //!
-//! 此方法只切换一个已占用座位的 `want_leave` 标记，不改变底池、轮次、手牌或
+//! 此方法只设置一个已占用座位的 `want_leave` 标记，不改变底池、轮次、手牌或
 //! 筹码池。实际退款和座位清理由后续 `reset_for_next_hand` 处理。因此它是一个
 //! 可独立证明的单步 transition，与局中 `fold_with_proof` 的加密层剥离语义相互独立。
 
@@ -10,7 +10,7 @@ use stwo_constraint_framework::{EvalAtRow, FrameworkEval};
 use crate::airs::common::{COMMON_NUM_COLUMNS, CommonConstraints, CommonRow, ZERO, u8_to_m31};
 use crate::method_kind::MethodKind;
 
-/// `request_leave_after_hand` 业务列布局。
+/// `set_leave_after_hand` 业务列布局。
 pub mod cols {
     use super::COMMON_NUM_COLUMNS;
 
@@ -26,24 +26,24 @@ pub mod cols {
     pub const NUM_COLUMNS: usize = COMMON_NUM_COLUMNS + 4;
 }
 
-/// `request_leave_after_hand` 的公开业务输入。
+/// `set_leave_after_hand` 的公开业务输入。
 #[derive(Debug, Clone)]
-pub struct RequestLeaveAfterHandInput {
-    /// 要切换预约状态的座位。
+pub struct SetLeaveAfterHandInput {
+    /// 要设置预约状态的座位。
     pub seat_index: u8,
+    /// 显式请求的目标状态。
+    pub want_leave: bool,
     /// 调用前预约状态。
     pub pre_want_leave: bool,
-    /// 调用后预约状态；必须是 [`Self::pre_want_leave`] 的反值。
-    pub post_want_leave: bool,
 }
 
-/// `request_leave_after_hand` 的 AIR。
+/// `set_leave_after_hand` 的 AIR。
 #[derive(Debug, Clone)]
-pub struct RequestLeaveAfterHandAir {
+pub struct SetLeaveAfterHandAir {
     /// trace 的 log2 行数。
     pub log_size: u32,
     /// 公开业务输入。
-    pub input: RequestLeaveAfterHandInput,
+    pub input: SetLeaveAfterHandInput,
     /// 调用前 state root。
     pub pre_state_root: [M31; 4],
     /// 调用后 state root。
@@ -60,7 +60,7 @@ pub struct RequestLeaveAfterHandAir {
     pub post_version: u64,
 }
 
-impl RequestLeaveAfterHandAir {
+impl SetLeaveAfterHandAir {
     /// 总列数。
     #[must_use]
     pub const fn num_columns() -> usize {
@@ -68,7 +68,7 @@ impl RequestLeaveAfterHandAir {
     }
 }
 
-impl FrameworkEval for RequestLeaveAfterHandAir {
+impl FrameworkEval for SetLeaveAfterHandAir {
     fn log_size(&self) -> u32 {
         self.log_size
     }
@@ -89,12 +89,12 @@ impl FrameworkEval for RequestLeaveAfterHandAir {
 
         let expected_seat: E::F = M31::from(u32::from(self.input.seat_index)).into();
         let expected_pre: E::F = M31::from(u32::from(self.input.pre_want_leave)).into();
-        let expected_post: E::F = M31::from(u32::from(self.input.post_want_leave)).into();
+        let expected_post: E::F = M31::from(u32::from(self.input.want_leave)).into();
         let one: E::F = M31::from(1u32).into();
 
         // Bind all business columns to verifier-reconstructed values. `bool` input types
-        // make the two expected values canonical bits; the sum constraint additionally
-        // proves this is a toggle rather than an arbitrary write.
+        // make the two expected values canonical bits. State-changing commands only receive a
+        // proof task, so the sum constraint proves the pre-state differs from the explicit target.
         eval.add_constraint(is_active.clone() * (input_seat_index - expected_seat));
         eval.add_constraint(is_active.clone() * (pre_want_leave.clone() - expected_pre));
         eval.add_constraint(is_active.clone() * (post_want_leave.clone() - expected_post));
@@ -111,27 +111,27 @@ impl FrameworkEval for RequestLeaveAfterHandAir {
     }
 }
 
-/// Active/padding trace row for [`RequestLeaveAfterHandAir`].
+/// Active/padding trace row for [`SetLeaveAfterHandAir`].
 #[derive(Debug, Clone)]
-pub struct RequestLeaveAfterHandRow {
+pub struct SetLeaveAfterHandRow {
     /// Shared statement columns.
     pub common: CommonRow,
     /// Target seat.
     pub input_seat_index: M31,
-    /// Pre-toggle flag.
+    /// Pre-update flag.
     pub pre_want_leave: M31,
-    /// Post-toggle flag.
+    /// Explicit post-update flag.
     pub post_want_leave: M31,
     /// Occupancy witness.
     pub input_seat_occupied: M31,
 }
 
-impl RequestLeaveAfterHandRow {
+impl SetLeaveAfterHandRow {
     /// Construct an active row from independently reconstructed table fields.
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn active(
-        input: &RequestLeaveAfterHandInput,
+        input: &SetLeaveAfterHandInput,
         pre_state_root: [M31; 4],
         post_state_root: [M31; 4],
         table_id: u64,
@@ -146,7 +146,7 @@ impl RequestLeaveAfterHandRow {
     ) -> Self {
         Self {
             common: CommonRow::active(
-                MethodKind::RequestLeaveAfterHand,
+                MethodKind::SetLeaveAfterHand,
                 pre_state_root,
                 post_state_root,
                 table_id,
@@ -163,7 +163,7 @@ impl RequestLeaveAfterHandRow {
             ),
             input_seat_index: u8_to_m31(input.seat_index),
             pre_want_leave: M31::from(u32::from(input.pre_want_leave)),
-            post_want_leave: M31::from(u32::from(input.post_want_leave)),
+            post_want_leave: M31::from(u32::from(input.want_leave)),
             input_seat_occupied: M31::from(1u32),
         }
     }

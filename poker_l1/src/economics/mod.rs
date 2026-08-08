@@ -209,7 +209,7 @@ fn audit_native_supply_objects<'a>(
             };
             if !is_hot_table_state(&object.data) {
                 return Err(PokerL1Error::Serialization(format!(
-                    "Texas Poker table {:?} must use hot v28 state during supply reconciliation",
+                    "Texas Poker table {:?} must use hot v29 state during supply reconciliation",
                     object.id
                 )));
             }

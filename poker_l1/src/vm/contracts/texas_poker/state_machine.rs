@@ -1,13 +1,13 @@
 //! Texas Poker 状态机推进（移植自 `texas_poker_move/sources/table.move` 内部函数）。
 //!
 //! 本模块实现桌台状态机的所有状态转换逻辑，包括：
-//! - 洗牌协议（join_and_shuffle / submit_shuffle_v2 / advance_shuffle）
+//! - 洗牌协议（submit_shuffle_v2 / advance_shuffle）
 //! - 揭示协议（start_*_reveal_phase / check_reveal_phase_complete）
 //! - 重构协议（start_reconstruct / on_complete_reconstruct）
 //! - 下注流程（post_blinds / start_betting_round / advance_turn / advance_round）
-//! - 玩家动作（fold / check / call / raise / leave_with_proof）
+//! - 玩家动作（fold / check / call / raise / fold_with_proof）
 //! - 结算与重置（settle_hand / end_without_showdown / reset_for_next_hand）
-//! - 超时驱动（tick / on_*_timeout）
+//! - 超时驱动（advance_deadline / on_*_timeout）
 //!
 //! # ZK 验证策略
 //!
@@ -29,7 +29,7 @@ use group::Group;
 
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
+use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
 use poker_protocol::zk_shuffle::reconstruction::{
     ReconstructProofV3, ReconstructionV3Statement, apply_reconstruction_contributions,
     canonical_base_deck,
@@ -49,19 +49,17 @@ use super::events::{
 };
 use super::settlement::{self, SettlementPlan};
 use super::types::{
-    CipherDeck, DecryptedCard, EMPTY_PLAYER, NO_SEAT, OWNER_SEAT_PUBLIC, PlayingSeatStatus,
-    RevealAssignment, RevealPurpose, RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask,
-    SeatStatus, TexasPokerTable, seat_mask_contains, seat_mask_count, seat_mask_first,
-    seat_mask_remove, seat_mask_to_indices,
+    CipherDeck, DecryptedCard, NO_SEAT, PlayingSeatStatus, RevealAssignment, RevealPurpose,
+    RevealTarget, RitStartStreet, RunItTwiceState, Seat, SeatMask, SeatStatus, TexasPokerTable,
+    seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
 // typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
-#[cfg(test)]
-use super::utils::scalar_from_u64;
 use super::utils::{
-    self, g1_add, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards,
-    hash_to_scalar,
+    self, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards, hash_to_scalar,
 };
+#[cfg(test)]
+use super::utils::{g1_add, scalar_from_u64};
 use crate::error::{PokerL1Error, PokerL1Result};
 
 /// Maximum number of deterministic micro-transitions a single command may normalize.
@@ -382,6 +380,7 @@ fn no_further_betting_possible(table: &TexasPokerTable) -> bool {
 /// 将 pk 加入聚合 pk：None + pk = Some(pk)；Some(old) + pk = Some(old + pk)。
 ///
 /// typed 化后 `aggregated_pk: Option<G1Projective>`，不再使用字节表示。
+#[cfg(test)]
 fn add_pk_to_aggregated(old: Option<&G1Projective>, new_pk: &G1Projective) -> Option<G1Projective> {
     match old {
         None => Some(*new_pk),
@@ -1424,156 +1423,6 @@ fn on_reconstruct_timeout(
 
 // ========== 玩家入口动作 ==========
 
-/// 玩家加入并提交首洗（或后续 remask+shuffle）。
-///
-/// 镜像 `table.move::join_and_shuffle`（line 774-851）。
-#[allow(clippy::too_many_arguments)]
-pub fn apply_join_and_shuffle(
-    table: &mut TexasPokerTable,
-    seat_index: u8,
-    player: crate::Address,
-    buy_in: u64,
-    pk: G1Projective,
-    _pk_ownership_proof: Vec<u8>,
-    mask_cards: Vec<ElGamalCiphertext>,
-    output_cards: Vec<ElGamalCiphertext>,
-    remask_proof: DLEqProof<DefaultCurve, RemaskKind>,
-    shuffle_proof: ShuffleProof,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    if seat_index >= table.max_players {
-        return Err(PokerL1Error::Serialization(format!(
-            "seat_index {seat_index} >= max_players {}",
-            table.max_players
-        )));
-    }
-    if table.seats[seat_index as usize].is_occupied() {
-        return Err(PokerL1Error::Serialization("seat already occupied".into()));
-    }
-    if !can_join_state(table) {
-        return Err(PokerL1Error::Serialization(
-            "not in WAITING state, cannot join".into(),
-        ));
-    }
-    if table.find_seat(&player).is_some() {
-        return Err(PokerL1Error::Serialization("player already seated".into()));
-    }
-    if is_pk_registered(&table.seats, &pk) {
-        return Err(PokerL1Error::Serialization("pk already registered".into()));
-    }
-    if buy_in == 0 {
-        return Err(PokerL1Error::Serialization("buy_in must be > 0".into()));
-    }
-    if g1_is_identity(&pk) {
-        return Err(PokerL1Error::Serialization(
-            "join public key cannot be identity".into(),
-        ));
-    }
-    let total_chips = table
-        .chip_pool
-        .checked_add(buy_in)
-        .ok_or_else(|| PokerL1Error::Serialization("join: total chips overflow".into()))?;
-    if total_chips > super::constants::MAX_TOTAL_BET {
-        return Err(PokerL1Error::Serialization(format!(
-            "join: total chips {total_chips} exceeds MAX_TOTAL_BET {}",
-            super::constants::MAX_TOTAL_BET
-        )));
-    }
-
-    let pk_pt = pk;
-
-    // 是否首玩家（deck 为空或全为单位元 placeholder）
-    let is_first_player = table.deck_state.encrypted.is_empty()
-        || table
-            .deck_state
-            .encrypted
-            .iter()
-            .all(|ct| g1_is_identity(&ct.c1) && g1_is_identity(&ct.c2));
-
-    // ZK 验证：pk_ownership（首玩家以外）
-    if !is_first_player {
-        let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
-            if !utils::verify_pk_ownership(&pk_pt, &_pk_ownership_proof) {
-                return Err(PokerL1Error::Serialization("pk_ownership failed".into()));
-            }
-            Ok(true)
-        })?;
-    }
-
-    // typed 化后无需反序列化：Args 字段已是 Vec<ElGamalCiphertext> / DLEqProof / ZKShuffleProof
-    let mask_cts = mask_cards;
-    let output_cts = output_cards;
-
-    // 首玩家：input = (G, plaintext_i)；后续：input = 当前 deck
-    let input_cts: Vec<ElGamalCiphertext> = if is_first_player {
-        let g = g1_generator();
-        generate_plaintext_cards()
-            .iter()
-            .map(|m| ElGamalCiphertext { c1: g, c2: *m })
-            .collect()
-    } else {
-        table.deck_state.encrypted.to_vec()
-    };
-
-    // ZK verify remask (input → mask_cts)
-    let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
-        let mut t = utils::new_mask_shuffle_transcript();
-        let ok = DLEqProof::<DefaultCurve, RemaskKind>::verify(
-            &remask_proof,
-            &input_cts,
-            &mask_cts,
-            &pk_pt,
-            &mut t,
-        );
-        if ok {
-            Ok(true)
-        } else {
-            Err(PokerL1Error::Serialization("remask proof failed".into()))
-        }
-    })?;
-
-    // ZK verify shuffle (mask_cts → output_cts)，用 new_agg_pk
-    // ECPoint → G1Projective（types.rs 字段为 Option<ECPoint>，add_pk_to_aggregated 接受 Option<&G1Projective>）
-    let agg_pk_pt: Option<G1Projective> = table.deck_state.aggregated_pk.as_ref().map(|p| p.0);
-    let new_agg_pk = add_pk_to_aggregated(agg_pk_pt.as_ref(), &pk_pt);
-    let new_agg_pk_pt = new_agg_pk.unwrap_or(G1Projective::identity());
-    if g1_is_identity(&new_agg_pk_pt) {
-        return Err(PokerL1Error::Serialization(
-            "join contributor set cannot have identity aggregate public key".into(),
-        ));
-    }
-    let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
-        let mut t = utils::new_mask_shuffle_transcript();
-        shuffle_proof
-            .verify(&mask_cts, &output_cts, &new_agg_pk_pt, &mut t)
-            .map_err(|e| PokerL1Error::Serialization(format!("shuffle proof: {e}")))?;
-        Ok(true)
-    })?;
-
-    // 应用状态变更。Aggregate cache is refreshed from contributor lineage after the seat exists.
-    table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
-
-    // 初始化座位
-    table.seats[seat_index as usize] =
-        Seat::occupied(player, buy_in, ECPoint::from(pk), SeatStatus::Active)?;
-    table.add_deck_contributor(seat_index)?;
-    table.chip_pool = total_chips;
-
-    let active_after = count_active_occupied(&table.seats);
-    events::emit_event(
-        events,
-        TexasPokerEvent::PlayerJoined {
-            table_id: table.id,
-            seat_index,
-            player,
-            buy_in,
-            is_waiting: false,
-            active_count_after: active_after as u64,
-        },
-    );
-    Ok(())
-}
-
 /// 后续玩家提交 shuffle（V2：链上注入 c2 += player_pk）。
 ///
 /// 镜像 `table.move::submit_shuffle_v2`（line 1790-1845）。
@@ -1609,12 +1458,9 @@ pub fn apply_submit_shuffle_v2(
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
 
-    // ECPoint → G1Projective（aggregated_pk 字段为 Option<ECPoint>）
     let agg_pk_pt: G1Projective = table
-        .deck_state
-        .aggregated_pk
-        .as_ref()
-        .map(|p| **p)
+        .derived_aggregated_pk()?
+        .map(|point| point.0)
         .unwrap_or(G1Projective::identity());
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_shuffle_transcript();
@@ -2141,7 +1987,7 @@ pub fn apply_submit_reconstruct_deck(
         ));
     }
 
-    let aggregate_pk = table.deck_state.aggregated_pk.as_ref().ok_or_else(|| {
+    let aggregate_pk = table.derived_aggregated_pk()?.ok_or_else(|| {
         PokerL1Error::Serialization("reconstruction V3 requires aggregate public key".into())
     })?;
     let expected_owner_pk = table.seats[seat_index as usize]
@@ -2210,105 +2056,9 @@ pub fn apply_submit_reconstruct_deck(
     Ok(())
 }
 
-/// 玩家离场（带 leave_proof）。
-///
-/// 镜像 `table.move::leave_with_proof`（line 903-948）。
-pub fn apply_leave_with_proof(
-    table: &mut TexasPokerTable,
-    seat_index: u8,
-    output_cards: Vec<ElGamalCiphertext>,
-    leave_proof: DLEqProof<DefaultCurve, LeaveKind>,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    if seat_index >= table.max_players {
-        return Err(PokerL1Error::Serialization(
-            "seat_index out of range".into(),
-        ));
-    }
-    if !table.seats[seat_index as usize].is_occupied() {
-        return Err(PokerL1Error::Serialization("seat not occupied".into()));
-    }
-    if !can_leave_state(table) {
-        return Err(PokerL1Error::Serialization("not in WAITING state".into()));
-    }
-    if !is_in_mask(table.deck_state.contributor_mask, seat_index) {
-        return Err(PokerL1Error::Serialization(
-            "player must have completed shuffle before leave".into(),
-        ));
-    }
-
-    // 先计算完整资金转移，再修改牌组/公钥/座位状态。
-    // 这与 leave_table 的 checked-u64 语义一致，避免 saturating
-    // arithmetic 在账户池不足时静默造币，也避免报错时留下部分状态变更。
-    let stack_refund = table.seats[seat_index as usize].stack();
-    let pending_refund = table.seats[seat_index as usize].pending_addon();
-    let refund = stack_refund
-        .checked_add(pending_refund)
-        .ok_or_else(|| PokerL1Error::Serialization("leave_with_proof: refund overflow".into()))?;
-    let post_chip_pool = table.chip_pool.checked_sub(refund).ok_or_else(|| {
-        PokerL1Error::Serialization("leave_with_proof: chip_pool underflow".into())
-    })?;
-    // typed 化后无需反序列化。
-    let output_cts = output_cards;
-    // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）。
-    let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
-    let player_pk = *table.seats[seat_index as usize]
-        .pk()
-        .ok_or_else(|| PokerL1Error::Serialization("leave seat has no live key".into()))?;
-    let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
-        let mut t = utils::new_leave_transcript();
-        let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
-            &leave_proof,
-            &input_cts,
-            &output_cts,
-            &player_pk,
-            &mut t,
-        );
-        if ok {
-            Ok(true)
-        } else {
-            Err(PokerL1Error::Serialization(
-                "leave proof verify failed".into(),
-            ))
-        }
-    })?;
-
-    table.remove_deck_contributor(seat_index)?;
-    table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
-
-    // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
-    // 并同步扣减 chip_pool（join/addon 时均计入完整锁仓）。
-    let player_addr = table.seats[seat_index as usize].player();
-    if refund > 0 {
-        events::emit_event(
-            events,
-            TexasPokerEvent::PlayerRefund {
-                table_id: table.id,
-                seat_index,
-                player: player_addr,
-                amount: refund,
-                refund_type: REFUND_TYPE_STACK_ONLY,
-            },
-        );
-    }
-    table.chip_pool = post_chip_pool;
-    table.seats[seat_index as usize].vacate();
-    events::emit_event(
-        events,
-        TexasPokerEvent::PlayerLeft {
-            table_id: table.id,
-            seat_index,
-            player: player_addr,
-        },
-    );
-    Ok(())
-}
-
 /// 玩家 fold 并提交 fold proof（剥离自己的加密层 + 退出后续 reveal 协议）。
 ///
-/// `apply_leave_with_proof` 的「对局中」版本：
-/// - `leave_with_proof` 仅在 WAITING 状态可用（局间离场）；
-/// - `fold_with_proof` 在**下注轮**可用（局中弃牌 + 退出协议）。
+/// `fold_with_proof` 在下注轮完成局中弃牌与加密层移除。
 ///
 /// 业务语义（结合 fold 与 leave）：
 /// 1. 验证 DLEqProof<LeaveKind>（与 leave 同 transcript `b"zk_leave_proof_v1"`）：
@@ -2370,7 +2120,7 @@ pub fn apply_fold_with_proof(
         )));
     }
 
-    // 2. 验证 DLEq proof（复制 apply_leave_with_proof 1696-1710）
+    // 2. 验证 DLEq layer-removal proof。
     // typed 化后无需反序列化。
     let output_cts = output_cards;
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
@@ -2739,7 +2489,7 @@ pub fn start_hand(
 ///
 /// Every micro-transition is applied atomically. Exceeding [`MAX_NORMALIZATION_STEPS`] or
 /// encountering a street with no live protocol/betting phase fails closed instead of invoking
-/// the legacy `tick` refund-and-reset fallback.
+/// a legacy refund-and-reset fallback.
 pub fn normalize_until_blocked(
     table: &mut TexasPokerTable,
     now_ms: u64,
@@ -3005,16 +2755,6 @@ fn advance_deadline_in_place(
     Ok(AdvanceDeadlineOutcome::NoDeadline)
 }
 
-/// Legacy permissionless timeout selector, now a thin wrapper over [`advance_deadline`].
-pub fn tick(
-    table: &mut TexasPokerTable,
-    now_ms: u64,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    let _ = advance_deadline(table, now_ms, events)?;
-    Ok(())
-}
-
 /// shuffle 超时处理。
 fn on_shuffle_timeout(
     table: &mut TexasPokerTable,
@@ -3125,7 +2865,7 @@ fn on_reveal_timeout(
 
     if phase == REVEAL_PHASE_PREFLOP {
         // preflop 未解出任何牌，直接 reset 回 WAITING；
-        // 后续必须由显式 start_hand 重新洗牌发牌；permissionless tick 不隐式开局。
+        // 后续必须由显式 start_hand 重新洗牌发牌；permissionless advance_deadline 不隐式开局。
         reset_for_next_hand(table, events)?;
         events::emit_event(
             events,
@@ -3501,11 +3241,9 @@ pub fn reset_for_next_hand(
         }
         s.prepare_next_hand();
     }
-    table.sync_aggregated_pk()?;
-
     // 第二阶段（b）：强制踢出 `want_leave=true` 的 occupied seat。
     //
-    // 这是 `request_leave_after_hand`（sit out next hand）的执行点：玩家在
+    // 这是 `set_leave_after_hand`（sit out next hand）的执行点：玩家在
     // 对局中预约离场后，下一手 reset 时强制踢出并退款。资金账对齐
     // `kick_player_internal` / `dispatch_leave_table`：
     // - 退 stack + pending_addon（refund_amt）
@@ -3547,7 +3285,6 @@ pub fn reset_for_next_hand(
             },
         );
     }
-    table.sync_aggregated_pk()?;
     table.chip_pool = post_leave_chip_pool;
 
     // 第三阶段：清理 stack==0 的 occupied seat
@@ -3571,11 +3308,8 @@ pub fn reset_for_next_hand(
             },
         );
     }
-    table.sync_aggregated_pk()?;
-
     if count_active_occupied(&table.seats) == 0 {
         table.deck_state.contributor_mask = 0;
-        table.sync_aggregated_pk()?;
     }
 
     table.pot = 0;
@@ -3599,7 +3333,7 @@ pub fn reset_for_next_hand(
 pub fn kick_player_internal(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    reason: u8,
+    reason: super::events::KickCause,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     // A kick can cascade into end_without_showdown/settlement and finally reset_for_next_hand.
@@ -3616,7 +3350,7 @@ pub fn kick_player_internal(
 fn kick_player_internal_in_place(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    reason: u8,
+    reason: super::events::KickCause,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     // P0-1 修复：seat_index 越界校验（原先直接索引会 panic）。
@@ -3660,8 +3394,6 @@ fn kick_player_internal_in_place(
     table.set_seat_wants_leave(seat_index, false);
 
     seat_mask_remove(&mut table.deck_state.contributor_mask, seat_index);
-    table.sync_aggregated_pk()?;
-
     if refund_amt > 0 {
         // chip_pool 是完整 TableVault 锁仓；pending addon 只保存在 seat ledger。
         table.chip_pool = post_chip_pool;
@@ -3689,7 +3421,6 @@ fn kick_player_internal_in_place(
         },
     );
 
-    let _ = reason;
     if was_current_shuffler && table.shuffle_phase() != SHUFFLE_PHASE_NONE {
         let mut tmp_events = Vec::new();
         advance_shuffle(table, &mut tmp_events)?;
@@ -3882,7 +3613,7 @@ pub fn apply_rebuy(
 ///
 /// This is the canonical idempotent business transition intended for the tagged Seat command.
 /// Repeating the same target bit is a no-op: it emits no duplicate event and does not bump the
-/// table version. The legacy toggle wrapper below is retained only for historical ABI replay.
+/// table version.
 ///
 /// # Errors
 ///
@@ -3922,48 +3653,6 @@ pub fn apply_set_leave_after_hand(
         },
     );
     Ok(true)
-}
-
-/// `request_leave_after_hand` — legacy toggle wrapper.
-///
-/// 业务语义（在线扑克 "sit out next hand / stand up next hand" 标准模式）：
-/// 玩家可在**任意时刻**（含对局进行中的 shuffle / reveal / betting / showdown）
-/// 调用此方法切换 `seat.want_leave` 标志。下一手在 [`reset_for_next_hand`]（由
-/// settle_hand / end_without_showdown / 超时路径触发）时，所有 `want_leave=true`
-/// 的 occupied seat 会被强制踢出并退还 stack + pending_addon。
-///
-/// 解决的问题：`leave_table` 仅在 WAITING 状态可用，而 creator / `tick`
-/// 可能在 settle 后立即 `start_hand`，玩家来不及离场。此方法让玩家在对局中
-/// 即可预约离场，由 reset 强制执行。
-///
-/// # Toggle 语义
-///
-/// 每次调用翻转 `want_leave` 标志：false→true（预约离场）/ true→false（取消）。
-/// `LeaveRequested` 事件携带切换后的新值，便于链下索引。
-///
-/// # 权限
-///
-/// dispatch 层校验 `caller == seat.player()`（与 leave_table / addon 一致）。
-///
-/// # Errors
-///
-/// - `seat_index` 越界
-/// - 座位未被占用
-pub fn apply_request_leave(
-    table: &mut TexasPokerTable,
-    seat_index: u8,
-    events: &mut Vec<TexasPokerEvent>,
-) -> PokerL1Result<()> {
-    if seat_index >= table.max_players {
-        return Err(PokerL1Error::Serialization(format!(
-            "request_leave_after_hand: seat_index {seat_index} out of range (max_players={})",
-            table.max_players
-        )));
-    }
-    let want_leave = !table.seat_wants_leave(seat_index);
-    let changed = apply_set_leave_after_hand(table, seat_index, want_leave, events)?;
-    debug_assert!(changed, "legacy toggle must always change the target bit");
-    Ok(())
 }
 
 // ========== Bet / Time Bank / Ante / Rake / Run It Twice ==========
@@ -4030,7 +3719,7 @@ pub fn apply_bet(
 
 /// `consume_time_bank` — 玩家 Time Bank 被消耗（超时续命）。
 ///
-/// 通常由 `tick` 在玩家 betting 超时且 time_bank_ms > 0 时自动调用。
+/// 通常由 `advance_deadline` 在玩家 betting 超时且 time_bank_ms > 0 时自动调用。
 /// 消耗指定毫秒数，若剩余不足以覆盖则返回错误（调用方应改用 auto_fold）。
 pub fn consume_time_bank(
     table: &mut TexasPokerTable,
@@ -4260,6 +3949,7 @@ pub fn trigger_run_it_twice(
 mod tests {
     use super::*;
     use crate::object_model::ObjectID;
+    use crate::vm::contracts::texas_poker::types::EMPTY_PLAYER;
     use rand::SeedableRng;
     use rand::rngs::StdRng;
 
@@ -4460,9 +4150,8 @@ mod tests {
         }
         set_initial_encrypted_deck(&mut table).unwrap();
         table.deck_state.contributor_mask = 0b11;
-        table.sync_aggregated_pk().unwrap();
         assert_eq!(
-            table.deck_state.aggregated_pk,
+            table.derived_aggregated_pk().unwrap(),
             Some(ECPoint::from(aggregate_pk))
         );
         table.hand_id = 7;
@@ -4758,8 +4447,8 @@ mod tests {
         table.seats[1].set_stack(1000).unwrap();
         table.seats[1].set_status(SeatStatus::Active);
         let mut events = vec![];
-        // WAITING has no deadline: tick must not start a hand implicitly.
-        tick(&mut table, 1000, &mut events).unwrap();
+        // WAITING has no deadline: advance_deadline must not start a hand implicitly.
+        advance_deadline(&mut table, 1000, &mut events).unwrap();
         assert_eq!(table.round_state(), ROUND_WAITING);
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_NONE);
 
@@ -4774,10 +4463,10 @@ mod tests {
             Some(1000 + u64::from(table.timeout_config.shuffle_timeout_ms))
         );
         let before_tick = table.clone();
-        tick(&mut table, 1000, &mut events).unwrap();
+        advance_deadline(&mut table, 1000, &mut events).unwrap();
         assert_eq!(
             table, before_tick,
-            "tick must not be used only to arm a timer"
+            "advance_deadline must not be used only to arm a timer"
         );
     }
 
@@ -5097,7 +4786,6 @@ mod tests {
         table.chip_pool = 1_500;
         table.seats[2].fixture_set_pk(ECPoint::from(pk2));
         table.deck_state.contributor_mask = 0b111;
-        table.sync_aggregated_pk().unwrap();
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
         // （count_active_players 在 kick 后仍 >= MIN_PLAYERS_TO_START）。
         table
@@ -5113,7 +4801,7 @@ mod tests {
         // Departed seat no longer carries a live Mental Poker key.
         assert!(table.seats[0].pk().is_none());
         // aggregated_pk 应 = pk1 + pk2（移除 pk0）。
-        let new_agg = table.deck_state.aggregated_pk.unwrap();
+        let new_agg = table.derived_aggregated_pk().unwrap().unwrap().0;
         let expected = pk1 + pk2;
         assert!(g1_equal(&new_agg, &expected));
         assert!(
@@ -5489,50 +5177,6 @@ mod tests {
         // 未占用
         let err = apply_rebuy(&mut table, 1, 100, &mut vec![]).unwrap_err();
         assert!(err.to_string().contains("seat 1 not occupied"));
-    }
-
-    fn empty_leave_proof() -> DLEqProof<DefaultCurve, LeaveKind> {
-        let zero = utils::scalar_zero();
-        DLEqProof::from_parts(vec![], G1Projective::identity(), zero, zero)
-    }
-
-    fn make_leave_with_proof_table(stack: u64, pending_addon: u64) -> TexasPokerTable {
-        let mut table = make_table();
-        table.seats[0].fixture_set_player([0x01; 20]);
-        table.seats[0].set_stack(stack).unwrap();
-        table.seats[0].set_pending_addon(pending_addon).unwrap();
-        table.deck_state.contributor_mask = 1;
-        table
-    }
-
-    #[test]
-    fn test_leave_with_proof_rejects_refund_overflow_without_mutation() {
-        let mut table = make_leave_with_proof_table(u64::MAX, 1);
-        table.chip_pool = u64::MAX;
-        let before = table.clone();
-        let mut events = vec![];
-
-        let error = apply_leave_with_proof(&mut table, 0, vec![], empty_leave_proof(), &mut events)
-            .unwrap_err();
-
-        assert!(error.to_string().contains("refund overflow"));
-        assert_eq!(table, before, "failed refund must be atomic");
-        assert!(events.is_empty());
-    }
-
-    #[test]
-    fn test_leave_with_proof_rejects_chip_pool_underflow_without_mutation() {
-        let mut table = make_leave_with_proof_table(10, 5);
-        table.chip_pool = 14;
-        let before = table.clone();
-        let mut events = vec![];
-
-        let error = apply_leave_with_proof(&mut table, 0, vec![], empty_leave_proof(), &mut events)
-            .unwrap_err();
-
-        assert!(error.to_string().contains("chip_pool underflow"));
-        assert_eq!(table, before, "failed refund must be atomic");
-        assert!(events.is_empty());
     }
 
     // ========== Bet 动作测试 ==========

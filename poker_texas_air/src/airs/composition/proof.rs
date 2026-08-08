@@ -43,9 +43,9 @@ pub const COMPOSITION_PROOF_BUNDLE_VERSION: u8 = 1;
 
 /// Durable tagged-union batched composition-proof bundle schema version.
 ///
-/// Version 4 binds the proof to a continuous method-batch v2 stream and durable batch id. Older
-/// task-list layouts are intentionally rejected.
-pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 5;
+/// Version 6 binds the proof to the actor-less crypto command stream and durable batch id. Older
+/// canonical payload layouts are intentionally rejected.
+pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 6;
 
 /// Conservative maximum transitions packed into one 1024-row tagged Stage proof.
 ///

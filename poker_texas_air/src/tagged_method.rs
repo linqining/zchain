@@ -641,15 +641,13 @@ fn verify_crypto_receipt(
 ) -> TexasAirResult<Option<crate::precompile_binding::PrecompileCallBinding>> {
     use crate::method_kind::MethodKind;
     use crate::precompile_binding::{
-        JoinAndShuffleVerifyRequest, LeaveDleqVerifyRequest, PrecompileCallBinding,
-        RevealTokenVerifyRequest, precompile_call_context,
+        LeaveDleqVerifyRequest, PrecompileCallBinding, RevealTokenVerifyRequest,
+        precompile_call_context,
     };
 
     let method_input = task.method_input()?;
     let seat_index = match &method_input {
-        MethodInput::JoinAndShuffle { seat_index, .. }
-        | MethodInput::LeaveWithProof { seat_index }
-        | MethodInput::FoldWithProof { seat_index }
+        MethodInput::FoldWithProof { seat_index }
         | MethodInput::SubmitShuffleV2 { seat_index }
         | MethodInput::SubmitPlayerRevealTokens { seat_index }
         | MethodInput::SubmitReconstructDeck { seat_index } => *seat_index,
@@ -667,38 +665,11 @@ fn verify_crypto_receipt(
         post_root,
         dispatch_digest,
     );
+    let replay_args = task.replay_args()?;
     let binding = match task.method_kind {
-        MethodKind::JoinAndShuffle => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::JoinAndShuffleArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
-                    TexasAirError::SerializationError(format!(
-                        "join_and_shuffle tagged receipt args: {error}"
-                    ))
-                })?;
-            let request =
-                JoinAndShuffleVerifyRequest::from_dispatch(call_context, &task.pre_table, &args)?;
-            PrecompileCallBinding::verify_join_and_shuffle(&request)?
-        }
-        MethodKind::LeaveWithProof => {
-            let args: poker_l1::vm::contracts::texas_poker::dispatch::LeaveWithProofArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
-                    TexasAirError::SerializationError(format!(
-                        "leave_with_proof tagged receipt args: {error}"
-                    ))
-                })?;
-            let player_pk = live_player_pk(task, seat_index, "leave_with_proof")?;
-            let request = LeaveDleqVerifyRequest::new(
-                call_context,
-                task.pre_table.deck_state.encrypted.to_vec(),
-                args.output_cards,
-                player_pk,
-                args.leave_proof,
-            );
-            PrecompileCallBinding::verify_leave_dleq(&request)?
-        }
         MethodKind::FoldWithProof => {
             let args: poker_l1::vm::contracts::texas_poker::dispatch::FoldWithProofArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "fold_with_proof tagged receipt args: {error}"
                     ))
@@ -715,16 +686,15 @@ fn verify_crypto_receipt(
         }
         MethodKind::SubmitShuffleV2 => {
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitShuffleV2Args =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit_shuffle_v2 tagged receipt args: {error}"
                     ))
                 })?;
             let aggregate = task
                 .pre_table
-                .deck_state
-                .aggregated_pk
-                .as_ref()
+                .derived_aggregated_pk()
+                .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
                 .ok_or_else(|| {
                     TexasAirError::SpecViolation(
                         "submit_shuffle_v2 requires aggregate Mental Poker key".into(),
@@ -748,7 +718,7 @@ fn verify_crypto_receipt(
         }
         MethodKind::SubmitPlayerRevealTokens => {
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit reveal tagged receipt args: {error}"
                     ))
@@ -759,7 +729,7 @@ fn verify_crypto_receipt(
         }
         MethodKind::SubmitReconstructDeck => {
             let args: poker_l1::vm::contracts::texas_poker::dispatch::SubmitReconstructDeckArgs =
-                borsh::from_slice(&task.raw_args).map_err(|error| {
+                borsh::from_slice(&replay_args).map_err(|error| {
                     TexasAirError::SerializationError(format!(
                         "submit reconstruct tagged receipt args: {error}"
                     ))

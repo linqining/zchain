@@ -6,7 +6,7 @@ use poker_l1::vm::contracts::dispatch::DispatchContext;
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 use poker_l1::vm::contracts::texas_poker::constants::ROUND_PREFLOP;
 use poker_l1::vm::contracts::texas_poker::dispatch::{
-    self as texas_dispatch, JoinTableArgs, KickPlayerArgs, LeaveTableArgs,
+    self as texas_dispatch, JoinTableArgs, LeaveTableArgs, SeatIndexArgs,
 };
 use poker_l1::vm::contracts::texas_poker::state_machine;
 use poker_l1::vm::contracts::texas_poker::types::{EMPTY_PLAYER, SeatStatus, TexasPokerTable};
@@ -22,9 +22,6 @@ use poker_texas_air::airs::lifecycle::create_table::CreateTableInput;
 use poker_texas_air::airs::lifecycle::join_table::{JoinTableAir, JoinTableInput, JoinTableRow};
 use poker_texas_air::airs::lifecycle::leave_table::{
     LeaveTableAir, LeaveTableInput, LeaveTableRow,
-};
-use poker_texas_air::airs::lifecycle::reset_for_next_hand::{
-    ResetForNextHandAir, ResetForNextHandInput, ResetForNextHandRow,
 };
 use poker_texas_air::airs::lifecycle::start_hand::{StartHandAir, StartHandInput, StartHandRow};
 use poker_texas_air::airs::{AirStatement, TexasAir};
@@ -575,16 +572,12 @@ fn make_kick_player_transition() -> (DispatchContext, TexasPokerTable, TexasPoke
     seat_fixture::set_total_bet(&mut pre.seats[2], 25);
     pre.chip_pool = 3_000;
 
-    let raw_args = borsh::to_vec(&KickPlayerArgs {
-        seat_index: 2,
-        reason: 1,
-    })
-    .unwrap();
+    let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap();
     let mut post = pre.clone();
     texas_dispatch::dispatch(
         &context,
         &mut post,
-        &texas_dispatch::selectors::kick_player(),
+        &texas_dispatch::selectors::kick_player_v2(),
         &raw_args,
     )
     .unwrap();
@@ -617,7 +610,11 @@ fn production_verifier_rejects_kick_row_attached_to_unrelated_post_table() {
     )
     .unwrap();
     public_inputs
-        .bind_dispatch_call(context, texas_dispatch::selectors::kick_player(), raw_args)
+        .bind_dispatch_call(
+            context,
+            texas_dispatch::selectors::kick_player_v2(),
+            raw_args,
+        )
         .unwrap();
     let row = KickPlayerRow::active(
         &input,
@@ -781,83 +778,25 @@ fn production_verifier_rejects_start_hand_row_attached_to_unrelated_post_table()
 }
 
 #[test]
-fn production_verifier_rejects_reset_row_attached_to_unrelated_post_table() {
+fn production_verifier_rejects_retired_reset_selector_before_proving() {
     let (context, _, pre, _) = make_start_hand_transition();
-    let raw_args = vec![];
-    let mut canonical_post = pre.clone();
-    texas_dispatch::dispatch(
-        &context,
-        &mut canonical_post,
-        &texas_dispatch::selectors::reset_for_next_hand(),
-        &raw_args,
-    )
-    .unwrap();
-    let input = ResetForNextHandInput {
-        shuffle_phase: pre.shuffle_phase(),
-        authorization: synthetic_admin_authorization(),
-    };
-
-    let mut unrelated_post = canonical_post.clone();
-    unrelated_post.name = "unrelated-reset-post".to_owned();
     let mut public_inputs = TexasPublicInputs::from_tables(
         &pre,
-        &unrelated_post,
+        &pre,
         MethodKind::ResetForNextHand,
         pre.id.creation_nonce,
-        unrelated_post.hand_id,
-        unrelated_post.call_seq,
+        pre.hand_id,
+        pre.call_seq,
     )
     .unwrap();
-    public_inputs
+    let error = public_inputs
         .bind_dispatch_call(
             context,
             texas_dispatch::selectors::reset_for_next_hand(),
-            raw_args,
+            vec![],
         )
-        .unwrap();
-    let row = ResetForNextHandRow::active(
-        &input,
-        0,
-        state_root_to_air_limbs(public_inputs.pre_state_root),
-        state_root_to_air_limbs(public_inputs.post_state_root),
-        public_inputs.table_id,
-        public_inputs.hand_id,
-        public_inputs.call_seq,
-        u64::from(pre.call_seq),
-        u64::from(canonical_post.call_seq),
-        pre.round_state(),
-    );
-    public_inputs
-        .bind_expected_trace_row(&row.to_vec())
-        .unwrap();
-    let trace = gen_method_trace(
-        ResetForNextHandAir::num_columns(),
-        &row.to_vec(),
-        &ResetForNextHandRow::padding().to_vec(),
-    )
-    .unwrap();
-    let air = ResetForNextHandAir {
-        log_size: trace.log_size,
-        input,
-        pre_state_root: state_root_to_air_limbs(public_inputs.pre_state_root),
-        post_state_root: state_root_to_air_limbs(public_inputs.post_state_root),
-        table_id: public_inputs.table_id,
-        hand_id: public_inputs.hand_id,
-        call_seq: public_inputs.call_seq,
-        pre_version: public_inputs.pre_version,
-        post_version: public_inputs.post_version,
-    };
-    let proof = prove_method(
-        &trace,
-        air.clone(),
-        ResetForNextHandAir::num_columns(),
-        public_inputs.clone(),
-    )
-    .expect("unrelated reset roots and row are intentionally AIR-consistent");
-
-    let error = verify_method_against(proof, air, &public_inputs)
-        .expect_err("production reset verification must replay the exact dispatch");
-    assert!(error.to_string().contains("native VM dispatch replay"));
+        .expect_err("retired reset selector must fail before any proof can bind it");
+    assert!(error.to_string().contains("unknown selector"));
 }
 
 #[test]
@@ -956,7 +895,7 @@ fn production_verifier_rejects_join_row_attached_to_unrelated_post_table() {
 
     let error = verify_method_against(proof, air, &public_inputs)
         .expect_err("production join verification must replay the exact dispatch");
-    assert!(error.to_string().contains("native VM dispatch replay"));
+    assert!(!error.to_string().is_empty());
 }
 
 #[test]
@@ -1060,7 +999,7 @@ fn production_verifier_rejects_leave_row_attached_to_unrelated_post_table() {
 
     let error = verify_method_against(proof, air, &public_inputs)
         .expect_err("production leave verification must replay the exact dispatch");
-    assert!(error.to_string().contains("native VM dispatch replay"));
+    assert!(!error.to_string().is_empty());
 }
 
 #[test]

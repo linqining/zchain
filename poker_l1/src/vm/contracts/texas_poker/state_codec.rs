@@ -1,7 +1,7 @@
 //! Canonical persisted-state codec for Texas Poker tables.
 //!
-//! Production deliberately supports only the current resolved snapshot (v27) and the ObjectDb
-//! hot-table layout (v28). Historical schemas are not consensus inputs and fail closed instead of
+//! Production deliberately supports only the current resolved snapshot (v28) and the ObjectDb
+//! hot-table layout (v29). Historical schemas are not consensus inputs and fail closed instead of
 //! carrying an ever-growing migration surface in the execution path.
 
 use std::io::{self, Read, Write};
@@ -40,7 +40,7 @@ struct PersistedDeckStateV21 {
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct PersistedTexasPokerTableV27 {
+struct PersistedTexasPokerTableV28 {
     id: ObjectID,
     state_schema_version: u8,
     name: String,
@@ -61,7 +61,7 @@ struct PersistedTexasPokerTableV27 {
 }
 
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
-struct PersistedTexasPokerHotTableV28 {
+struct PersistedTexasPokerHotTableV29 {
     id: ObjectID,
     state_schema_version: u8,
     context: TableContextBindings,
@@ -163,8 +163,7 @@ fn restore_table(
     call_seq: u32,
 ) -> PokerL1Result<TexasPokerTable> {
     let seats = restore_seats(seats)?;
-    let aggregated_pk =
-        aggregate_pk_for_mask(&seats, rules.max_players, deck_state.contributor_mask)?;
+    let _ = aggregate_pk_for_mask(&seats, rules.max_players, deck_state.contributor_mask)?;
     let table = TexasPokerTable {
         id,
         name,
@@ -179,7 +178,6 @@ fn restore_table(
         hand_phase,
         deck_state: DeckState {
             encrypted: deck_state.encrypted,
-            aggregated_pk,
             contributor_mask: deck_state.contributor_mask,
             cards_dealt: deck_state.cards_dealt,
             decrypted_cards: deck_state.decrypted_cards,
@@ -193,7 +191,7 @@ fn restore_table(
     Ok(table)
 }
 
-impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV27 {
+impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV28 {
     type Error = PokerL1Error;
 
     fn try_from(value: &TexasPokerTable) -> Result<Self, Self::Error> {
@@ -220,10 +218,10 @@ impl TryFrom<&TexasPokerTable> for PersistedTexasPokerTableV27 {
     }
 }
 
-impl TryFrom<PersistedTexasPokerTableV27> for TexasPokerTable {
+impl TryFrom<PersistedTexasPokerTableV28> for TexasPokerTable {
     type Error = PokerL1Error;
 
-    fn try_from(value: PersistedTexasPokerTableV27) -> Result<Self, Self::Error> {
+    fn try_from(value: PersistedTexasPokerTableV28) -> Result<Self, Self::Error> {
         if value.state_schema_version != TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
             return Err(PokerL1Error::Serialization(format!(
                 "unsupported canonical Texas schema {}",
@@ -253,7 +251,7 @@ impl TryFrom<PersistedTexasPokerTableV27> for TexasPokerTable {
 
 impl BorshSerialize for TexasPokerTable {
     fn serialize<W: Write>(&self, writer: &mut W) -> io::Result<()> {
-        PersistedTexasPokerTableV27::try_from(self)
+        PersistedTexasPokerTableV28::try_from(self)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?
             .serialize(writer)
     }
@@ -273,7 +271,7 @@ impl BorshDeserialize for TexasPokerTable {
         id.serialize(&mut prefix)?;
         schema.serialize(&mut prefix)?;
         let mut replay = prefix.as_slice().chain(reader);
-        PersistedTexasPokerTableV27::deserialize_reader(&mut replay)?
+        PersistedTexasPokerTableV28::deserialize_reader(&mut replay)?
             .try_into()
             .map_err(|error: PokerL1Error| {
                 io::Error::new(io::ErrorKind::InvalidData, error.to_string())
@@ -361,7 +359,7 @@ pub fn is_hot_table_state(bytes: &[u8]) -> bool {
 pub fn encode_hot_table_state(table: &TexasPokerTable) -> PokerL1Result<Vec<u8>> {
     table.validate_state_schema()?;
     let openings = TableContextOpenings::from_table(table);
-    let persisted = PersistedTexasPokerHotTableV28 {
+    let persisted = PersistedTexasPokerHotTableV29 {
         id: table.id,
         state_schema_version: TEXAS_POKER_HOT_STATE_SCHEMA_VERSION,
         context: table_context_bindings(table.id, &openings)?,
@@ -387,8 +385,8 @@ pub fn decode_hot_table_state(
     bytes: &[u8],
     openings: &TableContextOpenings,
 ) -> PokerL1Result<TexasPokerTable> {
-    let value = PersistedTexasPokerHotTableV28::try_from_slice(bytes).map_err(|error| {
-        PokerL1Error::Serialization(format!("Texas hot table v28 borsh: {error}"))
+    let value = PersistedTexasPokerHotTableV29::try_from_slice(bytes).map_err(|error| {
+        PokerL1Error::Serialization(format!("Texas hot table v29 borsh: {error}"))
     })?;
     if value.state_schema_version != TEXAS_POKER_HOT_STATE_SCHEMA_VERSION {
         return Err(PokerL1Error::Serialization(format!(

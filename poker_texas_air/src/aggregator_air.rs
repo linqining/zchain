@@ -2,7 +2,7 @@
 //!
 //! ## 架构定位
 //!
-//! - **Layer 0**：Method AIRs（23 个启用）
+//! - **Layer 0**：Method AIRs（21 个稳定 discriminant）
 //! - **Layer 1**：当前仅有宿主逐 proof 验证；Texas 自有递归 verifier 电路尚未实现
 //! - **Layer 2**：**Aggregator AIR（本模块）** — 二叉树聚合 N 个 descriptor 摘要
 //! - **Layer 3**：Final Recursion — 尚未实现可信闭环
