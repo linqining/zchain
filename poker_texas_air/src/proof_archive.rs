@@ -14,7 +14,7 @@ use crate::error::{TexasAirError, TexasAirResult};
 use crate::method_kind::MethodKind;
 
 /// Current durable method-proof archive schema.
-pub const METHOD_PROOF_ARCHIVE_VERSION: u8 = 1;
+pub const METHOD_PROOF_ARCHIVE_VERSION: u8 = 2;
 
 /// Maximum accepted serialized Stwo proof size.
 pub const MAX_ARCHIVED_STARK_PROOF_BYTES: usize = 16 * 1024 * 1024;

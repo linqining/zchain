@@ -17,7 +17,7 @@ use crate::repository::StoredProofMetadata;
 use crate::{ServiceError, ServiceResult};
 
 /// Current proving-service proof package schema.
-pub const SERVICE_PROOF_PACKAGE_VERSION: u8 = 5;
+pub const SERVICE_PROOF_PACKAGE_VERSION: u8 = 6;
 /// Maximum accepted task-plus-proof package size.
 pub const MAX_SERVICE_PROOF_PACKAGE_BYTES: usize = 128 * 1024 * 1024;
 

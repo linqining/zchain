@@ -6,7 +6,7 @@
 //! Poker dispatch, compares the complete post table and exposes the canonical
 //! task used by method-specific row reconstruction.
 
-use poker_l1::vm::contracts::texas_poker::dispatch::dispatch;
+use poker_l1::vm::contracts::texas_poker::dispatch::{dispatch, replay_dispatch_args};
 use poker_l1::vm::contracts::texas_poker::types::TexasPokerTable;
 use stwo::core::fields::m31::M31;
 
@@ -24,6 +24,8 @@ pub(crate) struct CanonicalDispatch {
     pub(crate) post: TexasPokerTable,
     /// Transcript-bound dispatch context, selector and raw arguments.
     pub(crate) call: DispatchCallPublicInput,
+    /// Legacy boundary ABI reconstructed from authenticated canonical command data.
+    pub(crate) replay_args: Vec<u8>,
     /// One transient decode of the canonical command payload for stage validators.
     pub(crate) method_input: MethodInput,
     /// Events emitted by the canonical native replay.
@@ -73,9 +75,17 @@ pub(crate) fn validate_canonical_dispatch(
         )));
     }
 
+    let replay_args =
+        replay_dispatch_args(expected_kind as u8, &call.raw_args, &call.context, &pre).map_err(
+            |error| {
+                TexasAirError::SpecViolation(format!(
+                    "{method}: canonical command cannot reconstruct dispatch ABI: {error}"
+                ))
+            },
+        )?;
     let mut replay = pre.clone();
     let result =
-        dispatch(&call.context, &mut replay, &call.selector, &call.raw_args).map_err(|error| {
+        dispatch(&call.context, &mut replay, &call.selector, &replay_args).map_err(|error| {
             TexasAirError::SpecViolation(format!(
                 "{method}: canonical pre-state cannot execute native VM dispatch: {error}"
             ))
@@ -116,6 +126,7 @@ pub(crate) fn validate_canonical_dispatch(
         pre,
         post,
         call,
+        replay_args,
         method_input,
         events: output.events,
     })

@@ -21,11 +21,11 @@ use crate::public_inputs::TexasPublicInputs;
 use crate::state_root::{state_root_to_air_limbs, table_from_state_preimage};
 
 use poker_l1::vm::contracts::texas_poker::constants::{
-    RECONSTRUCT_PHASE_NONE, ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
+    ROUND_SHOWDOWN, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_RECONSTRUCT,
 };
 use poker_l1::vm::contracts::texas_poker::events::TexasPokerEvent;
 use poker_l1::vm::contracts::texas_poker::state_machine;
-use poker_l1::vm::contracts::texas_poker::types::{NO_SEAT, TexasPokerTable};
+use poker_l1::vm::contracts::texas_poker::types::{HandPhase, NO_SEAT, TexasPokerTable};
 
 /// `timeout_kind` values used in the tick statement.  The value denotes the
 /// highest-priority timer family visible in the pre-state; `5` is a non-timer
@@ -461,11 +461,10 @@ fn tick_lifecycle_hash(domain: &[u8], payload: &[u8]) -> [u8; 32] {
 fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, bool, Option<u8>)> {
     let shuffle = table.shuffle_state();
     let reveal = table.reveal_token_state();
-    let timestamps = table.timestamps();
-    if table.reconstruct_phase() != RECONSTRUCT_PHASE_NONE {
+    if let HandPhase::Reconstructing { epoch_ms, .. } = &table.hand_phase {
         return Ok((
             TICK_KIND_RECONSTRUCT,
-            timestamps.reconstruct_started_at,
+            *epoch_ms,
             u64::from(table.timeout_config.reconstruct_timeout_ms),
             true,
             None,
@@ -476,10 +475,17 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
         SHUFFLE_PHASE_RECONSTRUCT | SHUFFLE_PHASE_BEFORE_PREFLOP
     ) {
         let pending = shuffle.pending_mask != 0 && shuffle.derived_current_shuffler() != NO_SEAT;
+        let timeout_ms = u64::from(table.timeout_config.shuffle_timeout_ms);
+        let deadline_ms = table
+            .shuffle_deadline_ms()
+            .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation("tick shuffle phase is missing its deadline".into())
+            })?;
         return Ok((
             TICK_KIND_SHUFFLE,
-            timestamps.shuffle_started_at,
-            u64::from(table.timeout_config.shuffle_timeout_ms),
+            timer_started_at(deadline_ms, timeout_ms, "shuffle")?,
+            timeout_ms,
             pending,
             None,
         ));
@@ -489,10 +495,17 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             .reveal_assignments()
             .iter()
             .all(|assignment| assignment.pending_mask() == 0);
+        let timeout_ms = u64::from(table.timeout_config.reveal_timeout_ms);
+        let deadline_ms = table
+            .reveal_deadline_ms()
+            .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation("tick reveal phase is missing its deadline".into())
+            })?;
         return Ok((
             TICK_KIND_REVEAL,
-            timestamps.reveal_started_at,
-            u64::from(table.timeout_config.reveal_timeout_ms),
+            timer_started_at(deadline_ms, timeout_ms, "reveal")?,
+            timeout_ms,
             pending,
             None,
         ));
@@ -503,10 +516,19 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
             // Validate this now rather than letting an out-of-range index reach
             // the native state machine's indexing path later.
             let _ = seat_time_bank(table, seat, "pre")?;
+            let timeout_ms = u64::from(table.timeout_config.betting_timeout_ms);
+            let deadline_ms = table
+                .betting_deadline_ms()
+                .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
+                .ok_or_else(|| {
+                    TexasAirError::SpecViolation(
+                        "tick betting phase is missing its deadline".into(),
+                    )
+                })?;
             return Ok((
                 TICK_KIND_BETTING,
-                timestamps.betting_started_at,
-                u64::from(table.timeout_config.betting_timeout_ms),
+                timer_started_at(deadline_ms, timeout_ms, "betting")?,
+                timeout_ms,
                 true,
                 Some(seat),
             ));
@@ -515,15 +537,18 @@ fn select_tick_timer(table: &TexasPokerTable) -> TexasAirResult<(u8, u64, u64, b
     if table.round_state() == ROUND_SHOWDOWN {
         // `showdown_at` is already a deadline in the native VM. Model it as
         // `started_at + 0` so the common 64-bit comparison AIR remains exact.
-        return Ok((
-            TICK_KIND_NON_TIMER,
-            timestamps.showdown_at,
-            0,
-            timestamps.showdown_at != 0,
-            None,
-        ));
+        let deadline_ms = table.showdown_deadline_ms().unwrap_or(0);
+        return Ok((TICK_KIND_NON_TIMER, deadline_ms, 0, deadline_ms != 0, None));
     }
     Ok((TICK_KIND_NON_TIMER, 0, 0, false, None))
+}
+
+fn timer_started_at(deadline_ms: u64, timeout_ms: u64, label: &str) -> TexasAirResult<u64> {
+    deadline_ms.checked_sub(timeout_ms).ok_or_else(|| {
+        TexasAirError::SpecViolation(format!(
+            "tick {label} deadline is earlier than its configured timeout"
+        ))
+    })
 }
 
 fn seat_time_bank(table: &TexasPokerTable, seat: u8, label: &str) -> TexasAirResult<u64> {
@@ -1183,7 +1208,11 @@ mod tests {
                 ..
             }
         )));
-        assert_eq!(post.timestamps().betting_started_at, now_ms);
+        assert_eq!(
+            post.betting_deadline_ms().unwrap().unwrap()
+                - u64::from(post.timeout_config.betting_timeout_ms),
+            now_ms
+        );
         assert!(!post.seats[0].is_folded());
 
         let input = canonical_input(&pre, &post, now_ms).expect("canonical betting tick");

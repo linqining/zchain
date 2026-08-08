@@ -45,7 +45,7 @@ pub const COMPOSITION_PROOF_BUNDLE_VERSION: u8 = 1;
 ///
 /// Version 4 binds the proof to a continuous method-batch v2 stream and durable batch id. Older
 /// task-list layouts are intentionally rejected.
-pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 4;
+pub const COMPOSITION_BATCH_PROOF_BUNDLE_VERSION: u8 = 5;
 
 /// Conservative maximum transitions packed into one 1024-row tagged Stage proof.
 ///

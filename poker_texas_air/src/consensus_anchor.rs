@@ -30,7 +30,7 @@
 //! 依赖块内 tx 集合的完整投影。
 
 use crate::error::{TexasAirError, TexasAirResult};
-use crate::prove_task::dispatch_call_digest;
+use crate::prove_task::dispatch_call_digest_from_legacy_args;
 use crate::state_root::compute_state_root;
 use crate::verified_chain::ExpectedChainAnchor;
 
@@ -303,7 +303,11 @@ fn verify_call_and_compute_digest(
             "dispatch transaction signature verification failed: {error}"
         ))
     })?;
-    dispatch_call_digest(context, &contract_call.method_selector, &contract_call.args)
+    dispatch_call_digest_from_legacy_args(
+        context,
+        &contract_call.method_selector,
+        &contract_call.args,
+    )
 }
 
 /// 从 `{tx, block_header}` 重建 dispatch 时使用的 `DispatchContext`。
@@ -695,7 +699,8 @@ mod tests {
             block_height: 100,
             block_timestamp: 1_000_000,
         };
-        let expected_digest = dispatch_call_digest(&ctx, &selector_a, &args_a).unwrap();
+        let expected_digest =
+            dispatch_call_digest_from_legacy_args(&ctx, &selector_a, &args_a).unwrap();
 
         let empty_root = SparseMerkleTree::new().root();
         let cert = sign_cert(

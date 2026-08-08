@@ -390,6 +390,8 @@ fn validate_complete_tagged_job_set(
             "shared tagged package does not have exactly one journal job per row".into(),
         ));
     }
+    let mut base_prove_count = None;
+    let mut base_chain_length = None;
     for (expected_index, (job, task)) in batch_jobs.iter().zip(tasks).enumerate() {
         let Some(StoredProofReference::Tagged {
             row_index,
@@ -416,6 +418,43 @@ fn validate_complete_tagged_job_set(
         {
             return Err(ServiceError::Runner(
                 "tagged package job set has inconsistent lifecycle flags".into(),
+            ));
+        }
+        let completed_rows = u64::try_from(expected_index + 1)
+            .map_err(|_| ServiceError::Runner("tagged row index does not fit u64".into()))?;
+        let prove_base = match base_prove_count {
+            Some(base) => base,
+            None => {
+                let base = result
+                    .prove_count
+                    .checked_sub(completed_rows)
+                    .ok_or_else(|| ServiceError::Runner("tagged prove counter underflow".into()))?;
+                base_prove_count = Some(base);
+                base
+            }
+        };
+        let chain_base = match base_chain_length {
+            Some(base) => base,
+            None => {
+                let base = result
+                    .chain_length
+                    .checked_sub(completed_rows)
+                    .ok_or_else(|| ServiceError::Runner("tagged chain counter underflow".into()))?;
+                base_chain_length = Some(base);
+                base
+            }
+        };
+        if result.prove_count
+            != prove_base
+                .checked_add(completed_rows)
+                .ok_or_else(|| ServiceError::Runner("tagged prove counter overflow".into()))?
+            || result.chain_length
+                != chain_base
+                    .checked_add(completed_rows)
+                    .ok_or_else(|| ServiceError::Runner("tagged chain counter overflow".into()))?
+        {
+            return Err(ServiceError::Runner(
+                "tagged package job counters are not exact per-row history positions".into(),
             ));
         }
         validate_job_task(job, result, metadata, task)?;
@@ -1789,6 +1828,10 @@ mod tests {
         let second_job = runtime.repository.job(second_id).unwrap();
         assert_eq!(first_job.status, StoredJobStatus::Completed);
         assert_eq!(second_job.status, StoredJobStatus::Completed);
+        assert_eq!(first_job.result.as_ref().unwrap().prove_count, 1);
+        assert_eq!(first_job.result.as_ref().unwrap().chain_length, 1);
+        assert_eq!(second_job.result.as_ref().unwrap().prove_count, 2);
+        assert_eq!(second_job.result.as_ref().unwrap().chain_length, 2);
         let Some(StoredProofReference::Tagged {
             batch_id: first_batch,
             row_index: 0,

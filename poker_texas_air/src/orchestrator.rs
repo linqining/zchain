@@ -1606,6 +1606,23 @@ impl Orchestrator {
             pi.dispatch_call_digest,
         )?
         .air_binding();
+        let betting_timeout_ms = u64::from(task.pre_table.timeout_config.betting_timeout_ms);
+        let betting_deadline_ms = task
+            .pre_table
+            .betting_deadline_ms()
+            .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "auto_fold task requires an active betting deadline".into(),
+                )
+            })?;
+        let pre_betting_started_at = betting_deadline_ms
+            .checked_sub(betting_timeout_ms)
+            .ok_or_else(|| {
+                TexasAirError::SpecViolation(
+                    "auto_fold deadline is earlier than its configured timeout".into(),
+                )
+            })?;
         let input = AutoFoldInput {
             seat_index: *seat_index,
             // The timestamp is consensus data carried by the dispatch task.
@@ -1613,8 +1630,8 @@ impl Orchestrator {
             // placeholder), otherwise the AIR has no timeout statement to
             // prove.
             current_time: task.context.block_timestamp,
-            pre_betting_started_at: task.pre_table.timestamps().betting_started_at,
-            betting_timeout_ms: u64::from(task.pre_table.timeout_config.betting_timeout_ms),
+            pre_betting_started_at,
+            betting_timeout_ms,
             pre_time_bank_ms: task
                 .pre_table
                 .seats
@@ -2647,11 +2664,23 @@ impl Orchestrator {
 /// Authentication of the task source remains an external consensus responsibility.
 pub(crate) fn validate_full_dispatch_task(task: &ProveTask) -> TexasAirResult<()> {
     let mut replayed_post = task.pre_table.clone();
+    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+        task.method_kind as u8,
+        &task.raw_args,
+        &task.context,
+        &task.pre_table,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "{}: canonical command cannot reconstruct dispatch ABI: {error}",
+            task.method_kind.method_name()
+        ))
+    })?;
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
         &task.selector(),
-        &task.raw_args,
+        &replay_args,
     )
     .map_err(|e| {
         TexasAirError::SpecViolation(format!(
@@ -2719,11 +2748,22 @@ pub(crate) fn replay_reveal_settlement_binding(
     task: &ProveTask,
 ) -> TexasAirResult<crate::settlement_binding::SettlementPlanBinding> {
     let mut replayed_post = task.pre_table.clone();
+    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+        task.method_kind as u8,
+        &task.raw_args,
+        &task.context,
+        &task.pre_table,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "submit_player_reveal_tokens canonical replay payload failed: {error}"
+        ))
+    })?;
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replayed_post,
         &task.selector(),
-        &task.raw_args,
+        &replay_args,
     )
     .map_err(|error| {
         TexasAirError::SpecViolation(format!(
@@ -3204,7 +3244,9 @@ mod tests {
         assert_eq!(task.post_table, post_table);
         assert_eq!(task.context, context);
         assert_eq!(task.selector(), selector);
-        assert_eq!(task.raw_args, raw_args);
+        let (_, expected_payload) = texas_dispatch::canonical_command_parts(&selector, &raw_args)
+            .expect("test command must canonicalize");
+        assert_eq!(task.raw_args, expected_payload);
         (task, post_table)
     }
 

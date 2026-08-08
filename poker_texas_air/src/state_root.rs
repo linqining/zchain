@@ -34,7 +34,7 @@ use blake2::digest::{Update, VariableOutput};
 use poker_l1::vm::contracts::texas_poker::betting::BettingRound;
 #[cfg(test)]
 use poker_l1::vm::contracts::texas_poker::types::{
-    DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig, Timestamps,
+    DeckState, ReconstructState, RevealTokenState, ShuffleState, TimeoutConfig,
 };
 
 /// 表台状态根（Starknet Fr 元素）。
@@ -464,11 +464,6 @@ fn poseidon_timeout_config(tc: &TimeoutConfig) -> FieldElement {
 }
 
 #[cfg(test)]
-fn poseidon_timestamps(ts: &Timestamps) -> FieldElement {
-    poseidon_borsh("timestamps", ts)
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_support as seat_fixture;
@@ -611,12 +606,11 @@ mod tests {
         });
         let reconstruct = poseidon_reconstruct_state(&ReconstructState::default());
         let timeout = poseidon_timeout_config(&TimeoutConfig::default());
-        let timestamps = poseidon_timestamps(&Timestamps::default());
-        for h in [deck, shuffle, reveal, reconstruct, timeout, timestamps] {
+        for h in [deck, shuffle, reveal, reconstruct, timeout] {
             assert_ne!(h, FieldElement::ZERO, "默认子结构哈希应非零");
         }
         // 默认值两两不同（它们 borsh 序列化不同）
-        let all = [deck, shuffle, reveal, reconstruct, timeout, timestamps];
+        let all = [deck, shuffle, reveal, reconstruct, timeout];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
                 assert_ne!(all[i], all[j], "默认子结构哈希应两两不同 ({i},{j})");

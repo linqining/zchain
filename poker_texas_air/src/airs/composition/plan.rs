@@ -359,11 +359,23 @@ pub fn derive_composite_transition_plan_from_task(
     }
     crate::orchestrator::validate_full_dispatch_task(task)?;
     let mut replay = task.pre_table.clone();
+    let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+        task.method_kind as u8,
+        &task.raw_args,
+        &task.context,
+        &task.pre_table,
+    )
+    .map_err(|error| {
+        TexasAirError::SpecViolation(format!(
+            "{} composite replay payload failed: {error}",
+            task.method_kind.method_name()
+        ))
+    })?;
     let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
         &task.context,
         &mut replay,
         &task.selector(),
-        &task.raw_args,
+        &replay_args,
     )
     .map_err(|error| {
         TexasAirError::SpecViolation(format!(

@@ -172,7 +172,7 @@ pub(crate) fn validate_join_table(
 ) -> TexasAirResult<()> {
     const METHOD: &str = "join_table";
     let canonical = validate_canonical_dispatch(public_inputs, MethodKind::JoinTable)?;
-    let args: JoinTableArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+    let args: JoinTableArgs = borsh::from_slice(&canonical.replay_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
     let MethodInput::Join { player, buy_in } = canonical.method_input else {
@@ -237,7 +237,7 @@ pub(crate) fn validate_leave_table(
 ) -> TexasAirResult<()> {
     const METHOD: &str = "leave_table";
     let canonical = validate_canonical_dispatch(public_inputs, MethodKind::LeaveTable)?;
-    let args: LeaveTableArgs = borsh::from_slice(&canonical.call.raw_args).map_err(|error| {
+    let args: LeaveTableArgs = borsh::from_slice(&canonical.replay_args).map_err(|error| {
         TexasAirError::SerializationError(format!("{METHOD}: raw args borsh: {error}"))
     })?;
     let MethodInput::SeatOnly { seat_index } = canonical.method_input else {

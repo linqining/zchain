@@ -191,8 +191,9 @@ commitment 不符均 fail-closed。当前 batch AIR 本身只约束 active bit�
 为 20.36s。Tagged-union v2 不再产生四份分项 proof；后续基准应读取单条
 `batch-stage:Tagged[task/row]` timing，并把它与 method proofs 分开统计。
 
-同步 durable service 已接入共享 batch sidecar。service package schema 已破坏性升级为 v5，
-repository schema 升为 v3，旧 package/repository 直接拒绝且不执行迁移。package payload 是严格
+同步 durable service 已接入共享 batch sidecar。actor-less canonical command payload 落地后，
+service package schema 已破坏性升级为 v6，repository schema 升为 v5，旧 package/repository
+直接拒绝且不执行迁移。package payload 是严格
 single/tagged union：非 composite 方法仍保存单任务 archive；composite dispatch 先进入
 `PendingProof`，repository 持久化连续 canonical tasks 和 tentative table，随后在显式
 `POST /tables/:id/finalize-proofs`、遇到非 batch 方法或达到 batch 上限时生成一份 tagged method
@@ -203,6 +204,12 @@ job metadata 或 pending lifecycle 任一错配均 fail-closed。P2P repair 已�
 任一 row 的 job ID 返回完整 tagged package，本地验证对应 row 和整份 two-proof package 后按
 `batch_id` 只落一份 sidecar，批内所有 job 同时恢复可用。
 
+普通玩家命令的 task payload 已不再重复保存 actor：`join_table.player` 由 authenticated caller
+确定，fold/check/call/leave/request-leave/auto-fold 的 seat 由 caller/current actor 确定，
+raise/bet/addon/rebuy 只保存金额。verifier 使用 canonical pre-state 重建 legacy dispatch ABI 后再
+进入同一个 native 状态机；proof-bearing Mental Poker payload 的 seat/player 收缩留作下一阶段，
+避免在同一升级中同时改动大 proof statement 的 host-native verifier 边界。
+
 service 验证热路径已加入 bounded process-local validated-package cache。cache key 是完整 sidecar
 字节的 domain-separated Blake2b-256，而不是可复用的 `batch_id`；因此同一路径下替换 package
 内容会强制 cache miss 并重新执行严格 decode/verify。一次成功验证会保留 immutable decoded
@@ -211,6 +218,9 @@ package 与本次 canonical stream replay 产生的 tasks，后续批内任意 r
 replay 与两份 STARK verification。live finalize 已验证的 package 会直接进入 cache；restart 恢复则
 只加载/解码共享 sidecar 一次，校验完整 row job set 后恢复一次 receipt batch 并缓存结果。cache
 同时受 64 entries 与 256 MiB encoded-size 上限约束，淘汰只影响性能，不影响 fail-closed 语义。
+tagged batch 完成时每个 job 的 `prove_count/chain_length` 也按 row 精确递增，不再把整批最终值
+复制给所有 row；repository 会校验 pending rows 共享同一历史基线、最终计数恰好增加 row count，
+restart 再校验批内计数位置连续。
 
 原始 method 层的 tagged batch 也已实现。`ArchivedTaggedBatchProofPackage` 对一段连续 composite
 transition 只包含一份 177-column tagged method STARK 和一份 tagged Stage STARK，并内嵌唯一的
@@ -271,7 +281,8 @@ Stage-only batching 路径，主要节省来自删除 18 次 legacy method prove
   四段 header 当作 start-hand/shuffle 执行证明。
 - production precompile 已新增 canonical `advance_deadline` selector，并让 legacy `tick` 降低到同一
   proof tag；专用 `auto_fold` 与普通 public `reset_for_next_hand` 已从 active selector 集移除。历史
-  selector 仍由 archive decoder 精确重放，避免通过“删除入口”破坏旧 proof package。
+  selector 只允许 strict archive replay。proving service 现在也在进入 VM 前使用 active
+  `CanonicalCommand` 集过滤请求，不能再绕过 precompile 直接调用 retired reset/tick/auto-fold。
 - 普通玩家命令的 actor 已改为从 authenticated caller 和 canonical pre-state 唯一派生。
   legacy `seat_index` 与 join `player` 只做相等断言；L1/AIR prove-task 在反序列化和消费时
   也执行同一 lowering。canonical table 拒绝同一地址占用多个 seat，避免后续

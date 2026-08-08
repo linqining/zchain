@@ -442,6 +442,12 @@ impl TexasPokerPlugin {
         selector: &[u8; 32],
         args: &[u8],
     ) -> PluginResult<DispatchOutcome> {
+        if texas_dispatch::CanonicalCommand::from_selector(selector).is_none() {
+            return Err(PluginError::Dispatch(format!(
+                "selector {} is retired and may only be used by strict archive replay",
+                hex::encode(selector)
+            )));
+        }
         let result = texas_dispatch::dispatch(context, &mut self.table, selector, args)
             .map_err(|e| PluginError::Dispatch(e.to_string()))?;
 
@@ -695,6 +701,36 @@ mod tests {
         second_permutation[..8].copy_from_slice(&[1, 7, 3, 5, 0, 6, 4, 2]);
         let (second, table) = next_shuffle_task(table, aggregated_pk, &second_permutation);
         (vec![first, second], table)
+    }
+
+    #[test]
+    fn fresh_service_dispatch_rejects_every_retired_selector_before_mutation() {
+        let creator = [0xA7; 20];
+        let table = TexasPokerTable::new(
+            ObjectID::new([0xB7; 20], 77),
+            "active-selectors-only".into(),
+            creator,
+            2,
+            50,
+            100,
+        );
+        let mut plugin = TexasPokerPlugin::new(table.clone());
+        for selector in [
+            texas_dispatch::selectors::join_and_shuffle(),
+            texas_dispatch::selectors::leave_with_proof(),
+            texas_dispatch::selectors::tick(),
+            texas_dispatch::selectors::auto_fold(),
+            texas_dispatch::selectors::kick_player(),
+            texas_dispatch::selectors::reset_for_next_hand(),
+        ] {
+            let error = match plugin.dispatch_with_context(&context(creator), &selector, &[]) {
+                Ok(_) => panic!("fresh service calls must reject retired selectors"),
+                Err(error) => error.to_string(),
+            };
+            assert!(error.contains("retired"), "{error}");
+            assert_eq!(plugin.table(), &table);
+            assert_eq!(plugin.dispatch_count, 0);
+        }
     }
 
     #[test]

@@ -525,11 +525,20 @@ pub(crate) fn validate_auto_fold(
         Some(&tables.composition.settlement),
     )?;
     let pre_seat = seat(&tables.pre, air.input.seat_index, "auto_fold")?;
-    let pre_timestamps = tables.pre.timestamps();
-    let deadline = pre_timestamps
-        .betting_started_at
-        .saturating_add(u64::from(tables.pre.timeout_config.betting_timeout_ms));
-    if air.input.pre_betting_started_at != pre_timestamps.betting_started_at
+    let betting_timeout_ms = u64::from(tables.pre.timeout_config.betting_timeout_ms);
+    let deadline = tables
+        .pre
+        .betting_deadline_ms()
+        .map_err(|error| TexasAirError::SpecViolation(error.to_string()))?
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation("auto_fold requires an active betting deadline".into())
+        })?;
+    let betting_started_at = deadline.checked_sub(betting_timeout_ms).ok_or_else(|| {
+        TexasAirError::SpecViolation(
+            "auto_fold betting deadline is earlier than its configured timeout".into(),
+        )
+    })?;
+    if air.input.pre_betting_started_at != betting_started_at
         || air.input.betting_timeout_ms != u64::from(tables.pre.timeout_config.betting_timeout_ms)
         || air.input.pre_time_bank_ms != u64::from(pre_seat.time_bank_ms())
         || air.input.pre_betting_started_at == 0

@@ -1246,23 +1246,6 @@ impl Default for TimeoutConfig {
     }
 }
 
-// ========== 时间戳 ==========
-
-/// 时间戳集合（镜像 Move `Timestamps`，table.move:178-186）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, BorshSerialize, BorshDeserialize)]
-pub struct Timestamps {
-    /// 当前洗牌者开始时间。
-    pub shuffle_started_at: u64,
-    /// 当前 reveal 阶段开始时间。
-    pub reveal_started_at: u64,
-    /// 当前下注者开始时间。
-    pub betting_started_at: u64,
-    /// reconstruct 投票开始时间。
-    pub reconstruct_started_at: u64,
-    /// 摊牌展示结束时间。
-    pub showdown_at: u64,
-}
-
 // ========== Canonical hand phase projection ==========
 
 /// Stable tag used by source normalization and the persisted `HandPhase` union.
@@ -1843,8 +1826,6 @@ impl TableRules {
 pub struct TexasPokerTable {
     /// 桌台 ObjectID（保留 `0xFF..02`）。
     pub id: ObjectID,
-    /// Persisted table-state schema version.
-    pub state_schema_version: u8,
     /// 桌台名称。
     pub name: String,
     /// 桌台创建者（管理类方法权限基准：kick_player/force_fold/reset_for_next_hand）。
@@ -2043,35 +2024,6 @@ impl TexasPokerTable {
         } else {
             RECONSTRUCT_PHASE_NONE
         }
-    }
-
-    /// Read-only compatibility projection of phase timing data.
-    #[must_use]
-    pub fn timestamps(&self) -> Cow<'_, Timestamps> {
-        let mut timestamps = Timestamps::default();
-        match &self.hand_phase {
-            HandPhase::Shuffling { phase } => {
-                timestamps.shuffle_started_at = phase
-                    .deadline_ms()
-                    .saturating_sub(u64::from(self.timeout_config.shuffle_timeout_ms));
-            }
-            HandPhase::Revealing { deadline_ms, .. } => {
-                timestamps.reveal_started_at =
-                    deadline_ms.saturating_sub(u64::from(self.timeout_config.reveal_timeout_ms));
-            }
-            HandPhase::Reconstructing { epoch_ms, .. } => {
-                timestamps.reconstruct_started_at = *epoch_ms;
-            }
-            HandPhase::Betting { deadline_ms, .. } => {
-                timestamps.betting_started_at =
-                    deadline_ms.saturating_sub(u64::from(self.timeout_config.betting_timeout_ms));
-            }
-            HandPhase::ShowdownDisplay { deadline_ms } => {
-                timestamps.showdown_at = *deadline_ms;
-            }
-            HandPhase::Waiting => {}
-        }
-        Cow::Owned(timestamps)
     }
 
     /// Mutable payload of the active shuffle variant.
@@ -2691,7 +2643,6 @@ impl TexasPokerTable {
 
         Self {
             id,
-            state_schema_version: super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
             name,
             creator,
             rules: TableRules::new(max_players, small_blind, big_blind),
@@ -2932,15 +2883,11 @@ impl TexasPokerTable {
         }
     }
 
-    /// Reject a table encoded for a different persisted state schema.
+    /// Validate the complete canonical runtime state.
+    ///
+    /// Wire schema versions live exclusively in the resolved/hot codec envelopes; a runtime
+    /// table cannot carry an independently mutable version fact.
     pub fn validate_state_schema(&self) -> PokerL1Result<()> {
-        if self.state_schema_version != super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION {
-            return Err(PokerL1Error::Serialization(format!(
-                "unsupported TexasPokerTable state schema {}, expected {}",
-                self.state_schema_version,
-                super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
-            )));
-        }
         self.rules.validate_canonical()?;
         if self.seats.len() != usize::from(self.max_players) {
             return Err(PokerL1Error::Serialization(format!(
@@ -3100,10 +3047,6 @@ mod tests {
     #[test]
     fn test_table_new() {
         let table = TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 6, 50, 100);
-        assert_eq!(
-            table.state_schema_version,
-            super::super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
-        );
         assert_eq!(table.max_players, 6);
         assert_eq!(table.seats.len(), 6);
         assert_eq!(table.small_blind, 50);
@@ -3453,15 +3396,6 @@ mod tests {
         let bytes = borsh::to_vec(&table).unwrap();
         let recovered: TexasPokerTable = borsh::from_slice(&bytes).unwrap();
         assert_eq!(table, recovered);
-    }
-
-    #[test]
-    fn test_table_rejects_wrong_state_schema() {
-        let mut table =
-            TexasPokerTable::new(dummy_table_id(), "test".into(), EMPTY_PLAYER, 4, 50, 100);
-        table.state_schema_version = 1;
-        let error = table.validate_state_schema().unwrap_err();
-        assert!(error.to_string().contains("state schema 1"));
     }
 
     #[test]

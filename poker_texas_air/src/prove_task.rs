@@ -32,9 +32,9 @@ pub use vm_common::prove_task::MethodInput;
 use crate::method_kind::MethodKind;
 
 /// Current continuous method-batch stream schema.
-pub const METHOD_BATCH_STREAM_VERSION: u8 = 2;
+pub const METHOD_BATCH_STREAM_VERSION: u8 = 3;
 /// Current canonical tagged method-row payload schema.
-pub const METHOD_PAYLOAD_VERSION: u8 = 2;
+pub const METHOD_PAYLOAD_VERSION: u8 = 3;
 /// Maximum method rows in one 1024-row Stage batch.
 pub const MAX_METHOD_BATCH_ROWS: usize = 256;
 
@@ -156,31 +156,58 @@ pub struct MethodPayloadV2 {
 
 /// Domain-separated digest of the exact VM dispatch call carried by a task.
 ///
-/// The digest commits to the task-carried dispatch context, selector, and raw
-/// Borsh arguments. Method proofs mix it into Fiat-Shamir public inputs so a
+/// The digest commits to the task-carried dispatch context, command tag, and canonical
+/// Borsh payload. Method proofs mix it into Fiat-Shamir public inputs so a
 /// receipt cannot be detached from the VM call replayed by the host. The digest
 /// does not by itself authenticate that the task came from a consensus block.
 pub fn dispatch_call_digest(
     context: &poker_l1::vm::contracts::dispatch::DispatchContext,
     selector: &[u8; 32],
-    raw_args: &[u8],
+    canonical_args: &[u8],
 ) -> crate::error::TexasAirResult<[u8; 32]> {
-    let (method_tag, canonical_args) =
-        poker_l1::vm::contracts::texas_poker::dispatch::canonical_command_parts(selector, raw_args)
-            .map_err(|error| {
-                crate::error::TexasAirError::SerializationError(format!(
-                    "canonical dispatch command: {error}"
-                ))
-            })?;
-    let encoded = borsh::to_vec(&(context.clone(), method_tag, canonical_args)).map_err(|e| {
-        crate::error::TexasAirError::SerializationError(format!("dispatch call context borsh: {e}"))
-    })?;
+    let method_tag =
+        poker_l1::vm::contracts::texas_poker::dispatch::CanonicalCommand::from_archive_selector(
+            selector,
+        )
+        .ok_or_else(|| {
+            crate::error::TexasAirError::SerializationError(
+                "unknown selector for canonical dispatch digest".into(),
+            )
+        })? as u8;
+    let encoded =
+        borsh::to_vec(&(context.clone(), method_tag, canonical_args.to_vec())).map_err(|e| {
+            crate::error::TexasAirError::SerializationError(format!(
+                "dispatch call context borsh: {e}"
+            ))
+        })?;
     let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
-    hasher.update(b"zchain.texas_poker.dispatch_call.v2");
+    hasher.update(b"zchain.texas_poker.dispatch_call.v3");
     hasher.update(&encoded);
     let mut digest = [0u8; 32];
     hasher.finalize_variable(&mut digest).expect("32 <= 64");
     Ok(digest)
+}
+
+/// Normalize a transaction-bound legacy ABI payload before computing the canonical digest.
+///
+/// Consensus anchors authenticate external transaction bytes, while proof tasks persist the
+/// slimmer actor-less payload. This is the only conversion path between those representations.
+pub fn dispatch_call_digest_from_legacy_args(
+    context: &poker_l1::vm::contracts::dispatch::DispatchContext,
+    selector: &[u8; 32],
+    legacy_args: &[u8],
+) -> crate::error::TexasAirResult<[u8; 32]> {
+    let (_, canonical_args) =
+        poker_l1::vm::contracts::texas_poker::dispatch::canonical_command_parts(
+            selector,
+            legacy_args,
+        )
+        .map_err(|error| {
+            crate::error::TexasAirError::SerializationError(format!(
+                "legacy dispatch command cannot canonicalize: {error}"
+            ))
+        })?;
+    dispatch_call_digest(context, selector, &canonical_args)
 }
 
 /// 单次 method 调用的证明任务。
@@ -431,11 +458,22 @@ impl MethodBatchV2 {
         let mut tasks: Vec<ProveTask> = Vec::with_capacity(self.commands.len());
         for (index, command) in self.commands.iter().enumerate() {
             let selector = command.method_kind.selector();
+            let replay_args = poker_l1::vm::contracts::texas_poker::dispatch::replay_dispatch_args(
+                command.method_kind as u8,
+                &command.raw_args,
+                &command.context,
+                &table,
+            )
+            .map_err(|error| {
+                crate::error::TexasAirError::SpecViolation(format!(
+                    "method batch command {index} canonical replay payload failed: {error}"
+                ))
+            })?;
             let result = poker_l1::vm::contracts::texas_poker::dispatch::dispatch(
                 &command.context,
                 &mut table,
                 &selector,
-                &command.raw_args,
+                &replay_args,
             )
             .map_err(|error| {
                 crate::error::TexasAirError::SpecViolation(format!(
@@ -833,7 +871,7 @@ mod tests {
     use crate::test_support as seat_fixture;
     use poker_l1::signature::TaggedPubkey;
     use poker_l1::vm::contracts::dispatch::DispatchContext;
-    use poker_l1::vm::contracts::texas_poker::dispatch::{CreateTableArgs, SeatIndexArgs};
+    use poker_l1::vm::contracts::texas_poker::dispatch::CreateTableArgs;
 
     fn dummy_table(name: &str) -> poker_l1::vm::contracts::texas_poker::types::TexasPokerTable {
         use poker_l1::object_model::ObjectID;
@@ -885,7 +923,7 @@ mod tests {
         let task = ProveTask::new(
             MethodKind::Fold,
             dummy_context(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
+            vec![],
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -909,7 +947,7 @@ mod tests {
         let task = ProveTask::new(
             MethodKind::Fold,
             dummy_context(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
+            vec![],
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -934,7 +972,7 @@ mod tests {
         let task = ProveTask::new(
             MethodKind::Fold,
             dummy_context(),
-            borsh::to_vec(&SeatIndexArgs { seat_index: 2 }).unwrap(),
+            vec![],
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -942,19 +980,20 @@ mod tests {
             3,
         );
         let mut malformed = task;
-        malformed.raw_args.clear();
+        malformed.raw_args.push(2);
         let bytes = borsh::to_vec(&malformed).unwrap();
         assert!(borsh::from_slice::<ProveTask>(&bytes).is_err());
     }
 
     #[test]
-    fn dispatch_digest_normalizes_legacy_tick_timestamp() {
-        use poker_l1::vm::contracts::texas_poker::dispatch::{TickArgs, selectors};
+    fn canonical_tick_payload_normalizes_legacy_timestamp_before_digesting() {
+        use poker_l1::vm::contracts::texas_poker::dispatch::{
+            TickArgs, canonical_command_parts, selectors,
+        };
 
         let context = dummy_context();
         let empty = dispatch_call_digest(&context, &selectors::tick(), &[]).unwrap();
-        let legacy = dispatch_call_digest(
-            &context,
+        let (_, canonical) = canonical_command_parts(
             &selectors::tick(),
             &borsh::to_vec(&TickArgs {
                 now_ms: context.block_timestamp,
@@ -962,6 +1001,7 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
+        let legacy = dispatch_call_digest(&context, &selectors::tick(), &canonical).unwrap();
         assert_eq!(empty, legacy);
     }
 

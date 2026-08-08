@@ -376,7 +376,7 @@ mod tests {
         let task = L1ProveTask::new(
             6, // MethodKind::Fold = 6
             dummy_context(),
-            vec![2],
+            vec![],
             dummy_table("pre"),
             dummy_table("post"),
             42,
@@ -388,6 +388,6 @@ mod tests {
         assert_eq!(recovered.method_kind, 6);
         assert_eq!(recovered.table_id, 42);
         assert_eq!(recovered.context, dummy_context());
-        assert_eq!(recovered.raw_args, vec![2]);
+        assert!(recovered.raw_args.is_empty());
     }
 }

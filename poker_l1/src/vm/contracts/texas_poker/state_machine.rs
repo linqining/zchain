@@ -3023,7 +3023,16 @@ fn on_shuffle_timeout(
 ) -> PokerL1Result<()> {
     let seat = table.shuffle_state().derived_current_shuffler();
     let phase = table.shuffle_phase();
-    let started_at = table.timestamps().shuffle_started_at;
+    let deadline_ms = table.shuffle_deadline_ms()?.ok_or_else(|| {
+        PokerL1Error::Serialization("shuffle timeout requires an active deadline".into())
+    })?;
+    let started_at = deadline_ms
+        .checked_sub(u64::from(table.timeout_config.shuffle_timeout_ms))
+        .ok_or_else(|| {
+            PokerL1Error::Serialization(
+                "shuffle deadline is earlier than its configured timeout".into(),
+            )
+        })?;
     events::emit_event(
         events,
         TexasPokerEvent::ShuffleTimeout {
@@ -4514,7 +4523,7 @@ mod tests {
             let mut rng = StdRng::seed_from_u64(0xC0DE_0000 + seat_index as u64);
             let (statement, proof) = ReconstructProofV3::prove(
                 context_digest,
-                table.timestamps().reconstruct_started_at,
+                table.reconstruct_epoch_ms().unwrap(),
                 prior_state_digest,
                 canonical_cards.clone(),
                 readable_cards,
@@ -4757,10 +4766,13 @@ mod tests {
         start_hand(&mut table, &mut events).unwrap();
         assert_eq!(table.shuffle_phase(), SHUFFLE_PHASE_BEFORE_PREFLOP);
         assert_ne!(table.shuffle_state().derived_current_shuffler(), NO_SEAT);
-        assert_eq!(table.timestamps().shuffle_started_at, 0);
+        assert_eq!(table.shuffle_deadline_ms().unwrap(), Some(0));
         // The start-hand command's own normalization suffix arms the active shuffle deadline.
         normalize_until_blocked(&mut table, 1000, &mut events).unwrap();
-        assert_eq!(table.timestamps().shuffle_started_at, 1000);
+        assert_eq!(
+            table.shuffle_deadline_ms().unwrap(),
+            Some(1000 + u64::from(table.timeout_config.shuffle_timeout_ms))
+        );
         let before_tick = table.clone();
         tick(&mut table, 1000, &mut events).unwrap();
         assert_eq!(
@@ -4905,7 +4917,11 @@ mod tests {
             }
         );
         assert_eq!(table.seats[0].time_bank_ms(), 0);
-        assert_eq!(table.timestamps().betting_started_at, 1_040);
+        assert_eq!(
+            table.betting_deadline_ms().unwrap().unwrap()
+                - u64::from(table.timeout_config.betting_timeout_ms),
+            1_040
+        );
     }
 
     #[test]

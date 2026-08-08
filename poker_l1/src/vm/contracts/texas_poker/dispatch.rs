@@ -333,6 +333,36 @@ pub struct CanonicalBatchTag {
 }
 
 impl CanonicalCommand {
+    /// Stable human-readable command name used by canonical payload diagnostics.
+    #[must_use]
+    pub const fn method_name(self) -> &'static str {
+        match self {
+            Self::CreateTable => "create_table",
+            Self::JoinTable => "join_table",
+            Self::LeaveTable => "leave_table",
+            Self::StartHand => "start_hand",
+            Self::Tick => "advance_deadline",
+            Self::ResetForNextHand => "reset_for_next_hand",
+            Self::Fold => "fold",
+            Self::Check => "check",
+            Self::Call => "call",
+            Self::Raise => "raise",
+            Self::AutoFold => "auto_fold",
+            Self::ForceFold => "force_fold",
+            Self::KickPlayer => "kick_player",
+            Self::Addon => "addon",
+            Self::Rebuy => "rebuy",
+            Self::JoinAndShuffle => "join_and_shuffle",
+            Self::LeaveWithProof => "leave_with_proof",
+            Self::SubmitShuffleV2 => "submit_shuffle_v2",
+            Self::SubmitPlayerRevealTokens => "submit_player_reveal_tokens",
+            Self::SubmitReconstructDeck => "submit_reconstruct_deck",
+            Self::Bet => "bet",
+            Self::RequestLeaveAfterHand => "request_leave_after_hand",
+            Self::FoldWithProof => "fold_with_proof",
+        }
+    }
+
     /// Recover a stable command tag from its persisted discriminant.
     #[must_use]
     pub const fn from_u8(value: u8) -> Option<Self> {
@@ -694,6 +724,30 @@ pub struct RebuyArgs {
     pub seat_index: u8,
     /// 重购金额（必须 > 0）。
     pub amount: u64,
+}
+
+/// Canonical proof-task payload for `join_table`.
+///
+/// The authenticated caller is the only possible player, so the legacy `player` field is not
+/// persisted a second time. Public-key ownership material remains part of the command because it
+/// is independently verified and cannot be derived from state.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct CanonicalJoinTableArgs {
+    buy_in: u64,
+    pk: ECPoint,
+    pk_ownership_proof: Vec<u8>,
+}
+
+/// Canonical actor-less payload for `raise`.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct CanonicalRaiseArgs {
+    total_bet: u64,
+}
+
+/// Canonical actor-less payload shared by `bet`, `addon`, and `rebuy`.
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
+struct CanonicalAmountArgs {
+    amount: u64,
 }
 
 /// Decode the native ZCN amount required by a funded Texas Poker method.
@@ -1176,10 +1230,11 @@ fn build_method_input(
     })
 }
 
-/// Derive the transient typed method input from the persisted canonical command.
+/// Derive a context-free typed view for commands whose payload still carries every input.
 ///
-/// This is the only supported reconstruction path for prover/orchestrator code. It rejects an
-/// unknown tag, malformed payload, or any payload whose legacy selector would imply another tag.
+/// Actor-less commands deliberately fail here and must use [`derive_authenticated_method_input`].
+/// This separation prevents callers from inventing a placeholder actor when authenticated context
+/// and canonical pre-state are required.
 pub fn derive_method_input(
     method_tag: u8,
     canonical_args: &[u8],
@@ -1187,6 +1242,25 @@ pub fn derive_method_input(
     let command = CanonicalCommand::from_u8(method_tag).ok_or_else(|| {
         PokerL1Error::Serialization(format!("unknown canonical Texas command tag {method_tag}"))
     })?;
+    if matches!(
+        command,
+        CanonicalCommand::JoinTable
+            | CanonicalCommand::LeaveTable
+            | CanonicalCommand::Fold
+            | CanonicalCommand::Check
+            | CanonicalCommand::Call
+            | CanonicalCommand::Raise
+            | CanonicalCommand::Bet
+            | CanonicalCommand::Addon
+            | CanonicalCommand::Rebuy
+            | CanonicalCommand::RequestLeaveAfterHand
+            | CanonicalCommand::AutoFold
+    ) {
+        return Err(PokerL1Error::Serialization(format!(
+            "{} canonical input requires authenticated context and pre-state",
+            command.method_name()
+        )));
+    }
     let (derived_tag, input) = build_method_input(&command.selector(), canonical_args)?;
     if derived_tag != method_tag {
         return Err(PokerL1Error::Serialization(format!(
@@ -1198,10 +1272,11 @@ pub fn derive_method_input(
 
 /// Derive the proof-facing command view from authenticated context and canonical pre-state.
 ///
-/// Historical ABI payloads retain redundant `player`/`seat_index` fields. This lowering first
-/// decodes those bytes, then treats them only as equality assertions against the signed caller or
-/// the canonical current actor. The returned [`MethodInput`](super::prove_task::MethodInput) never
-/// takes a self-directed actor identity from unauthenticated payload data.
+/// Ordinary canonical payloads physically omit redundant `player`/`seat_index` fields and derive
+/// them from the signed caller or canonical current actor. Proof-bearing crypto payloads still use
+/// their legacy layout for now, but their actor fields are equality assertions only. The returned
+/// [`MethodInput`](super::prove_task::MethodInput) never takes a self-directed actor identity from
+/// unauthenticated payload data.
 pub fn derive_authenticated_method_input(
     method_tag: u8,
     canonical_args: &[u8],
@@ -1213,18 +1288,63 @@ pub fn derive_authenticated_method_input(
     let command = CanonicalCommand::from_u8(method_tag).ok_or_else(|| {
         PokerL1Error::Serialization(format!("unknown canonical Texas command tag {method_tag}"))
     })?;
-    let mut input = derive_method_input(method_tag, canonical_args)?;
+    let caller_seat = |method: &str| authenticated_caller_seat(context, pre_table, method);
+
+    let mut input = match command {
+        CanonicalCommand::JoinTable => {
+            let args: CanonicalJoinTableArgs =
+                decode_args(canonical_args, "canonical join_table payload")?;
+            MethodInput::Join {
+                player: context.caller,
+                buy_in: args.buy_in,
+            }
+        }
+        CanonicalCommand::LeaveTable
+        | CanonicalCommand::Fold
+        | CanonicalCommand::Check
+        | CanonicalCommand::Call => {
+            require_empty_canonical_payload(canonical_args, command.method_name())?;
+            MethodInput::SeatOnly {
+                seat_index: caller_seat(command.method_name())?,
+            }
+        }
+        CanonicalCommand::Raise => {
+            let args: CanonicalRaiseArgs = decode_args(canonical_args, "canonical raise payload")?;
+            MethodInput::Raise {
+                seat_index: caller_seat("raise")?,
+                total_bet: args.total_bet,
+            }
+        }
+        CanonicalCommand::Bet => {
+            let args: CanonicalAmountArgs = decode_args(canonical_args, "canonical bet payload")?;
+            MethodInput::Bet {
+                seat_index: caller_seat("bet")?,
+                amount: args.amount,
+            }
+        }
+        CanonicalCommand::Addon | CanonicalCommand::Rebuy => {
+            let args: CanonicalAmountArgs = decode_args(canonical_args, "canonical funds payload")?;
+            MethodInput::Funds {
+                seat_index: caller_seat(command.method_name())?,
+                amount: args.amount,
+            }
+        }
+        CanonicalCommand::RequestLeaveAfterHand => {
+            require_empty_canonical_payload(canonical_args, "request_leave_after_hand")?;
+            MethodInput::RequestLeaveAfterHand {
+                seat_index: caller_seat("request_leave_after_hand")?,
+            }
+        }
+        CanonicalCommand::AutoFold => {
+            require_empty_canonical_payload(canonical_args, "auto_fold")?;
+            MethodInput::SeatOnly {
+                seat_index: pre_table.current_turn(),
+            }
+        }
+        _ => derive_method_input(method_tag, canonical_args)?,
+    };
 
     match (&command, &mut input) {
-        (CanonicalCommand::JoinTable, MethodInput::Join { player, .. }) => {
-            if *player != context.caller {
-                return Err(PokerL1Error::Serialization(format!(
-                    "join_table: legacy player {:?} does not match authenticated caller {:?}",
-                    *player, context.caller
-                )));
-            }
-            *player = context.caller;
-        }
         (CanonicalCommand::JoinAndShuffle, MethodInput::JoinAndShuffle { player, .. }) => {
             if *player != context.caller {
                 return Err(PokerL1Error::Serialization(format!(
@@ -1233,25 +1353,6 @@ pub fn derive_authenticated_method_input(
                 )));
             }
             *player = context.caller;
-        }
-        (
-            CanonicalCommand::LeaveTable
-            | CanonicalCommand::Fold
-            | CanonicalCommand::Check
-            | CanonicalCommand::Call,
-            MethodInput::SeatOnly { seat_index },
-        ) => {
-            *seat_index =
-                resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
-        }
-        (CanonicalCommand::Raise, MethodInput::Raise { seat_index, .. })
-        | (CanonicalCommand::Bet, MethodInput::Bet { seat_index, .. })
-        | (
-            CanonicalCommand::Addon | CanonicalCommand::Rebuy,
-            MethodInput::Funds { seat_index, .. },
-        ) => {
-            *seat_index =
-                resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
         }
         (CanonicalCommand::LeaveWithProof, MethodInput::LeaveWithProof { seat_index })
         | (CanonicalCommand::SubmitShuffleV2, MethodInput::SubmitShuffleV2 { seat_index })
@@ -1263,23 +1364,9 @@ pub fn derive_authenticated_method_input(
             CanonicalCommand::SubmitReconstructDeck,
             MethodInput::SubmitReconstructDeck { seat_index },
         )
-        | (
-            CanonicalCommand::RequestLeaveAfterHand,
-            MethodInput::RequestLeaveAfterHand { seat_index },
-        )
         | (CanonicalCommand::FoldWithProof, MethodInput::FoldWithProof { seat_index }) => {
             *seat_index =
                 resolve_caller_seat(context, pre_table, *seat_index, "canonical command")?;
-        }
-        (CanonicalCommand::AutoFold, MethodInput::SeatOnly { seat_index }) => {
-            let current_turn = pre_table.current_turn();
-            if *seat_index != current_turn {
-                return Err(PokerL1Error::Serialization(format!(
-                    "auto_fold: legacy seat_index {} does not match canonical current turn {current_turn}",
-                    *seat_index
-                )));
-            }
-            *seat_index = current_turn;
         }
         _ => {}
     }
@@ -1289,10 +1376,11 @@ pub fn derive_authenticated_method_input(
 
 /// Normalize one legacy ABI call into the unique persisted tagged-command representation.
 ///
-/// The returned tag is the stable `CanonicalCommand` discriminant. The payload is the exact
-/// validated Borsh argument bytes, except for legacy `tick(now_ms)`: its redundant timestamp is
-/// authenticated by `DispatchContext`, so both accepted ABI encodings normalize to an empty
-/// payload. Unknown selectors and malformed arguments fail closed.
+/// The returned tag is the stable `CanonicalCommand` discriminant. Ordinary player commands omit
+/// actor fields, amount commands retain only their amount, and legacy `tick(now_ms)` normalizes to
+/// an empty payload because time comes from `DispatchContext`. Proof-bearing crypto payloads remain
+/// byte-for-byte legacy values in this schema. Unknown selectors and malformed arguments fail
+/// closed.
 pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Result<(u8, Vec<u8>)> {
     let command = CanonicalCommand::from_archive_selector(selector).ok_or(
         PokerL1Error::UnknownContractMethod {
@@ -1308,6 +1396,62 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
     }
     let canonical_args = match command {
         CanonicalCommand::Tick => Vec::new(),
+        CanonicalCommand::JoinTable => {
+            let input: JoinTableArgs = decode_args(args, "join_table canonical payload")?;
+            borsh::to_vec(&CanonicalJoinTableArgs {
+                buy_in: input.buy_in,
+                pk: input.pk,
+                pk_ownership_proof: input.pk_ownership_proof,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("join_table canonical payload: {error}"))
+            })?
+        }
+        CanonicalCommand::LeaveTable
+        | CanonicalCommand::Fold
+        | CanonicalCommand::Check
+        | CanonicalCommand::Call
+        | CanonicalCommand::AutoFold
+        | CanonicalCommand::RequestLeaveAfterHand => {
+            let _: SeatIndexArgs = decode_args(args, "actor-only canonical payload")?;
+            Vec::new()
+        }
+        CanonicalCommand::Raise => {
+            let input: RaiseArgs = decode_args(args, "raise canonical payload")?;
+            borsh::to_vec(&CanonicalRaiseArgs {
+                total_bet: input.total_bet,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("raise canonical payload: {error}"))
+            })?
+        }
+        CanonicalCommand::Bet => {
+            let input: BetArgs = decode_args(args, "bet canonical payload")?;
+            borsh::to_vec(&CanonicalAmountArgs {
+                amount: input.amount,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("bet canonical payload: {error}"))
+            })?
+        }
+        CanonicalCommand::Addon => {
+            let input: AddonArgs = decode_args(args, "addon canonical payload")?;
+            borsh::to_vec(&CanonicalAmountArgs {
+                amount: input.amount,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("addon canonical payload: {error}"))
+            })?
+        }
+        CanonicalCommand::Rebuy => {
+            let input: RebuyArgs = decode_args(args, "rebuy canonical payload")?;
+            borsh::to_vec(&CanonicalAmountArgs {
+                amount: input.amount,
+            })
+            .map_err(|error| {
+                PokerL1Error::Serialization(format!("rebuy canonical payload: {error}"))
+            })?
+        }
         CanonicalCommand::KickPlayer if selector == &selectors::kick_player_v2() => {
             let input: SeatIndexArgs = decode_args(args, "kick_player_v2 canonical payload")?;
             borsh::to_vec(&KickPlayerArgs {
@@ -1323,6 +1467,86 @@ pub fn canonical_command_parts(selector: &[u8; 32], args: &[u8]) -> PokerL1Resul
         _ => args.to_vec(),
     };
     Ok((derived_tag, canonical_args))
+}
+
+/// Reconstruct the legacy execution ABI from an authenticated actor-less command payload.
+///
+/// Proof tasks and method batches persist only canonical payloads. Native dispatch remains the
+/// single business replay engine, so verifier code uses this function to rehydrate the boundary
+/// ABI without accepting an actor identity from prover-controlled bytes.
+pub fn replay_dispatch_args(
+    method_tag: u8,
+    canonical_args: &[u8],
+    context: &DispatchContext,
+    pre_table: &TexasPokerTable,
+) -> PokerL1Result<Vec<u8>> {
+    use super::prove_task::MethodInput;
+
+    let command = CanonicalCommand::from_u8(method_tag).ok_or_else(|| {
+        PokerL1Error::Serialization(format!("unknown canonical Texas command tag {method_tag}"))
+    })?;
+    let input = derive_authenticated_method_input(method_tag, canonical_args, context, pre_table)?;
+    let legacy = match (command, input) {
+        (CanonicalCommand::JoinTable, MethodInput::Join { player, buy_in }) => {
+            let canonical: CanonicalJoinTableArgs =
+                decode_args(canonical_args, "canonical join_table replay payload")?;
+            borsh::to_vec(&JoinTableArgs {
+                player,
+                buy_in,
+                pk: canonical.pk,
+                pk_ownership_proof: canonical.pk_ownership_proof,
+            })
+        }
+        (
+            CanonicalCommand::LeaveTable
+            | CanonicalCommand::Fold
+            | CanonicalCommand::Check
+            | CanonicalCommand::Call
+            | CanonicalCommand::AutoFold,
+            MethodInput::SeatOnly { seat_index },
+        ) => borsh::to_vec(&SeatIndexArgs { seat_index }),
+        (
+            CanonicalCommand::Raise,
+            MethodInput::Raise {
+                seat_index,
+                total_bet,
+            },
+        ) => borsh::to_vec(&RaiseArgs {
+            seat_index,
+            total_bet,
+        }),
+        (CanonicalCommand::Bet, MethodInput::Bet { seat_index, amount }) => {
+            borsh::to_vec(&BetArgs { seat_index, amount })
+        }
+        (CanonicalCommand::Addon, MethodInput::Funds { seat_index, amount }) => {
+            borsh::to_vec(&AddonArgs { seat_index, amount })
+        }
+        (CanonicalCommand::Rebuy, MethodInput::Funds { seat_index, amount }) => {
+            borsh::to_vec(&RebuyArgs { seat_index, amount })
+        }
+        (
+            CanonicalCommand::RequestLeaveAfterHand,
+            MethodInput::RequestLeaveAfterHand { seat_index },
+        ) => borsh::to_vec(&SeatIndexArgs { seat_index }),
+        _ => return Ok(canonical_args.to_vec()),
+    }
+    .map_err(|error| {
+        PokerL1Error::Serialization(format!(
+            "{} replay payload borsh: {error}",
+            command.method_name()
+        ))
+    })?;
+    Ok(legacy)
+}
+
+fn require_empty_canonical_payload(payload: &[u8], method: &str) -> PokerL1Result<()> {
+    if payload.is_empty() {
+        Ok(())
+    } else {
+        Err(PokerL1Error::Serialization(format!(
+            "{method} canonical payload must be empty"
+        )))
+    }
 }
 
 /// 将 events 列表以 debug 级别记录到 tracing。
@@ -1381,6 +1605,27 @@ fn resolve_caller_seat(
         )));
     }
 
+    let resolved = authenticated_caller_seat(context, table, method)?;
+    if claimed_seat_index != resolved {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: legacy seat_index {claimed_seat_index} does not match authenticated caller seat {resolved}"
+        )));
+    }
+    Ok(resolved)
+}
+
+fn authenticated_caller_seat(
+    context: &DispatchContext,
+    table: &TexasPokerTable,
+    method: &str,
+) -> PokerL1Result<u8> {
+    if table.seats.len() != usize::from(table.max_players) {
+        return Err(PokerL1Error::Serialization(format!(
+            "{method}: non-canonical seat layout: max_players={}, seats={}",
+            table.max_players,
+            table.seats.len()
+        )));
+    }
     let mut resolved = None;
     for (seat_index, seat) in table.seats.iter().enumerate() {
         if seat.is_occupied() && seat.player() == context.caller {
@@ -1399,18 +1644,12 @@ fn resolve_caller_seat(
         }
     }
 
-    let resolved = resolved.ok_or_else(|| {
+    resolved.ok_or_else(|| {
         PokerL1Error::Serialization(format!(
             "{method}: caller {:?} does not occupy a seat",
             context.caller
         ))
-    })?;
-    if claimed_seat_index != resolved {
-        return Err(PokerL1Error::Serialization(format!(
-            "{method}: legacy seat_index {claimed_seat_index} does not match authenticated caller seat {resolved}"
-        )));
-    }
-    Ok(resolved)
+    })
 }
 
 /// 校验 caller 是桌台创建者（管理类方法）。
@@ -2697,17 +2936,14 @@ mod tests {
     }
 
     #[test]
-    fn proof_input_lowering_rejects_a_validly_encoded_but_spoofed_actor() {
+    fn proof_input_lowering_omits_actor_and_rejects_legacy_actor_bytes() {
         let mut table = make_table();
         table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[0].set_status(SeatStatus::Active);
         let context = make_context_as([0x01; 20]);
         let raw_args = borsh::to_vec(&SeatIndexArgs { seat_index: 1 }).unwrap();
 
-        assert!(
-            derive_method_input(CanonicalCommand::Fold as u8, &raw_args).is_ok(),
-            "legacy payload remains independently decodable for archive migration"
-        );
+        assert!(derive_method_input(CanonicalCommand::Fold as u8, &raw_args).is_err());
         let error = derive_authenticated_method_input(
             CanonicalCommand::Fold as u8,
             &raw_args,
@@ -2715,7 +2951,54 @@ mod tests {
             &table,
         )
         .unwrap_err();
-        assert!(error.to_string().contains("authenticated caller seat 0"));
+        assert!(
+            error
+                .to_string()
+                .contains("canonical payload must be empty")
+        );
+
+        let input =
+            derive_authenticated_method_input(CanonicalCommand::Fold as u8, &[], &context, &table)
+                .unwrap();
+        assert_eq!(
+            input,
+            super::super::prove_task::MethodInput::SeatOnly { seat_index: 0 }
+        );
+    }
+
+    #[test]
+    fn canonical_payload_physically_omits_derivable_actor_fields() {
+        let mut table = make_table();
+        table.seats[0].fixture_set_player([0x01; 20]);
+        table.seats[0].set_status(SeatStatus::Active);
+        let context = make_context_as([0x01; 20]);
+
+        let fold_legacy = borsh::to_vec(&SeatIndexArgs { seat_index: 0 }).unwrap();
+        let (fold_tag, fold_canonical) =
+            canonical_command_parts(&selectors::fold(), &fold_legacy).unwrap();
+        assert!(fold_canonical.is_empty());
+        assert_eq!(
+            replay_dispatch_args(fold_tag, &fold_canonical, &context, &table).unwrap(),
+            fold_legacy
+        );
+
+        let raise_legacy = borsh::to_vec(&RaiseArgs {
+            seat_index: 0,
+            total_bet: 500,
+        })
+        .unwrap();
+        let (raise_tag, raise_canonical) =
+            canonical_command_parts(&selectors::raise(), &raise_legacy).unwrap();
+        assert_eq!(raise_canonical.len(), std::mem::size_of::<u64>());
+        assert_eq!(
+            replay_dispatch_args(raise_tag, &raise_canonical, &context, &table).unwrap(),
+            raise_legacy
+        );
+
+        let join_legacy = borsh::to_vec(&join_args([0x02; 20], 1_000, 2)).unwrap();
+        let (_, join_canonical) =
+            canonical_command_parts(&selectors::join_table(), &join_legacy).unwrap();
+        assert_eq!(join_canonical.len() + 20, join_legacy.len());
     }
 
     /// P0-2：非 creator 调用 kick_player 应被拒绝。

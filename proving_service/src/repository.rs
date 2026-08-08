@@ -22,7 +22,7 @@ use poker_texas_air::prove_task::ProveTask;
 use crate::proof_package::MAX_SERVICE_PROOF_PACKAGE_BYTES;
 use crate::{ServiceError, ServiceResult};
 
-const SCHEMA_VERSION: u32 = 3;
+const SCHEMA_VERSION: u32 = 5;
 
 /// A table state that can be rehydrated into a `TexasPokerPlugin` after a restart.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
@@ -527,6 +527,42 @@ impl ServiceRepository {
             )
             .into());
         }
+        let first_job_id = *batch
+            .job_ids
+            .first()
+            .ok_or_else(|| RepositoryError::Corruption("pending tagged batch is empty".into()))?;
+        let first_result = candidate
+            .jobs
+            .iter()
+            .find(|job| job.job_id == first_job_id)
+            .and_then(|job| job.result.as_ref())
+            .ok_or_else(|| {
+                RepositoryError::Corruption("first pending tagged result is missing".into())
+            })?;
+        let base_prove_count = first_result.prove_count;
+        let base_chain_length = first_result.chain_length;
+        let row_count_u64 = u64::from(row_count);
+        if table.prove_count
+            != base_prove_count.checked_add(row_count_u64).ok_or_else(|| {
+                RepositoryError::Corruption("tagged prove counter overflow".into())
+            })?
+            || chain_length
+                != base_chain_length
+                    .checked_add(row_count_u64)
+                    .ok_or_else(|| {
+                        RepositoryError::Corruption("tagged chain counter overflow".into())
+                    })?
+            || candidate
+                .tables
+                .iter()
+                .find(|stored| stored.table_id == table.table_id)
+                .is_none_or(|stored| stored.prove_count != base_prove_count)
+        {
+            return Err(RepositoryError::Corruption(
+                "tagged batch counters do not advance exactly once per row".into(),
+            )
+            .into());
+        }
         let mut completed = Vec::with_capacity(batch.job_ids.len());
         for (row_index, job_id) in batch.job_ids.into_iter().enumerate() {
             let job = candidate
@@ -555,9 +591,30 @@ impl ServiceRepository {
             let result = job.result.as_mut().ok_or_else(|| {
                 RepositoryError::Corruption("pending tagged job result is missing".into())
             })?;
+            if result.proof_verified
+                || result.prove_count != base_prove_count
+                || result.chain_length != base_chain_length
+            {
+                return Err(RepositoryError::Corruption(
+                    "pending tagged rows do not share the same verified-history base".into(),
+                )
+                .into());
+            }
+            let completed_rows = u64::from(row_index)
+                .checked_add(1)
+                .ok_or_else(|| RepositoryError::Corruption("tagged row counter overflow".into()))?;
             result.proof_verified = true;
-            result.prove_count = table.prove_count;
-            result.chain_length = chain_length;
+            result.prove_count = base_prove_count
+                .checked_add(completed_rows)
+                .ok_or_else(|| {
+                    RepositoryError::Corruption("tagged prove counter overflow".into())
+                })?;
+            result.chain_length =
+                base_chain_length
+                    .checked_add(completed_rows)
+                    .ok_or_else(|| {
+                        RepositoryError::Corruption("tagged chain counter overflow".into())
+                    })?;
             completed.push(job.clone());
         }
         upsert_table(&mut candidate.tables, table);
@@ -659,6 +716,23 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), RepositoryError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn historical_repository_schema_is_rejected() {
+        let dir = std::env::temp_dir().join(format!(
+            "zchain_proving_repo_schema_{}_{}",
+            std::process::id(),
+            rand::random::<u64>()
+        ));
+        let path = dir.join("service.borsh");
+        let mut snapshot = RepositorySnapshot::default();
+        snapshot.schema_version = 3;
+        write_atomic(&path, &borsh::to_vec(&snapshot).unwrap()).unwrap();
+
+        let error = ServiceRepository::open(&path).unwrap_err().to_string();
+        assert!(error.contains("unsupported proving-service repository schema 3"));
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn idempotency_conflict_is_persisted_across_reopen() {

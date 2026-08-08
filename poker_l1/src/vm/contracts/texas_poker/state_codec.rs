@@ -167,7 +167,6 @@ fn restore_table(
         aggregate_pk_for_mask(&seats, rules.max_players, deck_state.contributor_mask)?;
     let table = TexasPokerTable {
         id,
-        state_schema_version: TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
         name,
         creator,
         rules,
