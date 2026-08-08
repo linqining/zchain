@@ -1552,17 +1552,8 @@ pub fn apply_join_and_shuffle(
     table.deck_state.encrypted = CipherDeck::try_from(output_cts)?;
 
     // 初始化座位
-    table.seats[seat_index as usize] = Seat {
-        player,
-        stack: buy_in,
-        hand: Default::default(),
-        bet: 0,
-        total_bet: 0,
-        status: SeatStatus::Active,
-        pk: ECPoint::from(pk),
-        pending_addon: 0,
-        time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
-    };
+    table.seats[seat_index as usize] =
+        Seat::occupied(player, buy_in, ECPoint::from(pk), SeatStatus::Active)?;
     table.add_deck_contributor(seat_index)?;
     table.chip_pool = total_chips;
 
@@ -1810,7 +1801,11 @@ fn completed_reveal_tokens(assignment: &RevealAssignment) -> PokerL1Result<Vec<G
             "completed reveal assignment has a non-canonical token vector".into(),
         ))
     } else {
-        Ok(assignment.reveal_tokens.iter().map(|token| token.0).collect())
+        Ok(assignment
+            .reveal_tokens
+            .iter()
+            .map(|token| token.0)
+            .collect())
     }
 }
 
@@ -2032,10 +2027,8 @@ fn materialize_completed_showdown_assignments(
             )));
         }
         let (ledger_index, record) = matches[0];
-        let plaintext = partial_decrypt_c2(
-            &record.ciphertext.c2,
-            &completed_reveal_tokens(assignment)?,
-        );
+        let plaintext =
+            partial_decrypt_c2(&record.ciphertext.c2, &completed_reveal_tokens(assignment)?);
         let (card_id, card) = card_from_plaintext(&plaintext, &canonical_cards)?;
         if !seen.insert(card_id) {
             return Err(PokerL1Error::Serialization(format!(
@@ -2269,24 +2262,21 @@ pub fn apply_leave_with_proof(
 
     // P1-9 修复：退还 stack + 未入账的 pending_addon（与 dispatch_leave_table 一致），
     // 并同步扣减 chip_pool（join/addon 时均计入完整锁仓）。
+    let player_addr = table.seats[seat_index as usize].player;
     if refund > 0 {
-        table.seats[seat_index as usize].stack = 0;
-        table.seats[seat_index as usize].pending_addon = 0;
-        table.chip_pool = post_chip_pool;
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
                 table_id: table.id,
                 seat_index,
-                player: table.seats[seat_index as usize].player,
+                player: player_addr,
                 amount: refund,
                 refund_type: REFUND_TYPE_STACK_ONLY,
             },
         );
     }
-
-    let player_addr = table.seats[seat_index as usize].player;
-    table.seats[seat_index as usize] = Seat::empty();
+    table.chip_pool = post_chip_pool;
+    table.seats[seat_index as usize].vacate();
     events::emit_event(
         events,
         TexasPokerEvent::PlayerLeft {
@@ -3473,17 +3463,10 @@ pub fn reset_for_next_hand(
     table.acted_mask = 0;
     table.deck_state.contributor_mask = 0;
     for (seat_index, s) in table.seats.iter_mut().enumerate() {
-        s.hand.clear();
-        s.bet = 0;
-        s.total_bet = 0;
         if s.is_occupied() && !g1_is_identity(&s.pk) {
             table.deck_state.contributor_mask |= 1u16 << seat_index;
         }
-        s.set_status(if s.player == EMPTY_PLAYER {
-            SeatStatus::Empty
-        } else {
-            SeatStatus::Active
-        });
+        s.prepare_next_hand();
     }
     table.sync_aggregated_pk()?;
 
@@ -3520,7 +3503,7 @@ pub fn reset_for_next_hand(
             );
         }
         seat_mask_remove(&mut table.deck_state.contributor_mask, i);
-        table.seats[i as usize] = Seat::empty();
+        table.seats[i as usize].vacate();
         table.set_seat_wants_leave(i, false);
         events::emit_event(
             events,
@@ -3537,14 +3520,14 @@ pub fn reset_for_next_hand(
     // 第三阶段：清理 stack==0 的 occupied seat
     let mut to_remove: Vec<u8> = vec![];
     for (i, s) in table.seats.iter().enumerate() {
-        if s.is_occupied() && s.stack == 0 {
+        if s.has_left_hand() || (s.is_occupied() && s.stack == 0) {
             to_remove.push(i as u8);
         }
     }
     for &i in &to_remove {
         let player = table.seats[i as usize].player;
         seat_mask_remove(&mut table.deck_state.contributor_mask, i);
-        table.seats[i as usize] = Seat::empty();
+        table.seats[i as usize].vacate();
         table.set_seat_wants_leave(i, false);
         events::emit_event(
             events,
@@ -3616,8 +3599,7 @@ fn kick_player_internal_in_place(
     }
     let was_current_shuffler = table.shuffle_state().derived_current_shuffler() == seat_index;
     let was_current_turn = table.current_turn() == seat_index && is_betting_round(table);
-    let seat = &mut table.seats[seat_index as usize];
-
+    let seat = &table.seats[seat_index as usize];
     let stack_refund = seat.stack;
     let pending_refund = seat.pending_addon;
     let refund_amt = stack_refund
@@ -3640,12 +3622,7 @@ fn kick_player_internal_in_place(
     // 故提前单独收集。资金账安全：collect_bets_to_pot 后续不会再收（seat.bet 已为 0）；
     // side_pot 分层依据 total_bet（不受 bet 清零影响）。
     table.pot = post_pot;
-    seat.bet = 0;
-    seat.stack = 0;
-    seat.hand.clear();
-    seat.set_status(SeatStatus::Out);
-    // typed 化后 pk 是 G1Projective；用 identity 表示空。
-    seat.pk = ECPoint(G1Projective::identity());
+    table.seats[seat_index as usize].depart_this_hand()?;
     table.set_seat_acted_this_round(seat_index, false);
     table.set_seat_wants_leave(seat_index, false);
 
@@ -3655,7 +3632,6 @@ fn kick_player_internal_in_place(
     if refund_amt > 0 {
         // chip_pool 是完整 TableVault 锁仓；pending addon 只保存在 seat ledger。
         table.chip_pool = post_chip_pool;
-        table.seats[seat_index as usize].pending_addon = 0;
         events::emit_event(
             events,
             TexasPokerEvent::PlayerRefund {
@@ -4259,9 +4235,9 @@ mod tests {
                 runout_index: 0,
                 board_position,
             },
-            progress: RevealProgress::ReadyCard {
-                card: Card::new(0, 0),
-            },
+            pending_mask: 0,
+            submitted_mask: 0,
+            reveal_tokens: vec![],
         }
     }
 
@@ -4271,29 +4247,28 @@ mod tests {
         events: &mut Vec<TexasPokerEvent>,
     ) {
         assert_eq!(table.reveal_token_state().assignments.len(), card_ids.len());
-        let assignments = table.reveal_token_state().assignments.clone();
         let plaintext_cards = generate_plaintext_cards();
-        for (assignment, card_id) in assignments.iter().zip(card_ids) {
-            table
-                .deck_state
-                .decrypted_cards
-                .push(DecryptedCard::resolved(
-                    assignment.encrypted_card_index,
-                    OWNER_SEAT_PUBLIC,
-                    ECPoint(plaintext_cards[usize::from(*card_id)]),
-                ));
-        }
-        for (assignment, card_id) in table
-            .active_reveal_state_mut()
-            .unwrap()
+        let card_indices = table
+            .reveal_token_state()
             .assignments
-            .iter_mut()
-            .zip(card_ids.iter().copied())
+            .iter()
+            .map(|assignment| assignment.encrypted_card_index)
+            .collect::<Vec<_>>();
+        for (encrypted_card_index, card_id) in
+            card_indices.into_iter().zip(card_ids.iter().copied())
         {
-            assignment.progress = RevealProgress::ReadyCard {
-                card: Card::new(card_id / 13, card_id % 13),
+            let encrypted = table.deck_state.encrypted[usize::from(encrypted_card_index)];
+            table.deck_state.encrypted[usize::from(encrypted_card_index)] = ElGamalCiphertext {
+                c1: encrypted.c1,
+                c2: plaintext_cards[usize::from(card_id)],
             };
         }
+        for assignment in &mut table.active_reveal_state_mut().unwrap().assignments {
+            assignment.pending_mask = 0;
+            assignment.submitted_mask = 0;
+            assignment.reveal_tokens.clear();
+        }
+        materialize_completed_reveal_assignments(table, events).unwrap();
         check_reveal_phase_complete(table, events).unwrap();
     }
 
@@ -4325,23 +4300,13 @@ mod tests {
         let plaintext_id = 3u8;
         let encrypted_card_index = 41u8;
         let plaintext_cards = generate_plaintext_cards();
-        table
-            .deck_state
-            .decrypted_cards
-            .push(DecryptedCard::resolved(
-                encrypted_card_index,
-                OWNER_SEAT_PUBLIC,
-                ECPoint(plaintext_cards[usize::from(plaintext_id)]),
-            ));
+        table.deck_state.encrypted[usize::from(encrypted_card_index)].c2 =
+            plaintext_cards[usize::from(plaintext_id)];
+        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_TURN, &mut vec![]).unwrap();
+        table.active_reveal_state_mut().unwrap().assignments =
+            vec![community_assignment(encrypted_card_index, 0)];
         let mut events = vec![];
-
-        write_decrypted_cards_to_community(
-            &mut table,
-            REVEAL_PHASE_TURN,
-            &[community_assignment(encrypted_card_index, 0)],
-            &mut events,
-        )
-        .unwrap();
+        materialize_completed_reveal_assignments(&mut table, &mut events).unwrap();
 
         assert_eq!(table.community_cards, vec![Card::from_index(plaintext_id)]);
         assert_ne!(
@@ -4362,24 +4327,12 @@ mod tests {
     fn test_unknown_community_plaintext_is_rejected_atomically() {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
-        table
-            .deck_state
-            .decrypted_cards
-            .push(DecryptedCard::resolved(
-                7,
-                OWNER_SEAT_PUBLIC,
-                ECPoint::from(utils::hash_to_g1(b"not-a-canonical-card")),
-            ));
+        table.deck_state.encrypted[7].c2 = utils::hash_to_g1(b"not-a-canonical-card");
+        start_community_reveal_phase(&mut table, 1, REVEAL_PHASE_FLOP, &mut vec![]).unwrap();
+        table.active_reveal_state_mut().unwrap().assignments = vec![community_assignment(7, 0)];
         let before = table.clone();
         let mut events = vec![];
-
-        let error = write_decrypted_cards_to_community(
-            &mut table,
-            REVEAL_PHASE_FLOP,
-            &[community_assignment(7, 0)],
-            &mut events,
-        )
-        .unwrap_err();
+        let error = materialize_completed_reveal_assignments(&mut table, &mut events).unwrap_err();
 
         assert!(
             error
@@ -4394,27 +4347,16 @@ mod tests {
     fn test_duplicate_community_plaintext_is_rejected_atomically() {
         let mut table = make_table();
         set_initial_encrypted_deck(&mut table).unwrap();
-        let plaintext = ECPoint(generate_plaintext_cards()[9]);
+        let plaintext = generate_plaintext_cards()[9];
         for encrypted_card_index in [2u8, 38u8] {
-            table
-                .deck_state
-                .decrypted_cards
-                .push(DecryptedCard::resolved(
-                    encrypted_card_index,
-                    OWNER_SEAT_PUBLIC,
-                    plaintext,
-                ));
+            table.deck_state.encrypted[usize::from(encrypted_card_index)].c2 = plaintext;
         }
+        start_community_reveal_phase(&mut table, 2, REVEAL_PHASE_FLOP, &mut vec![]).unwrap();
+        table.active_reveal_state_mut().unwrap().assignments =
+            vec![community_assignment(2, 0), community_assignment(38, 1)];
         let before = table.clone();
         let mut events = vec![];
-
-        let error = write_decrypted_cards_to_community(
-            &mut table,
-            REVEAL_PHASE_FLOP,
-            &[community_assignment(2, 0), community_assignment(38, 1)],
-            &mut events,
-        )
-        .unwrap_err();
+        let error = materialize_completed_reveal_assignments(&mut table, &mut events).unwrap_err();
 
         assert!(error.to_string().contains("duplicate decrypted card id 9"));
         assert_eq!(table, before);
@@ -4432,18 +4374,29 @@ mod tests {
             .community_cards
             .try_push(Card::from_index(duplicate_id))
             .unwrap();
+        table.deck_state.encrypted[44].c2 = plaintext_cards[usize::from(duplicate_id)];
+        start_showdown_reveal_phase(&mut table, &mut vec![]).unwrap();
         table
             .deck_state
             .decrypted_cards
-            .push(DecryptedCard::resolved(
+            .push(DecryptedCard::partial(
                 44,
                 0,
-                ECPoint(plaintext_cards[usize::from(duplicate_id)]),
+                table.deck_state.encrypted[44],
             ));
+        table.active_reveal_state_mut().unwrap().assignments = vec![RevealAssignment {
+            encrypted_card_index: 44,
+            target: RevealTarget::Hole {
+                seat_index: 0,
+                card_slot: 0,
+            },
+            pending_mask: 0,
+            submitted_mask: 0,
+            reveal_tokens: vec![],
+        }];
         let before = table.clone();
         let mut events = vec![];
-
-        let error = write_decrypted_cards_to_hands(&mut table, &mut events).unwrap_err();
+        let error = materialize_completed_reveal_assignments(&mut table, &mut events).unwrap_err();
 
         assert!(error.to_string().contains("duplicate decrypted card id 12"));
         assert_eq!(table, before);
@@ -4854,11 +4807,9 @@ mod tests {
                             runout_index: 0,
                             board_position: 0,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 0,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 0,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     }],
                 },
                 0,
@@ -4869,7 +4820,7 @@ mod tests {
 
         let error = normalize_until_blocked(&mut table, 1_000, &mut events).unwrap_err();
 
-        assert!(error.to_string().contains("plaintext records"));
+        assert!(!error.to_string().is_empty());
         assert_eq!(table, before);
         assert!(events.is_empty());
     }

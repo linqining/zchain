@@ -61,8 +61,10 @@ pub const TEXAS_POKER_TABLE_OBJECT_TYPE: &str = "TexasPokerTable";
 /// the checked sum of every occupied seat's `pending_addon`. Version 19 removes
 /// `ante_collected`; the start-hand transition derives it from checked per-seat debits and the pot
 /// delta. Versions 2 through 18 are decoded through explicit fail-closed migrations in
-/// [`state_codec`].
-pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 21;
+/// [`state_codec`]. Version 23 physically groups immutable/low-frequency poker parameters into
+/// one canonical `TableRules` value, preparing it to move behind a rules hash without keeping
+/// duplicate flat fields in the hot table state.
+pub const TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION: u8 = 23;
 
 /// Versioned persisted-state codec and fail-closed legacy migrations.
 pub mod state_codec;

@@ -43,9 +43,15 @@ pub(crate) fn validate_start_hand(
             .count(),
     )
     .map_err(|_| TexasAirError::SpecViolation("start_hand: active count exceeds u8".into()))?;
-    let ante_collected = canonical.post.pot.checked_sub(canonical.pre.pot).ok_or_else(|| {
-        TexasAirError::SpecViolation("start_hand: canonical pot decreased while collecting ante".into())
-    })?;
+    let ante_collected = canonical
+        .post
+        .pot
+        .checked_sub(canonical.pre.pot)
+        .ok_or_else(|| {
+            TexasAirError::SpecViolation(
+                "start_hand: canonical pot decreased while collecting ante".into(),
+            )
+        })?;
     let input = StartHandInput {
         active_count,
         new_button: canonical.post.button,

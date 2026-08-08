@@ -846,12 +846,12 @@ fn test_funds_air_column_consistency() {
     use poker_texas_air::airs::funds::addon;
     use poker_texas_air::airs::funds::rebuy;
 
-    // addon: 通用 + 50 业务（pending/addon/chip_pool 三条 u64 加法）
-    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 50);
+    // addon: 通用 + 39 业务（pending addon 与 chip-pool 两条 checked-u64 加法）
+    assert_eq!(addon::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 39);
     assert_eq!(AddonAir::num_columns(), addon::cols::NUM_COLUMNS);
 
-    // rebuy: 通用 + 114 业务（stack/chip_pool 两条 u64 加法 + amount range bits）
-    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 114);
+    // rebuy: 通用 + 103 业务（stack/chip_pool 两条 checked-u64 加法 + amount range bits）
+    assert_eq!(rebuy::cols::NUM_COLUMNS, COMMON_NUM_COLUMNS + 103);
     assert_eq!(RebuyAir::num_columns(), rebuy::cols::NUM_COLUMNS);
 }
 

@@ -307,52 +307,63 @@ mod tests {
     #[test]
     fn terminal_projection_requires_exactly_one_plan_event() {
         assert!(SettlementPlanBinding::from_events(&[award_event(0, 10)]).is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event(0, 10),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            plan_event(1, 10, 0, 10),
-            award_event(0, 10),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
+        assert!(
+            SettlementPlanBinding::from_events(&[plan_event(1, 10, 0, 10), award_event(0, 10),])
+                .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                plan_event(1, 10, 0, 10),
+                award_event(0, 10),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
     }
 
     #[test]
     fn terminal_projection_fails_closed_on_invalid_summary_or_awards() {
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(3, 10, 0, 10),
-            award_event(0, 10),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 1, 10),
-            award_event(0, 10),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event(SETTLEMENT_SEATS as u8, 10),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event(0, 9),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event_for_other_table(0, 10),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(3, 10, 0, 10),
+                award_event(0, 10),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 1, 10),
+                award_event(0, 10),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event(SETTLEMENT_SEATS as u8, 10),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event(0, 9),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event_for_other_table(0, 10),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
     }
 
     #[test]
@@ -367,23 +378,29 @@ mod tests {
 
     #[test]
     fn terminal_projection_rejects_mismatched_terminal_markers() {
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event(0, 10),
-            settled_event(9, vec![0]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 0, 10),
-            award_event(0, 10),
-            settled_event(10, vec![1]),
-        ])
-        .is_err());
-        assert!(SettlementPlanBinding::from_events(&[
-            plan_event(1, 10, 1, 9),
-            award_event(0, 9),
-            settled_event(10, vec![0]),
-        ])
-        .is_err());
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event(0, 10),
+                settled_event(9, vec![0]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 0, 10),
+                award_event(0, 10),
+                settled_event(10, vec![1]),
+            ])
+            .is_err()
+        );
+        assert!(
+            SettlementPlanBinding::from_events(&[
+                plan_event(1, 10, 1, 9),
+                award_event(0, 9),
+                settled_event(10, vec![0]),
+            ])
+            .is_err()
+        );
     }
 }

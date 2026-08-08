@@ -21,6 +21,7 @@
 
 use stwo::core::fields::m31::M31;
 
+use poker_texas_air::airs::TexasAir;
 use poker_texas_air::airs::crypto::fold_with_proof::{FoldWithProofAir, FoldWithProofInput};
 use poker_texas_air::airs::crypto::join_and_shuffle::{
     JoinAndShuffleAir, JoinAndShuffleInput, JoinAndShuffleRow,
@@ -37,7 +38,6 @@ use poker_texas_air::airs::crypto::submit_reconstruct_deck::{
 use poker_texas_air::airs::crypto::submit_shuffle_v2::{
     SubmitShuffleV2Air, SubmitShuffleV2Input, SubmitShuffleV2Row,
 };
-use poker_texas_air::airs::TexasAir;
 use poker_texas_air::method_kind::MethodKind;
 use poker_texas_air::precompile_binding::PrecompileAirBinding;
 use poker_texas_air::prover::prove_method;

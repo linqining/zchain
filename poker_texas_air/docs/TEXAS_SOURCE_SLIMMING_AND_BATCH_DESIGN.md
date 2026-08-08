@@ -107,6 +107,20 @@ schema v18/v19/v20 已依次完成三项 custody 去重：v18 删除 `addon_pool
 fail-closed。Receipt 同时绑定 showdown 的 `SettlementPlanCommitted` 或无摊牌的
 `HandEndedWithoutShowdown`，重复、缺失或金额不匹配均在创建 UTXO 前拒绝。
 
+schema v21 已把 reveal 的完成态彻底降为 dispatch-local：canonical assignment 只保存
+`pending_mask/submitted_mask/reveal_tokens`，公共牌与 showdown 明文在 proof 验证后的同一 dispatch
+直接写入 board/hole 并删除 assignment；fresh state 不再编码 `ReadyPartial/ReadyCard` 或 plaintext
+ledger。旧 v20 完成态因无法证明它仍与当前 authenticated crypto request 对应而 fail-closed。
+
+schema v22 已完成 `SeatSlot` tagged-union 的第一阶段（共识编码/state-root 层）：`Vacant`、`Waiting`、
+`Playing` 与 `DepartedThisHand` 只编码各自有意义的 payload。空座位不再重复编码 empty address、零
+stack/bet/total_bet、空 hand、identity pk 与零 pending addon；局中已离场座位只保留 player、仍参与
+side-pot 的 `total_bet` 和 time bank。v21 flat-seat bytes 可精确迁移，tag 与 payload 冲突会在编码前
+fail-closed。runtime 暂时继续投影为 flat `Seat`，但生产 join/leave/kick/reset 已全部收口到
+`Seat::occupied/vacate/depart_this_hand/prepare_next_hand` 四个 variant-aware mutation；尤其 reset 不再
+把 `DepartedThisHand` 短暂恢复成 `Active + identity pk`。这使下一阶段物理替换 runtime `SeatSlot`
+enum 时，生命周期构造/销毁路径已有稳定边界，不必重新审计分散字段写入。
+
 ## 下一步字段处理
 
 ### A. 保守方案：应优先完成
@@ -412,8 +426,8 @@ shuffle”。推荐明确采用 **fresh deck per hand**：
 | 已完成 lowering，待新 payload 物理删除 | join 的 `player`、普通玩家动作的 `seat_index` | 从 caller/当前 actor 派生 | table 已拒绝一地址占多座；旧 wrapper/raw args 只做相等断言，待 method-batch payload v2 不再编码这些字段 |
 | 立即 | `KickPlayerArgs.reason` | typed command cause | reason 由 admin/deadline 路径确定，禁止调用者伪造 |
 | 中期 | `DeckState.aggregated_pk` runtime cache | 按 `contributor_mask + seat.pk` 现场派生或放非共识 cache | persisted schema v10 已删除；所有读取先验证 lineage |
-| 中期 | `RevealProgress::ReadyPartial/ReadyCard` | dispatch-local normalize output | proof 验证与 materialize 必须在同一原子命令内完成 |
-| 中期 | `DecryptedCardState::Plaintext` record | 直接写入 hole/board 后删除 | normalize 不允许完成结果跨命令滞留 |
+| schema v21 已完成 | `RevealProgress::ReadyPartial/ReadyCard` | dispatch-local normalize output | proof 验证与 materialize 已在同一原子命令内完成 |
+| schema v21 已完成 | `DecryptedCardState::Plaintext` record | 直接写入 hole/board 后删除 | normalize 不允许完成结果跨命令滞留 |
 | schema v18 已完成 | `addon_pool` | `sum(seat.pending_addon)` | Funds/Reset Stage 约束逐 seat custody delta 与总和 |
 | schema v19 已完成 | `ante_collected` | StartHand/BetCollection plan 的确定性 delta | ante debit、pot 与 `total_bet` 更新全部进入 checked plan |
 | schema v20 已完成 | `rake_collected` | settlement treasury receipt | precompile 直接消费 fail-closed receipt，不再借 table 字段中转 |
@@ -429,9 +443,11 @@ shuffle”。推荐明确采用 **fresh deck per hand**：
 
 ### Seat 的二级 tagged-union 方案
 
-schema v13 已经把六个互斥 bool 收敛成 `SeatStatus`，但当前平铺 `Seat` 仍允许空座位携带 stack、pk、
-hand、bet 或 pending addon，也让局中已离场的 `Out` seat 保留大量已经无意义的字段。下一步不建议把
-九个 status 直接打包成 27-bit word；更高价值的方案是先把 seat payload 本身改成 tagged union：
+schema v13 已经把六个互斥 bool 收敛成 `SeatStatus`。schema v22 进一步把 persisted/state-root seat
+改成下列 tagged union，并拒绝空座位携带 stack、pk、hand、bet 或 pending addon，以及 `Out` seat
+携带 live custody/key payload。runtime `Seat` 仍是过渡投影；九个 status 暂不打包成 27-bit word。
+状态机生命周期 mutation 已先收口为 variant-aware API，下一步可以在不改变调用语义的情况下物理
+替换为：
 
 ```text
 SeatSlot =
@@ -453,10 +469,10 @@ SeatSlot =
 - `acted_mask` 与 `leave_after_hand_mask` 仍保持桌级 bit mask；union tag 描述互斥生命周期，mask 描述
   正交策略/进度，二者不能混成一个 flags word。
 
-这是中等风险、高 state-root 收益的重构，但未必直接减少当前 Stage proof 的最大列宽。实施顺序应是：
-先完成 method/Stage batch 的列级 benchmark，再决定 AIR 是按九个固定 seat slot 展开，还是只对被更新
-seat 提供 opening + transition witness。若采用后者，seat union 对证明宽度的收益会明显大于 27-bit
-status packing。
+这是中等风险、高 state-root 收益的重构，但未必直接减少当前 Stage proof 的最大列宽。v22 已先完成
+编码层与 v21 migration，避免在同一 schema 同时改状态机和存储。下一阶段决定 AIR 是按九个固定 seat
+slot 展开，还是只对被更新 seat 提供 opening + transition witness；若采用后者，seat union 对证明宽度
+的收益会明显大于 27-bit status packing。
 
 ### Reveal 与 deck 中还可消除的重复表示
 
@@ -473,9 +489,9 @@ status packing。
 - `RevealProgress::Collecting { pending_mask, submitted_mask, tokens }` 中，如果 required participant mask
   能由 target、owner 与 contributor lineage 唯一派生，则 `submitted_mask = required_mask - pending_mask`
   可删除；在该 invariant 完成前不能贸然删除，否则 token 到 seat 的映射会失去唯一性。
-- `RevealProgress::ReadyPartial/ReadyCard` 与 `DecryptedCardState::Plaintext` 应成为 dispatch-local normalize
-  输出。proof 验证、materialize 与 assignment/ledger 清理必须在同一原子命令内完成，避免把“已完成但
-  未消费”写入 state root。
+- schema v21 已删除 fresh `RevealProgress::ReadyPartial/ReadyCard` 与
+  `DecryptedCardState::Plaintext`。proof 验证、materialize 与 assignment/ledger 清理在同一原子命令内
+  完成，不再把“已完成但未消费”写入 state root；这些名字只允许出现在 v20 legacy mirror。
 - `DeckState.aggregated_pk` 已不进入 persisted schema；runtime 若为性能保留 cache，也必须标记为
   non-consensus derived cache，并在所有 crypto statement 构造前从 contributor mask + seat pk 校验。
 
@@ -662,5 +678,7 @@ Borsh 字节更贵，所以优先删除重复事实和变长容器，再考虑 b
     canonical command 表示、crypto payload 去重、schema v15 active deadline 哨兵消除和 authenticated
     caller/seat lowering，以及 fresh `kick_player_v2(seat)` 删除调用者可选 reason；schema v17 已删除
     桌内 `version`；schema v18/v19/v20 又依次删除 `addon_pool/ante_collected/rake_collected`。
-    下一步清理 reveal 临时完成态、实施 `SeatSlot` tagged union、分离 TableRules/metadata，并把 durable
-    archive 收敛为连续 state stream。
+    schema v21 已清理 reveal 临时完成态；schema v22 已实施 persisted `SeatSlot` tagged union 与 v21
+    exact migration，生产 seat 生命周期 mutation 也已全部收口到 variant-aware API。下一步优先分离
+    `TableRules/Metadata/GovernancePolicy`，再物理替换 runtime `SeatSlot` enum，并把 durable archive
+    收敛为连续 state stream。

@@ -13,8 +13,8 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
-    RevealTokenState, RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealTarget, RevealTokenState,
+    RitStartStreet, RunItTwiceState, SeatStatus, ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -117,12 +117,15 @@ fn fixture(
     let seat_index = 2;
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
+    let prior_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let prior_public_key = <Bls12381Curve as Curve>::base_g() * prior_secret_key;
+    let aggregate_public_key = prior_public_key + public_key;
     let input_cards: Vec<_> = (0..52)
         .map(|i| {
             let card = Bls12381Curve::hash_to_curve(format!("air-binding/card/{i}").as_bytes());
             ElGamalCiphertextGeneric::encrypt(
                 &card,
-                &public_key,
+                &aggregate_public_key,
                 &<Bls12381Curve as Curve>::Scalar::random(&mut OsRng),
             )
         })
@@ -133,7 +136,7 @@ fn fixture(
         .map(|_| <Bls12381Curve as Curve>::Scalar::random(&mut OsRng))
         .collect();
     let output_cards: Vec<_> = (0..input_cards.len())
-        .map(|i| input_cards[permutation[i]].re_encrypt(&public_key, &rerandomizers[i]))
+        .map(|i| input_cards[permutation[i]].re_encrypt(&aggregate_public_key, &rerandomizers[i]))
         .collect();
     let transcript_context = b"zk_shuffle_proof_v2";
     let shuffle_proof = ShuffleProof::prove(
@@ -141,7 +144,7 @@ fn fixture(
         &output_cards,
         &permutation,
         &rerandomizers,
-        &public_key,
+        &aggregate_public_key,
         &mut OsRng,
         &mut FiatShamirTranscript::new(transcript_context),
     )
@@ -160,18 +163,22 @@ fn fixture(
         .checked_sub(1)
         .expect("statement call sequence must be non-zero");
     table.hand_id = hand_id;
+    table.seats[0].player = [0x30; 20];
+    table.seats[0].set_status(SeatStatus::Active);
+    table.seats[0].stack = 1_000;
+    table.seats[0].pk = ECPoint(prior_public_key);
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
     table.deck_state.encrypted = input_cards.clone().try_into().unwrap();
-    table.deck_state.contributor_mask = 1u16 << seat_index;
+    table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
     table.sync_aggregated_pk().unwrap();
     table
         .enter_initial_shuffling(
             ShuffleState {
                 pending_mask: 1u16 << seat_index,
-                completed_mask: 0,
+                completed_mask: 1u16,
             },
             FIXTURE_TIMESTAMP_MS,
         )
@@ -207,7 +214,7 @@ fn fixture(
         transcript_context,
         &call_context,
         TranscriptId::FiatShamirSha3,
-        &public_key,
+        &aggregate_public_key,
         &input_cards,
         &output_cards,
         &shuffle_proof,
@@ -547,12 +554,18 @@ fn reveal_fixture(
     );
     table.call_seq = call_seq - 1;
     table.hand_id = hand_id;
+    let other_secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
+    let other_public_key = <Bls12381Curve as Curve>::base_g() * other_secret_key;
+    table.seats[0].player = [0x70; 20];
+    table.seats[0].set_status(SeatStatus::Active);
+    table.seats[0].stack = 1_000;
+    table.seats[0].pk = ECPoint(other_public_key);
     table.seats[usize::from(seat_index)].player = player;
     table.seats[usize::from(seat_index)].set_status(SeatStatus::Active);
     table.seats[usize::from(seat_index)].stack = 1_000;
     table.seats[usize::from(seat_index)].pk = ECPoint(public_key);
     table.deck_state.encrypted = encrypted_cards.clone().try_into().unwrap();
-    table.deck_state.contributor_mask = 1u16 << seat_index;
+    table.deck_state.contributor_mask = 1u16 | (1u16 << seat_index);
     table.sync_aggregated_pk().unwrap();
     table
         .enter_revealing(
@@ -566,11 +579,9 @@ fn reveal_fixture(
                             seat_index: 0,
                             card_slot: 0,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 1u16 << seat_index,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 1u16 << seat_index,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     },
                     RevealAssignment {
                         encrypted_card_index: 1,
@@ -578,11 +589,9 @@ fn reveal_fixture(
                             seat_index: 1,
                             card_slot: 0,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 1u16,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 1u16,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     },
                 ],
             },
@@ -639,12 +648,10 @@ fn reveal_fixture(
             request_args.proofs[0] = proof;
         }
         RevealRequestVariant::OtherAssignment => {
-            request_table.active_reveal_state_mut().unwrap().assignments[1].progress =
-                RevealProgress::Collecting {
-                    pending_mask: 1u16 << seat_index,
-                    submitted_mask: 0,
-                    reveal_tokens: vec![],
-                };
+            let assignment = &mut request_table.active_reveal_state_mut().unwrap().assignments[1];
+            assignment.pending_mask = 1u16 << seat_index;
+            assignment.submitted_mask = 0;
+            assignment.reveal_tokens.clear();
             let (token, proof) = prove_reveal_token(&secret_key, &public_key, &encrypted_cards[1]);
             request_args.assignment_indices[0] = 1;
             request_args.reveal_tokens[0] = token;
@@ -777,8 +784,11 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
     let secret_key = <Bls12381Curve as Curve>::Scalar::random(&mut OsRng);
     let public_key = <Bls12381Curve as Curve>::base_g() * secret_key;
     let canonical_cards = utils::generate_plaintext_cards();
-    let encrypted_cards: Vec<_> = [30usize, 31]
+    let card_order = [30usize, 31]
         .into_iter()
+        .chain(0usize..30)
+        .chain(32usize..52);
+    let encrypted_cards: Vec<_> = card_order
         .map(|card_id| {
             ElGamalCiphertextGeneric::encrypt(
                 &canonical_cards[card_id],
@@ -789,6 +799,7 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
         .collect();
     let submissions: Vec<_> = encrypted_cards
         .iter()
+        .take(2)
         .map(|ciphertext| prove_reveal_token(&secret_key, &public_key, ciphertext))
         .collect();
 
@@ -851,11 +862,9 @@ fn terminal_rit_reveal_arms_showdown_display_and_proves() {
                             seat_index,
                             card_slot: encrypted_card_index,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 1u16 << seat_index,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 1u16 << seat_index,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     })
                     .collect(),
             },

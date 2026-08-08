@@ -12,8 +12,8 @@ use poker_l1::vm::contracts::texas_poker::dispatch::{
     SubmitReconstructDeckArgs, SubmitRevealTokensArgs, SubmitShuffleV2Args,
 };
 use poker_l1::vm::contracts::texas_poker::types::{
-    DecryptedCard, ReconstructState, RevealAssignment, RevealProgress, RevealTarget,
-    RevealTokenState, SeatStatus, ShuffleState, TexasPokerTable,
+    DecryptedCard, ReconstructState, RevealAssignment, RevealTarget, RevealTokenState, SeatStatus,
+    ShuffleState, TexasPokerTable,
 };
 use poker_l1::vm::contracts::texas_poker::utils;
 use poker_protocol::crypto::curve::{Bls12381Curve, Curve, CurveScalar, ElGamalCiphertextGeneric};
@@ -115,6 +115,9 @@ fn shuffle_task(nonce: u64, call_seq: u32) -> ProveTask {
     table.seats[0].set_status(SeatStatus::Active);
     table.seats[0].stack = 1_000;
     table.seats[0].pk = ECPoint(public_key);
+    table.seats[1].player = [0x32; 20];
+    table.seats[1].set_status(SeatStatus::Active);
+    table.seats[1].stack = 1_000;
     table.deck_state.encrypted = input_cards.try_into().unwrap();
     table.deck_state.contributor_mask = 1;
     table.sync_aggregated_pk().unwrap();
@@ -195,6 +198,9 @@ fn join_task(nonce: u64, call_seq: u32) -> ProveTask {
     );
     table.call_seq = call_seq;
     table.hand_id = 6;
+    table.seats[0].player = [0x42; 20];
+    table.seats[0].set_status(SeatStatus::Active);
+    table.seats[0].stack = 2_000;
     table
         .enter_initial_shuffling(
             ShuffleState {
@@ -522,11 +528,9 @@ fn reveal_task(nonce: u64) -> ProveTask {
                             seat_index: 0,
                             card_slot: 0,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 1u16 << 1,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 1u16 << 1,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     },
                     RevealAssignment {
                         encrypted_card_index: 1,
@@ -534,11 +538,9 @@ fn reveal_task(nonce: u64) -> ProveTask {
                             seat_index: 1,
                             card_slot: 0,
                         },
-                        progress: RevealProgress::Collecting {
-                            pending_mask: 1u16,
-                            submitted_mask: 0,
-                            reveal_tokens: vec![],
-                        },
+                        pending_mask: 1u16,
+                        submitted_mask: 0,
+                        reveal_tokens: vec![],
                     },
                 ],
             },

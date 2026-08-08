@@ -38,7 +38,7 @@ use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
 use super::state_machine;
-use super::types::{SeatStatus, TexasPokerTable};
+use super::types::{Seat, SeatStatus, TexasPokerTable};
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::ObjectID;
 use crate::signature::TaggedPubkey;
@@ -1600,14 +1600,12 @@ fn dispatch_join_table(
         .ok_or_else(|| PokerL1Error::Serialization("no empty seat available".into()))?;
     table.set_seat_acted_this_round(seat_idx, false);
     table.set_seat_wants_leave(seat_idx, false);
-    let seat = &mut table.seats[seat_idx as usize];
-    seat.player = context.caller;
-    seat.stack = input.buy_in;
-    seat.pk = ECPoint::from(pk);
-    seat.set_status(SeatStatus::Active); // WAITING 状态加入，立即参与下一局
-    seat.bet = 0;
-    seat.total_bet = 0;
-    seat.hand.clear();
+    table.seats[seat_idx as usize] = Seat::occupied(
+        context.caller,
+        input.buy_in,
+        ECPoint::from(pk),
+        SeatStatus::Active,
+    )?; // WAITING 状态加入，立即参与下一局
 
     // P0 修复：与 apply_join_shuffle 保持一致的资金记账——buy_in 必须进入 chip_pool，
     // 否则离座退款时 chip_pool 会出现负差额（资金凭空多退）。
@@ -1661,7 +1659,7 @@ fn dispatch_leave_table(
         // chip_pool 是总锁仓，必须扣除 stack + pending_addon 的完整退款。
         table.chip_pool = post_chip_pool;
     }
-    table.seats[seat_index as usize] = super::types::Seat::empty();
+    table.seats[seat_index as usize].vacate();
     table.remove_deck_contributor(seat_index)?;
 
     if refund_amt > 0 {

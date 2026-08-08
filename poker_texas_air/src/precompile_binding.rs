@@ -349,7 +349,7 @@ impl RevealTokenVerifyRequest {
                     .iter()
                     .find(|card| {
                         usize::from(card.encrypted_card_index) == card_index
-                            && card.owner_seat_index == seat_index
+                            && card.owner_seat_index == args.seat_index
                     })
                     .map(|card| card.ciphertext)
                     .or_else(|| pre_table.deck_state.encrypted.get(card_index).copied())

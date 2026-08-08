@@ -238,6 +238,81 @@ impl Seat {
         }
     }
 
+    /// Construct one occupied seat in a payload shape accepted by the tagged seat codec.
+    pub fn occupied(
+        player: Address,
+        stack: u64,
+        pk: ECPoint,
+        status: SeatStatus,
+    ) -> PokerL1Result<Self> {
+        if player == EMPTY_PLAYER {
+            return Err(PokerL1Error::Serialization(
+                "Texas occupied seat cannot use the empty player address".into(),
+            ));
+        }
+        if !matches!(status, SeatStatus::Waiting | SeatStatus::Active) {
+            return Err(PokerL1Error::Serialization(
+                "Texas newly occupied seat must be waiting or active".into(),
+            ));
+        }
+        if bool::from(pk.0.is_identity()) {
+            return Err(PokerL1Error::Serialization(
+                "Texas newly occupied seat cannot use an identity public key".into(),
+            ));
+        }
+        Ok(Self {
+            player,
+            stack,
+            hand: HoleCards::empty(),
+            bet: 0,
+            total_bet: 0,
+            status,
+            pk,
+            pending_addon: 0,
+            time_bank_ms: super::constants::DEFAULT_TIME_BANK_MS,
+        })
+    }
+
+    /// Replace this slot with the unique vacant representation.
+    pub fn vacate(&mut self) {
+        *self = Self::empty();
+    }
+
+    /// Convert an occupied player into the minimal departed-this-hand payload.
+    ///
+    /// `player`, `total_bet`, and `time_bank_ms` remain available for side-pot settlement and
+    /// audit events. Live custody, cards, the encryption key, and pending funding are cleared.
+    pub fn depart_this_hand(&mut self) -> PokerL1Result<()> {
+        if self.player == EMPTY_PLAYER {
+            return Err(PokerL1Error::Serialization(
+                "Texas cannot depart a vacant seat".into(),
+            ));
+        }
+        self.stack = 0;
+        self.hand.clear();
+        self.bet = 0;
+        self.status = SeatStatus::Out;
+        self.pk = ECPoint(G1Projective::identity());
+        self.pending_addon = 0;
+        Ok(())
+    }
+
+    /// Clear hand-local payload and project a retained player into the next-hand ready state.
+    pub fn prepare_next_hand(&mut self) {
+        self.hand.clear();
+        self.bet = 0;
+        self.total_bet = 0;
+        self.status = match self.status {
+            SeatStatus::Empty => SeatStatus::Empty,
+            // A departed seat has no live key or stack, so it cannot become Active again.  Keep
+            // the tombstone until reset emits PlayerLeft and vacates the slot.
+            SeatStatus::Out => SeatStatus::Out,
+            SeatStatus::Waiting | SeatStatus::Active | SeatStatus::Folded | SeatStatus::AllIn => {
+                SeatStatus::Active
+            }
+        };
+    }
+
     /// 判断座位是否被活跃占用（player != [0;20] 且未中途离开）。
     #[must_use]
     pub fn is_occupied(&self) -> bool {
@@ -293,6 +368,40 @@ impl Seat {
             return Err(PokerL1Error::Serialization(
                 "Texas empty seat contains hole cards".into(),
             ));
+        }
+        match self.status {
+            SeatStatus::Empty => {
+                if self.stack != 0
+                    || self.bet != 0
+                    || self.total_bet != 0
+                    || !bool::from(self.pk.0.is_identity())
+                    || self.pending_addon != 0
+                {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas empty seat carries live custody or key payload".into(),
+                    ));
+                }
+            }
+            SeatStatus::Waiting => {
+                if !self.hand.is_empty() || self.bet != 0 || self.total_bet != 0 {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas waiting seat carries in-hand cards or wagers".into(),
+                    ));
+                }
+            }
+            SeatStatus::Out => {
+                if self.stack != 0
+                    || !self.hand.is_empty()
+                    || self.bet != 0
+                    || !bool::from(self.pk.0.is_identity())
+                    || self.pending_addon != 0
+                {
+                    return Err(PokerL1Error::Serialization(
+                        "Texas departed seat carries live custody, card, or key payload".into(),
+                    ));
+                }
+            }
+            SeatStatus::Active | SeatStatus::Folded | SeatStatus::AllIn => {}
         }
         Ok(())
     }
@@ -1041,6 +1150,93 @@ impl Default for DeckState {
 
 // ========== 桌台主结构 ==========
 
+/// Canonical rules that define poker semantics but are not hand-local mutable state.
+///
+/// Keeping these facts in one value prevents flat-field drift and is the first migration step
+/// toward storing the rules as a separately opened object bound by `rules_hash`.
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct TableRules {
+    /// Maximum occupied seat capacity (`2..=9`).
+    pub max_players: u8,
+    /// Small blind amount.
+    pub small_blind: u64,
+    /// Big blind amount.
+    pub big_blind: u64,
+    /// Canonical timeout durations.
+    pub timeout_config: TimeoutConfig,
+    /// Ante mode (`NONE`, `NORMAL`, or `BBA`).
+    pub ante_mode: u8,
+    /// Ante debit per configured payer.
+    pub ante_amount: u64,
+    /// Rake mode (`NONE` or `PERCENTAGE`).
+    pub rake_mode: u8,
+    /// Rake rate in basis points.
+    pub rake_bps: u16,
+    /// Maximum rake charged for one hand.
+    pub rake_cap: u64,
+    /// Run-it-twice policy.
+    pub rit_mode: u8,
+}
+
+impl TableRules {
+    /// Construct the default optional rules around a validated seat/blind configuration.
+    #[must_use]
+    pub fn new(max_players: u8, small_blind: u64, big_blind: u64) -> Self {
+        Self {
+            max_players,
+            small_blind,
+            big_blind,
+            timeout_config: TimeoutConfig::default(),
+            ante_mode: super::constants::ANTE_MODE_NONE,
+            ante_amount: 0,
+            rake_mode: super::constants::RAKE_MODE_NONE,
+            rake_bps: super::constants::DEFAULT_RAKE_BPS,
+            rake_cap: super::constants::DEFAULT_RAKE_CAP,
+            rit_mode: super::constants::RIT_MODE_DISABLED,
+        }
+    }
+
+    /// Reject rule combinations that cannot define a canonical Texas table.
+    pub fn validate_canonical(&self) -> PokerL1Result<()> {
+        if !(2..=MAX_SEATS).contains(&self.max_players) {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas max_players {} is outside 2..={MAX_SEATS}",
+                self.max_players
+            )));
+        }
+        if self.big_blind == 0 || self.small_blind > self.big_blind {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas blind configuration small={} big={} is not canonical",
+                self.small_blind, self.big_blind
+            )));
+        }
+        if !matches!(
+            self.ante_mode,
+            ANTE_MODE_NONE | ANTE_MODE_NORMAL | ANTE_MODE_BBA
+        ) {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas ante mode {} is not canonical",
+                self.ante_mode
+            )));
+        }
+        if !matches!(self.rake_mode, RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE)
+            || self.rake_bps > 10_000
+        {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas rake configuration mode={} bps={} is not canonical",
+                self.rake_mode, self.rake_bps
+            )));
+        }
+        if !matches!(self.rit_mode, RIT_MODE_DISABLED | RIT_MODE_TWICE) {
+            return Err(PokerL1Error::Serialization(format!(
+                "Texas RIT mode {} is not canonical",
+                self.rit_mode
+            )));
+        }
+        Ok(())
+    }
+}
+
 /// Texas Poker 桌台（镜像 Move `Table` struct，table.move:270-304）。
 ///
 /// 这是预编译合约的核心状态对象，borsh 编码后存入 ObjectDb，
@@ -1060,12 +1256,8 @@ pub struct TexasPokerTable {
     /// `poker_texas_air` 电路约束（与同步电路目标契合）。
     /// 旧对象反序列化时若为 `EMPTY_PLAYER`，管理类校验会失败，需 governance 重设。
     pub creator: Address,
-    /// 最大玩家数（2..=9）。
-    pub max_players: u8,
-    /// 小盲注金额。
-    pub small_blind: u64,
-    /// 大盲注金额。
-    pub big_blind: u64,
+    /// Immutable/low-frequency poker semantics, physically separated from hand-local state.
+    pub rules: TableRules,
 
     /// 座位列表（长度 = max_players）。
     pub seats: Vec<Seat>,
@@ -1087,39 +1279,12 @@ pub struct TexasPokerTable {
     /// 加密牌组状态。
     pub deck_state: DeckState,
 
-    /// 超时配置。
-    pub timeout_config: TimeoutConfig,
-
     /// 桌台实际锁仓的 ZCN 总额。
     ///
     /// 这是嵌入 Texas shared object 的 `TableVault.balance`。join/addon/rebuy 的生产
     /// precompile 路径必须先消费等额 native Coin UTXO 才能增加该值；任何退款/离场
     /// 创建 Coin 输出前必须先减少该值。
     pub chip_pool: u64,
-
-    /// Ante 模式（`ANTE_MODE_NONE/NORMAL/BBA`）。
-    ///
-    /// 默认 NONE。设置后在 `start_hand` 时按模式投 ante：
-    /// - NORMAL：每个玩家投 `ante_amount`
-    /// - BBA：仅大盲位投 `ante_amount`（简化投注流程）
-    pub ante_mode: u8,
-    /// Ante 金额（每手投注的 ante 数额）。
-    pub ante_amount: u64,
-
-    /// Rake 模式（`RAKE_MODE_NONE/PERCENTAGE`）。
-    ///
-    /// 默认 NONE。设置为 PERCENTAGE 后，`settle_hand` 时按 `rake_bps` 比例抽水：
-    /// `rake = min(pot * rake_bps / 10000, rake_cap)`
-    pub rake_mode: u8,
-    /// Rake 比例（基点 bps，500 = 5%）。
-    pub rake_bps: u16,
-    /// Rake 上限（单手最多抽水金额）。
-    pub rake_cap: u64,
-    /// Run It Twice 模式（`RIT_MODE_DISABLED/TWICE`）。
-    ///
-    /// 默认 DISABLED。设置为 TWICE 后，无进一步争议下注时，已公开公共牌成为共享前缀，
-    /// 后续公共牌按两个独立 runout 发牌并由规范化结算计划逐层拆池。
-    pub rit_mode: u8,
 
     /// Current hand's two-runout state. Empty outside an active RIT hand.
     pub run_it_twice_state: RunItTwiceState,
@@ -1135,6 +1300,20 @@ pub struct TexasPokerTable {
     /// 初始为 0；每次成功且 `pre_table != post_table` 的 dispatch 严格递增一次。
     /// 无状态变化的 permissionless `tick` 不消耗序号，保证证明任务连续。
     pub call_seq: u32,
+}
+
+impl Deref for TexasPokerTable {
+    type Target = TableRules;
+
+    fn deref(&self) -> &Self::Target {
+        &self.rules
+    }
+}
+
+impl DerefMut for TexasPokerTable {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.rules
+    }
 }
 
 impl TexasPokerTable {
@@ -1880,9 +2059,7 @@ impl TexasPokerTable {
             state_schema_version: super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION,
             name,
             creator,
-            max_players,
-            small_blind,
-            big_blind,
+            rules: TableRules::new(max_players, small_blind, big_blind),
             seats,
             acted_mask: 0,
             leave_after_hand_mask: 0,
@@ -1891,14 +2068,7 @@ impl TexasPokerTable {
             community_cards: BoardCards::empty(),
             hand_phase: HandPhase::Waiting,
             deck_state: DeckState::default(),
-            timeout_config: TimeoutConfig::default(),
             chip_pool: 0,
-            ante_mode: super::constants::ANTE_MODE_NONE,
-            ante_amount: 0,
-            rake_mode: super::constants::RAKE_MODE_NONE,
-            rake_bps: super::constants::DEFAULT_RAKE_BPS,
-            rake_cap: super::constants::DEFAULT_RAKE_CAP,
-            rit_mode: super::constants::RIT_MODE_DISABLED,
             run_it_twice_state: RunItTwiceState::default(),
             hand_id: 0,
             call_seq: 0,
@@ -2140,9 +2310,8 @@ impl TexasPokerTable {
                 super::TEXAS_POKER_TABLE_STATE_SCHEMA_VERSION
             )));
         }
-        if !(2..=MAX_SEATS).contains(&self.max_players)
-            || self.seats.len() != usize::from(self.max_players)
-        {
+        self.rules.validate_canonical()?;
+        if self.seats.len() != usize::from(self.max_players) {
             return Err(PokerL1Error::Serialization(format!(
                 "Texas seat layout mismatch: max_players={}, seats={}",
                 self.max_players,
@@ -2155,29 +2324,6 @@ impl TexasPokerTable {
             return Err(PokerL1Error::Serialization(
                 "Texas table contains out-of-range seat flag bits".into(),
             ));
-        }
-        if !matches!(
-            self.ante_mode,
-            ANTE_MODE_NONE | ANTE_MODE_NORMAL | ANTE_MODE_BBA
-        ) {
-            return Err(PokerL1Error::Serialization(format!(
-                "Texas ante mode {} is not canonical",
-                self.ante_mode
-            )));
-        }
-        if !matches!(self.rake_mode, RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE)
-            || self.rake_bps > 10_000
-        {
-            return Err(PokerL1Error::Serialization(format!(
-                "Texas rake configuration mode={} bps={} is not canonical",
-                self.rake_mode, self.rake_bps
-            )));
-        }
-        if !matches!(self.rit_mode, RIT_MODE_DISABLED | RIT_MODE_TWICE) {
-            return Err(PokerL1Error::Serialization(format!(
-                "Texas RIT mode {} is not canonical",
-                self.rit_mode
-            )));
         }
         self.validate_hand_phase()?;
         for (seat_index, seat) in self.seats.iter().enumerate() {
@@ -2528,6 +2674,33 @@ mod tests {
 
         seat.set_status(SeatStatus::Out);
         assert_eq!(seat.status(), SeatStatus::Out);
+    }
+
+    #[test]
+    fn seat_variant_mutations_preserve_tagged_payload_invariants() {
+        let player = [0xAB; 20];
+        let pk = ECPoint(G1Projective::generator());
+        let mut seat = Seat::occupied(player, 1_000, pk, SeatStatus::Active).unwrap();
+        assert!(seat.validate_canonical().is_ok());
+
+        seat.bet = 100;
+        seat.total_bet = 250;
+        seat.hand.try_push(Card::from_index(7)).unwrap();
+        seat.pending_addon = 400;
+        seat.depart_this_hand().unwrap();
+        assert_eq!(seat.player, player);
+        assert_eq!(seat.total_bet, 250);
+        assert!(seat.has_left_hand());
+        assert!(seat.validate_canonical().is_ok());
+
+        // Reset must not resurrect a departed player without a live key or stack.
+        seat.prepare_next_hand();
+        assert!(seat.has_left_hand());
+        assert!(seat.validate_canonical().is_ok());
+
+        seat.vacate();
+        assert_eq!(seat, Seat::empty());
+        assert!(seat.validate_canonical().is_ok());
     }
 
     #[test]
