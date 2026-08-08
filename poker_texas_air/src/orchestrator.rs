@@ -223,13 +223,36 @@ impl Orchestrator {
         crate::tagged_method::verify_verified_tagged_composite_package(package)
     }
 
+    /// Restart-safe verification using tasks already replayed and envelope-validated from the
+    /// package's embedded command stream.
+    pub fn verify_tagged_package_with_replayed_tasks(
+        tasks: &[ProveTask],
+        package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
+    ) -> TexasAirResult<()> {
+        crate::tagged_method::verify_verified_tagged_composite_batch_with_replayed_tasks(
+            tasks, package,
+        )
+    }
+
     /// Replay, verify, and atomically restore a self-contained tagged package after restart.
     pub fn restore_verified_tagged_batch(
         &mut self,
         package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
     ) -> TexasAirResult<Vec<ProvenTask>> {
-        let tasks = package.replay_tasks()?;
-        let receipts = crate::tagged_method::verify_and_issue_tagged_receipts(&tasks, package)?;
+        let tasks = package.validate_and_replay_tasks()?;
+        self.restore_verified_tagged_batch_with_replayed_tasks(&tasks, package)
+    }
+
+    /// Verify and restore a tagged package using canonical tasks already replayed during package
+    /// decoding. Receipt insertion remains atomic and happens only after both proofs verify.
+    pub fn restore_verified_tagged_batch_with_replayed_tasks(
+        &mut self,
+        tasks: &[ProveTask],
+        package: &crate::tagged_method::ArchivedTaggedBatchProofPackage,
+    ) -> TexasAirResult<Vec<ProvenTask>> {
+        let receipts = crate::tagged_method::verify_and_issue_tagged_receipts_with_replayed_tasks(
+            tasks, package,
+        )?;
         let mut next_chain = self.verified_chain_builder.clone();
         for receipt in receipts {
             next_chain.push_receipt(receipt)?;

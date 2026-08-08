@@ -484,7 +484,7 @@ impl MethodBatchV2 {
         self.batch_id_from_replayed_tasks(&tasks)
     }
 
-    fn batch_id_from_replayed_tasks(
+    pub(crate) fn batch_id_from_replayed_tasks(
         &self,
         tasks: &[ProveTask],
     ) -> crate::error::TexasAirResult<[u8; 32]> {

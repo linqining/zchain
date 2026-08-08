@@ -264,6 +264,18 @@ impl TexasPokerPlugin {
         &mut self,
         package: &ArchivedTaggedBatchProofPackage,
     ) -> PluginResult<Vec<ProvenTask>> {
+        let tasks = package
+            .validate_and_replay_tasks()
+            .map_err(|error| PluginError::Prover(error.to_string()))?;
+        self.restore_tagged_batch_with_replayed_tasks(&tasks, package)
+    }
+
+    /// Reverify and restore a tagged package using tasks retained by service package decoding.
+    pub fn restore_tagged_batch_with_replayed_tasks(
+        &mut self,
+        tasks: &[ProveTask],
+        package: &ArchivedTaggedBatchProofPackage,
+    ) -> PluginResult<Vec<ProvenTask>> {
         if !self.deferred_tagged_tasks.is_empty() {
             return Err(PluginError::Precondition(
                 "cannot restore a completed tagged package while tasks are pending".into(),
@@ -271,7 +283,7 @@ impl TexasPokerPlugin {
         }
         let summaries = self
             .orchestrator
-            .restore_verified_tagged_batch(package)
+            .restore_verified_tagged_batch_with_replayed_tasks(tasks, package)
             .map_err(|error| PluginError::Prover(error.to_string()))?;
         self.tagged_batches.push(package.clone());
         Ok(summaries)

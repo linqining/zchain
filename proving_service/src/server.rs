@@ -28,7 +28,9 @@ use tokio::sync::Mutex;
 use crate::contracts::TexasPokerPlugin;
 use crate::full_hand::{FullHandReport, FullHandRunner};
 use crate::plugin::ContractPlugin;
-use crate::proof_package::{ServiceProofPackage, stored_proof_metadata};
+use crate::proof_package::{
+    DecodedServiceProofPackage, ServiceProofPackage, proof_package_digest, stored_proof_metadata,
+};
 use crate::repository::{
     JobReservation, RepositoryError, ServiceRepository, StoredDispatchJob, StoredDispatchResult,
     StoredJobStatus, StoredProofReference, StoredTable,
@@ -46,6 +48,9 @@ const LEGACY_TABLE_ID: u64 = 0;
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 256;
 /// Bound the decoded Borsh package before it reaches certificate/SMT verification.
 const MAX_CONSENSUS_ANCHOR_BYTES: usize = 16 * 1024 * 1024;
+/// Bound retained decoded proof material independently from the durable repository.
+const MAX_VALIDATED_PACKAGE_CACHE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_VALIDATED_PACKAGE_CACHE_ENTRIES: usize = 64;
 
 type HttpError = (axum::http::StatusCode, String);
 
@@ -61,6 +66,85 @@ struct ServerState {
 struct ServiceRuntime {
     repository: ServiceRepository,
     plugins: BTreeMap<u64, TexasPokerPlugin>,
+    validated_packages: ValidatedPackageCache,
+}
+
+#[derive(Debug, Clone)]
+struct CachedValidatedPackage {
+    decoded: Arc<DecodedServiceProofPackage>,
+    encoded_len: usize,
+    last_used: u64,
+}
+
+#[derive(Debug, Default)]
+struct ValidatedPackageCache {
+    entries: BTreeMap<[u8; 32], CachedValidatedPackage>,
+    encoded_bytes: usize,
+    clock: u64,
+    #[cfg(test)]
+    hits: u64,
+    #[cfg(test)]
+    misses: u64,
+}
+
+impl ValidatedPackageCache {
+    fn get(&mut self, digest: [u8; 32]) -> Option<Arc<DecodedServiceProofPackage>> {
+        self.clock = self.clock.wrapping_add(1);
+        let Some(entry) = self.entries.get_mut(&digest) else {
+            #[cfg(test)]
+            {
+                self.misses = self.misses.saturating_add(1);
+            }
+            return None;
+        };
+        entry.last_used = self.clock;
+        #[cfg(test)]
+        {
+            self.hits = self.hits.saturating_add(1);
+        }
+        Some(entry.decoded.clone())
+    }
+
+    fn insert(
+        &mut self,
+        digest: [u8; 32],
+        encoded_len: usize,
+        decoded: Arc<DecodedServiceProofPackage>,
+    ) {
+        if encoded_len > MAX_VALIDATED_PACKAGE_CACHE_BYTES {
+            return;
+        }
+        self.clock = self.clock.wrapping_add(1);
+        if let Some(previous) = self.entries.remove(&digest) {
+            self.encoded_bytes = self.encoded_bytes.saturating_sub(previous.encoded_len);
+        }
+        while !self.entries.is_empty()
+            && (self.entries.len() >= MAX_VALIDATED_PACKAGE_CACHE_ENTRIES
+                || self.encoded_bytes.saturating_add(encoded_len)
+                    > MAX_VALIDATED_PACKAGE_CACHE_BYTES)
+        {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(digest, _)| *digest)
+            else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.encoded_bytes = self.encoded_bytes.saturating_sub(evicted.encoded_len);
+            }
+        }
+        self.encoded_bytes = self.encoded_bytes.saturating_add(encoded_len);
+        self.entries.insert(
+            digest,
+            CachedValidatedPackage {
+                decoded,
+                encoded_len,
+                last_used: self.clock,
+            },
+        );
+    }
 }
 
 impl ServiceRuntime {
@@ -87,6 +171,7 @@ impl ServiceRuntime {
         // chain that a later consensus anchor would inspect.
         let jobs = repository.jobs().to_vec();
         let mut restored_tagged = BTreeSet::new();
+        let mut validated_packages = ValidatedPackageCache::default();
         for job in &jobs {
             let Some(result) = job.result.as_ref() else {
                 if job.status == StoredJobStatus::Completed {
@@ -121,14 +206,26 @@ impl ServiceRuntime {
                     hex::encode(job.job_id())
                 ))
             })?;
+            if matches!(
+                reference,
+                StoredProofReference::Tagged { batch_id, .. }
+                    if restored_tagged.contains(&batch_id)
+            ) {
+                // The first row validated the complete ordered job set and restored every receipt.
+                // Later rows still passed lifecycle/metadata-presence checks above, but need not
+                // reload, decode or replay the same shared sidecar.
+                continue;
+            }
             let bytes = repository.load_job_proof_package(job)?.ok_or_else(|| {
                 ServiceError::Runner(format!(
                     "completed proof job {} is missing its durable proof package",
                     hex::encode(job.job_id())
                 ))
             })?;
-            let package = ServiceProofPackage::from_bytes(&bytes)?;
-            let task = package.task_at(reference.row_index())?;
+            let package_digest = proof_package_digest(&bytes);
+            let decoded = Arc::new(ServiceProofPackage::decode_bytes(&bytes)?);
+            let package = decoded.package();
+            let task = decoded.task_at(reference.row_index())?;
             validate_job_task(job, result, stored_metadata, &task)?;
             let plugin = plugins.get_mut(&job.table_id).ok_or_else(|| {
                 ServiceError::Runner(format!(
@@ -139,7 +236,7 @@ impl ServiceRuntime {
             })?;
             match reference {
                 StoredProofReference::Single { package_id } => {
-                    if package_id != job.job_id || package.row_count()? != 1 {
+                    if package_id != job.job_id || decoded.row_count()? != 1 {
                         return Err(ServiceError::Prover(
                             "single proof reference does not own exactly one package row".into(),
                         ));
@@ -150,31 +247,34 @@ impl ServiceRuntime {
                         )
                     })?;
                     plugin.restore_archived_task(task, archive, composition)?;
+                    validated_packages.insert(package_digest, bytes.len(), decoded);
                 }
                 StoredProofReference::Tagged {
                     batch_id,
                     row_index,
                     row_count,
                 } => {
-                    if package.batch_id() != Some(batch_id) || package.row_count()? != row_count {
+                    if package.batch_id() != Some(batch_id) || decoded.row_count()? != row_count {
                         return Err(ServiceError::Prover(
                             "tagged proof reference scope differs from shared package".into(),
                         ));
                     }
-                    if restored_tagged.insert(batch_id) {
-                        if row_index != 0 {
-                            return Err(ServiceError::Prover(
-                                "first journal reference to a tagged package is not row zero"
-                                    .into(),
-                            ));
-                        }
-                        validate_complete_tagged_job_set(&jobs, batch_id, &package)?;
-                        plugin.restore_tagged_batch(package.tagged().ok_or_else(|| {
+                    if row_index != 0 {
+                        return Err(ServiceError::Prover(
+                            "first journal reference to a tagged package is not row zero".into(),
+                        ));
+                    }
+                    validate_complete_tagged_job_set(&jobs, batch_id, &decoded)?;
+                    plugin.restore_tagged_batch_with_replayed_tasks(
+                        decoded.tasks(),
+                        package.tagged().ok_or_else(|| {
                             ServiceError::Prover(
                                 "tagged proof reference targets a single package".into(),
                             )
-                        })?)?;
-                    }
+                        })?,
+                    )?;
+                    restored_tagged.insert(batch_id);
+                    validated_packages.insert(package_digest, bytes.len(), decoded);
                 }
             }
         }
@@ -235,6 +335,7 @@ impl ServiceRuntime {
         Ok(Self {
             repository,
             plugins,
+            validated_packages,
         })
     }
 
@@ -272,9 +373,9 @@ fn validate_job_task(
 fn validate_complete_tagged_job_set(
     jobs: &[StoredDispatchJob],
     batch_id: [u8; 32],
-    package: &ServiceProofPackage,
+    package: &DecodedServiceProofPackage,
 ) -> ServiceResult<()> {
-    let tasks = package.tasks()?;
+    let tasks = package.tasks();
     let batch_jobs = jobs
         .iter()
         .filter(|job| {
@@ -289,7 +390,7 @@ fn validate_complete_tagged_job_set(
             "shared tagged package does not have exactly one journal job per row".into(),
         ));
     }
-    for (expected_index, (job, task)) in batch_jobs.iter().zip(&tasks).enumerate() {
+    for (expected_index, (job, task)) in batch_jobs.iter().zip(tasks).enumerate() {
         let Some(StoredProofReference::Tagged {
             row_index,
             row_count,
@@ -309,6 +410,14 @@ fn validate_complete_tagged_job_set(
         let metadata = job.proof.as_ref().ok_or_else(|| {
             ServiceError::Runner("completed tagged job is missing proof metadata".into())
         })?;
+        if job.status != StoredJobStatus::Completed
+            || !result.had_prove_task
+            || !result.proof_verified
+        {
+            return Err(ServiceError::Runner(
+                "tagged package job set has inconsistent lifecycle flags".into(),
+            ));
+        }
         validate_job_task(job, result, metadata, task)?;
     }
     Ok(())
@@ -995,7 +1104,11 @@ fn finalize_pending_tagged_batch(
             "tagged package row count differs from pending journal".into(),
         ));
     }
-    let bytes = ServiceProofPackage::new_tagged(package)?.to_bytes()?;
+    let decoded = Arc::new(DecodedServiceProofPackage::new_verified_tagged(
+        package,
+        pending.tasks.clone(),
+    )?);
+    let bytes = decoded.to_bytes()?;
     runtime.repository.store_proof_package(batch_id, &bytes)?;
 
     let stats = staged.stats();
@@ -1012,6 +1125,9 @@ fn finalize_pending_tagged_batch(
         u64::try_from(stats.chain_length)
             .map_err(|_| ServiceError::Runner("chain length does not fit u64".into()))?,
     )?;
+    runtime
+        .validated_packages
+        .insert(proof_package_digest(&bytes), bytes.len(), decoded);
     runtime.plugins.insert(table_id, staged);
     Ok(Some((batch_id, pending.tasks.len())))
 }
@@ -1062,14 +1178,24 @@ async fn verify_job_proof(
     AxumPath(job_hex): AxumPath<String>,
 ) -> Result<Json<ProofVerificationResponse>, HttpError> {
     let job_id = decode_fixed_hex::<32>(&job_hex, "job_id")?;
-    let runtime = state.runtime.lock().await;
+    let mut runtime = state.runtime.lock().await;
     let (job, bytes) = completed_job_proof(&runtime.repository, job_id)?;
-    let package = ServiceProofPackage::from_bytes(&bytes)
-        .map_err(|error| unprocessable(error.to_string()))?;
+    let package_digest = proof_package_digest(&bytes);
+    let (decoded, already_verified) = match runtime.validated_packages.get(package_digest) {
+        Some(decoded) => (decoded, true),
+        None => (
+            Arc::new(
+                ServiceProofPackage::decode_bytes(&bytes)
+                    .map_err(|error| unprocessable(error.to_string()))?,
+            ),
+            false,
+        ),
+    };
+    let package = decoded.package();
     let reference = job
         .proof_reference
         .ok_or_else(|| internal_error("completed proof job is missing reference".into()))?;
-    let task = package
+    let task = decoded
         .task_at(reference.row_index())
         .map_err(|error| unprocessable(error.to_string()))?;
     let expected_metadata =
@@ -1087,28 +1213,43 @@ async fn verify_job_proof(
         ));
     }
     match reference {
-        StoredProofReference::Single { .. } => {
+        StoredProofReference::Single { package_id } => {
+            if package_id != job.job_id || decoded.row_count().ok() != Some(1) {
+                return Err(unprocessable(
+                    "single proof reference differs from owned package".into(),
+                ));
+            }
             let (single_task, archive, composition) = package.single_parts().ok_or_else(|| {
                 unprocessable("single proof reference targets a tagged package".into())
             })?;
-            Orchestrator::verify_archived_task_parts(single_task, archive, composition)
-                .map_err(|error| unprocessable(error.to_string()))?;
+            if !already_verified {
+                Orchestrator::verify_archived_task_parts(single_task, archive, composition)
+                    .map_err(|error| unprocessable(error.to_string()))?;
+            }
         }
         StoredProofReference::Tagged {
             batch_id,
             row_count,
             ..
         } => {
-            if package.batch_id() != Some(batch_id) || package.row_count().ok() != Some(row_count) {
+            if package.batch_id() != Some(batch_id) || decoded.row_count().ok() != Some(row_count) {
                 return Err(unprocessable(
                     "tagged proof reference differs from shared package".into(),
                 ));
             }
-            Orchestrator::verify_tagged_package(package.tagged().ok_or_else(|| {
+            let tagged = package.tagged().ok_or_else(|| {
                 unprocessable("tagged proof reference targets a single package".into())
-            })?)
-            .map_err(|error| unprocessable(error.to_string()))?;
+            })?;
+            if !already_verified {
+                Orchestrator::verify_tagged_package_with_replayed_tasks(decoded.tasks(), tagged)
+                    .map_err(|error| unprocessable(error.to_string()))?;
+            }
         }
+    }
+    if !already_verified {
+        runtime
+            .validated_packages
+            .insert(package_digest, bytes.len(), decoded.clone());
     }
     let pre_state_root = poker_texas_air::state_root::compute_state_root(&task.pre_table)
         .map_err(|error| unprocessable(error.to_string()))?;
@@ -1619,7 +1760,29 @@ mod tests {
         assert_eq!(finalized.finalized_rows, 2);
         assert!(finalized.batch_id_hex.is_some());
 
+        {
+            let mut runtime = recovered.runtime.lock().await;
+            assert_eq!(runtime.validated_packages.entries.len(), 1);
+            runtime.validated_packages = ValidatedPackageCache::default();
+        }
+
+        let first_verification =
+            verify_job_proof(State(recovered.clone()), AxumPath(first.job_id.clone()))
+                .await
+                .expect("first tagged row should verify and populate the package cache")
+                .0;
+        let second_verification =
+            verify_job_proof(State(recovered.clone()), AxumPath(second.job_id.clone()))
+                .await
+                .expect("second tagged row should reuse the validated shared package")
+                .0;
+        assert!(first_verification.verified);
+        assert!(second_verification.verified);
+
         let runtime = recovered.runtime.lock().await;
+        assert_eq!(runtime.validated_packages.entries.len(), 1);
+        assert_eq!(runtime.validated_packages.misses, 1);
+        assert_eq!(runtime.validated_packages.hits, 1);
         let first_id = decode_fixed_hex::<32>(&first.job_id, "job_id").unwrap();
         let second_id = decode_fixed_hex::<32>(&second.job_id, "job_id").unwrap();
         let first_job = runtime.repository.job(first_id).unwrap();
@@ -1655,11 +1818,38 @@ mod tests {
                 .load_job_proof_package(second_job)
                 .unwrap()
         );
+        drop(runtime);
+
+        // Cache identity is the exact sidecar content, not the durable batch ID. Replacing the
+        // sidecar under the same path must miss the cache and fail closed.
+        let mut corrupted_package = shared_package.clone();
+        *corrupted_package
+            .first_mut()
+            .expect("shared proof package should not be empty") ^= 0x01;
+        recovered
+            .runtime
+            .lock()
+            .await
+            .repository
+            .store_proof_package(first_batch, &corrupted_package)
+            .unwrap();
+        assert!(
+            verify_job_proof(State(recovered.clone()), AxumPath(first.job_id.clone()),)
+                .await
+                .is_err(),
+            "changed sidecar bytes must not reuse a prior validated cache entry"
+        );
+        let mut runtime = recovered.runtime.lock().await;
+        runtime
+            .repository
+            .store_proof_package(first_batch, &shared_package)
+            .unwrap();
         let durable = runtime.repository.clone();
         drop(runtime);
 
         let restarted = ServiceRuntime::new(durable).unwrap();
         assert_eq!(restarted.plugins.get(&table_id).unwrap().proven().len(), 2);
+        assert_eq!(restarted.validated_packages.entries.len(), 1);
         assert!(
             restarted
                 .plugins

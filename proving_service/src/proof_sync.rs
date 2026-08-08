@@ -289,8 +289,9 @@ fn verify_downloaded_package(
         ServiceError::Runner("completed proof package job is missing proof reference".into())
     })?;
 
-    let package = ServiceProofPackage::from_bytes(bytes)?;
-    let task = package.task_at(reference.row_index())?;
+    let decoded = ServiceProofPackage::decode_bytes(bytes)?;
+    let package = decoded.package();
+    let task = decoded.task_at(reference.row_index())?;
     let expected = stored_proof_metadata(&task)?;
     if stored.task_digest != expected.task_digest
         || stored.pre_state_root != expected.pre_state_root
@@ -314,14 +315,17 @@ fn verify_downloaded_package(
             row_count,
             ..
         } => {
-            if package.batch_id() != Some(batch_id) || package.row_count()? != row_count {
+            if package.batch_id() != Some(batch_id) || decoded.row_count()? != row_count {
                 return Err(ServiceError::Prover(
                     "tagged reference scope differs from downloaded package".into(),
                 ));
             }
-            Orchestrator::verify_tagged_package(package.tagged().ok_or_else(|| {
-                ServiceError::Prover("tagged reference targets single package".into())
-            })?)
+            Orchestrator::verify_tagged_package_with_replayed_tasks(
+                decoded.tasks(),
+                package.tagged().ok_or_else(|| {
+                    ServiceError::Prover("tagged reference targets single package".into())
+                })?,
+            )
             .map_err(|error| ServiceError::Prover(error.to_string()))?;
         }
     }
@@ -333,7 +337,7 @@ fn verify_downloaded_package(
             "downloaded proof receipt does not match local completed result".into(),
         ));
     }
-    Ok(task)
+    Ok(task.clone())
 }
 
 fn network_error(error: poker_l1::error::PokerL1Error) -> ServiceError {

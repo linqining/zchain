@@ -683,6 +683,14 @@ state root 和 result metadata；未 finalize 的 stream 仅恢复 pending queue
 sidecar repair 回归还验证了从非零 row job 下载后按 `batch_id` 恢复一次，即可让批内全部 job
 重新读取并在 restart 中恢复 receipt chain。
 
+验证侧的重复开销也已收口：service package decode 会把严格校验时唯一一次 continuous-stream
+replay 的 canonical tasks 与 immutable package 一起保留；restart 遇到共享 tagged reference 时由
+row zero 校验完整 job set，后续 rows 不再重复读取、decode 或 replay 同一 sidecar。进程内
+validated-package cache 使用完整 sidecar 内容哈希作为 identity，并有 64 entries / 256 MiB 上限。
+live finalize 或首次完整 proof verification 成功后才可写入 cache；cache hit 仍逐 job 重算并比对
+task digest、pre/post root、row index/count 和 reference scope。同一 `batch_id` 下只要 sidecar 字节
+变化就必须 cache miss，因此该优化不会把 durable path/lifecycle metadata 从信任边界中移除。
+
 本轮源码也已把动作入口进一步收敛：`state_machine::PlayerAction` 是唯一普通下注实现，包含
 `Fold { reason }`、`MatchBet`、`RaiseTo(u64)` 三个 tag；`check`/`call` 仍在 wrapper 中分别检查
 “不欠注/确实欠注”，然后都进入 `MatchBet`。`bet` 只保留 postflop、无当前下注和金额大于零的

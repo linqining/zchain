@@ -203,6 +203,15 @@ job metadata 或 pending lifecycle 任一错配均 fail-closed。P2P repair 已�
 任一 row 的 job ID 返回完整 tagged package，本地验证对应 row 和整份 two-proof package 后按
 `batch_id` 只落一份 sidecar，批内所有 job 同时恢复可用。
 
+service 验证热路径已加入 bounded process-local validated-package cache。cache key 是完整 sidecar
+字节的 domain-separated Blake2b-256，而不是可复用的 `batch_id`；因此同一路径下替换 package
+内容会强制 cache miss 并重新执行严格 decode/verify。一次成功验证会保留 immutable decoded
+package 与本次 canonical stream replay 产生的 tasks，后续批内任意 row 的 `verify-proof` 只重复绑定
+该 job 的 row index/count、task digest、pre/post root 和 lifecycle metadata，不再重复整批 native
+replay 与两份 STARK verification。live finalize 已验证的 package 会直接进入 cache；restart 恢复则
+只加载/解码共享 sidecar 一次，校验完整 row job set 后恢复一次 receipt batch 并缓存结果。cache
+同时受 64 entries 与 256 MiB encoded-size 上限约束，淘汰只影响性能，不影响 fail-closed 语义。
+
 原始 method 层的 tagged batch 也已实现。`ArchivedTaggedBatchProofPackage` 对一段连续 composite
 transition 只包含一份 177-column tagged method STARK 和一份 tagged Stage STARK，并内嵌唯一的
 `initial_state + commands + final_state` 连续流，不再要求 durable verifier 额外保存逐 task table

@@ -28,6 +28,17 @@ pub struct ServiceProofPackage {
     payload: ServiceProofPayload,
 }
 
+/// Canonically decoded package together with the tasks reconstructed during validation.
+///
+/// Tagged packages otherwise replay their embedded command stream each time callers ask for a
+/// row count or task. Keeping the replay result beside the immutable package lets service-level
+/// verification bind many jobs to one sidecar without repeating native VM execution.
+#[derive(Debug, Clone)]
+pub struct DecodedServiceProofPackage {
+    package: ServiceProofPackage,
+    tasks: Vec<ProveTask>,
+}
+
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 enum ServiceProofPayload {
     Single {
@@ -78,6 +89,11 @@ impl ServiceProofPackage {
     /// Returns an error for empty/oversized input, trailing bytes, an unsupported
     /// version, or an invalid embedded archive.
     pub fn from_bytes(bytes: &[u8]) -> ServiceResult<Self> {
+        Ok(Self::decode_bytes(bytes)?.package)
+    }
+
+    /// Strictly decode a package and retain the canonical tasks produced by validation.
+    pub fn decode_bytes(bytes: &[u8]) -> ServiceResult<DecodedServiceProofPackage> {
         if bytes.is_empty() || bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
             return Err(ServiceError::Prover(
                 "invalid proving-service proof package length".into(),
@@ -92,8 +108,8 @@ impl ServiceProofPackage {
         let package = Self::try_from_slice(bytes).map_err(|error| {
             ServiceError::Prover(format!("decode proving-service proof package: {error}"))
         })?;
-        package.validate()?;
-        Ok(package)
+        let tasks = package.validate_and_replay_tasks()?;
+        Ok(DecodedServiceProofPackage { package, tasks })
     }
 
     /// Encode this package as canonical Borsh bytes.
@@ -177,6 +193,10 @@ impl ServiceProofPackage {
     }
 
     fn validate(&self) -> ServiceResult<()> {
+        self.validate_and_replay_tasks().map(drop)
+    }
+
+    fn validate_and_replay_tasks(&self) -> ServiceResult<Vec<ProveTask>> {
         if self.version != SERVICE_PROOF_PACKAGE_VERSION {
             return Err(ServiceError::Prover(format!(
                 "unsupported proving-service proof package version {}",
@@ -218,15 +238,89 @@ impl ServiceProofPackage {
                         ));
                     }
                 }
+                Ok(vec![task.clone()])
             }
-            ServiceProofPayload::Tagged(package) => {
-                package
-                    .to_bytes()
-                    .map_err(|error| ServiceError::Prover(error.to_string()))?;
-            }
+            ServiceProofPayload::Tagged(package) => package
+                .validate_and_replay_tasks()
+                .map_err(|error| ServiceError::Prover(error.to_string())),
         }
-        Ok(())
     }
+}
+
+impl DecodedServiceProofPackage {
+    /// Construct a decoded tagged service package from tasks already replayed by the live prover.
+    ///
+    /// The caller must only use this after the package's two proofs have verified. This method
+    /// validates the immutable package scopes against the supplied canonical tasks without
+    /// replaying their command stream again.
+    pub(crate) fn new_verified_tagged(
+        package: ArchivedTaggedBatchProofPackage,
+        tasks: Vec<ProveTask>,
+    ) -> ServiceResult<Self> {
+        package
+            .validate_with_replayed_tasks(&tasks)
+            .map_err(|error| ServiceError::Prover(error.to_string()))?;
+        Ok(Self {
+            package: ServiceProofPackage {
+                version: SERVICE_PROOF_PACKAGE_VERSION,
+                payload: ServiceProofPayload::Tagged(package),
+            },
+            tasks,
+        })
+    }
+
+    /// Immutable decoded service package.
+    #[must_use]
+    pub const fn package(&self) -> &ServiceProofPackage {
+        &self.package
+    }
+
+    /// Canonical tasks replayed exactly once while decoding the package.
+    #[must_use]
+    pub fn tasks(&self) -> &[ProveTask] {
+        &self.tasks
+    }
+
+    /// Exact canonical task for one zero-based package row.
+    pub fn task_at(&self, row_index: u16) -> ServiceResult<&ProveTask> {
+        self.tasks
+            .get(usize::from(row_index))
+            .ok_or_else(|| ServiceError::Prover("proof package row index is out of range".into()))
+    }
+
+    /// Number of method rows committed by this package.
+    pub fn row_count(&self) -> ServiceResult<u16> {
+        u16::try_from(self.tasks.len())
+            .map_err(|_| ServiceError::Prover("proof package row count exceeds u16".into()))
+    }
+
+    /// Encode a package whose envelope and canonical tasks were already validated together.
+    pub(crate) fn to_bytes(&self) -> ServiceResult<Vec<u8>> {
+        let bytes = borsh::to_vec(&self.package).map_err(|error| {
+            ServiceError::Prover(format!("encode proving-service proof package: {error}"))
+        })?;
+        if bytes.len() > MAX_SERVICE_PROOF_PACKAGE_BYTES {
+            return Err(ServiceError::Prover(
+                "proving-service proof package exceeds size limit".into(),
+            ));
+        }
+        Ok(bytes)
+    }
+}
+
+/// Content identity used by the process-local validated-package cache.
+#[must_use]
+pub(crate) fn proof_package_digest(bytes: &[u8]) -> [u8; 32] {
+    use blake2::Blake2bVar;
+    use blake2::digest::{Update, VariableOutput};
+
+    let mut hasher = Blake2bVar::new(32).expect("32 <= 64");
+    hasher.update(b"zchain.proving_service.validated_package.v1");
+    hasher.update(&(bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
+    let mut digest = [0; 32];
+    hasher.finalize_variable(&mut digest).expect("32 <= 64");
+    digest
 }
 
 /// Reconstruct the compact journal metadata for a canonical proof task.

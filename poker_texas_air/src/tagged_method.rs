@@ -115,6 +115,40 @@ impl ArchivedTaggedBatchProofPackage {
         self.stream.replay_tasks()
     }
 
+    /// Replay the command stream once and validate every package scope against those tasks.
+    ///
+    /// Callers that need both the canonical tasks and the validated envelope should prefer this
+    /// method over calling [`Self::replay_tasks`] followed by another package validation.
+    pub fn validate_and_replay_tasks(&self) -> TexasAirResult<Vec<ProveTask>> {
+        let tasks = self.stream.replay_tasks()?;
+        self.validate_with_replayed_tasks(&tasks)?;
+        Ok(tasks)
+    }
+
+    /// Validate the package envelope against an already replayed copy of its command stream.
+    ///
+    /// This checks that rebuilding the compact stream from `tasks` produces the exact embedded
+    /// stream. Native dispatch validity must therefore already have been established by replaying
+    /// that stream or by the production receipt verifier.
+    pub fn validate_with_replayed_tasks(&self, tasks: &[ProveTask]) -> TexasAirResult<()> {
+        let expected_stream = MethodBatchV2::from_replayed_tasks(tasks)?;
+        let batch_id = self.stream.batch_id_from_replayed_tasks(tasks)?;
+        self.method.validate()?;
+        self.stages.validate()?;
+        if self.version != TAGGED_METHOD_PROOF_VERSION
+            || expected_stream != self.stream
+            || batch_id != self.method.batch_id
+            || self.method.batch_id != self.stages.batch_id()
+            || usize::from(self.method.row_count) != tasks.len()
+            || self.method.row_count != self.stages.task_count()
+        {
+            return Err(TexasAirError::SerializationError(
+                "tagged method and Stage proof scopes differ".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Single heterogeneous tagged method proof.
     #[must_use]
     pub const fn method(&self) -> &ArchivedTaggedMethodProofBundle {
@@ -160,21 +194,7 @@ impl ArchivedTaggedBatchProofPackage {
     }
 
     fn validate(&self) -> TexasAirResult<()> {
-        let tasks = self.stream.replay_tasks()?;
-        let batch_id = self.stream.batch_id()?;
-        self.method.validate()?;
-        self.stages.validate()?;
-        if self.version != TAGGED_METHOD_PROOF_VERSION
-            || batch_id != self.method.batch_id
-            || self.method.batch_id != self.stages.batch_id()
-            || usize::from(self.method.row_count) != tasks.len()
-            || self.method.row_count != self.stages.task_count()
-        {
-            return Err(TexasAirError::SerializationError(
-                "tagged method and Stage proof scopes differ".into(),
-            ));
-        }
-        Ok(())
+        self.validate_and_replay_tasks().map(drop)
     }
 }
 
@@ -460,14 +480,27 @@ pub fn verify_tagged_composite_batch(
     crypto_bindings: &[Option<crate::precompile_binding::PrecompileCallBinding>],
     package: &ArchivedTaggedBatchProofPackage,
 ) -> TexasAirResult<()> {
-    package.validate()?;
-    let embedded_tasks = package.stream.replay_tasks()?;
+    let embedded_tasks = package.validate_and_replay_tasks()?;
     let expected_stream = MethodBatchV2::from_tasks(tasks)?;
     if expected_stream != package.stream || !same_task_slices(tasks, &embedded_tasks)? {
         return Err(TexasAirError::SpecViolation(
             "tagged batch package stream differs from verifier-owned tasks".into(),
         ));
     }
+    verify_tagged_composite_batch_with_validated_stream(
+        tasks,
+        admin_bindings,
+        crypto_bindings,
+        package,
+    )
+}
+
+fn verify_tagged_composite_batch_with_validated_stream(
+    tasks: &[ProveTask],
+    admin_bindings: &[Option<crate::authorization_binding::AdminAuthorizationBinding>],
+    crypto_bindings: &[Option<crate::precompile_binding::PrecompileCallBinding>],
+    package: &ArchivedTaggedBatchProofPackage,
+) -> TexasAirResult<()> {
     let (stage_result, payload_result) = rayon::join(
         || crate::airs::composition::verify_composition_batch(tasks, &package.stages),
         || build_verified_payloads(tasks, &package.stages, admin_bindings, crypto_bindings),
@@ -498,6 +531,31 @@ pub fn verify_verified_tagged_composite_batch(
     verify_tagged_composite_batch(tasks, &admin, &crypto, package)
 }
 
+/// Verify both tagged proofs using canonical tasks already replayed from this package.
+///
+/// The production receipt verifier revalidates every task's full dispatch semantics. Comparing
+/// the rebuilt compact stream against the embedded stream then avoids replaying the entire stream
+/// again solely for package scope validation.
+pub(crate) fn verify_verified_tagged_composite_batch_with_replayed_tasks(
+    tasks: &[ProveTask],
+    package: &ArchivedTaggedBatchProofPackage,
+) -> TexasAirResult<()> {
+    package.validate_with_replayed_tasks(tasks)?;
+    let receipts = tasks
+        .iter()
+        .map(verify_method_receipts)
+        .collect::<TexasAirResult<Vec<_>>>()?;
+    let admin = receipts
+        .iter()
+        .map(|receipt| receipt.admin.clone())
+        .collect::<Vec<_>>();
+    let crypto = receipts
+        .iter()
+        .map(|receipt| receipt.crypto.clone())
+        .collect::<Vec<_>>();
+    verify_tagged_composite_batch_with_validated_stream(tasks, &admin, &crypto, package)
+}
+
 /// Verify a self-contained tagged package by replaying its embedded continuous command stream.
 ///
 /// This proves only the validity of that stream. Production callers must still bind the stream's
@@ -505,16 +563,15 @@ pub fn verify_verified_tagged_composite_batch(
 pub fn verify_verified_tagged_composite_package(
     package: &ArchivedTaggedBatchProofPackage,
 ) -> TexasAirResult<()> {
-    let tasks = package.replay_tasks()?;
-    verify_verified_tagged_composite_batch(&tasks, package)
+    let tasks = package.validate_and_replay_tasks()?;
+    verify_verified_tagged_composite_batch_with_replayed_tasks(&tasks, package)
 }
 
-/// Verify a tagged package and issue one opaque host receipt per accepted method row.
-pub(crate) fn verify_and_issue_tagged_receipts(
+pub(crate) fn verify_and_issue_tagged_receipts_with_replayed_tasks(
     tasks: &[ProveTask],
     package: &ArchivedTaggedBatchProofPackage,
 ) -> TexasAirResult<Vec<crate::verified_chain::VerificationReceipt>> {
-    verify_verified_tagged_composite_batch(tasks, package)?;
+    verify_verified_tagged_composite_batch_with_replayed_tasks(tasks, package)?;
     issue_tagged_receipts_after_verification(tasks, package)
 }
 
