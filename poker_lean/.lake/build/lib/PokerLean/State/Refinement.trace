@@ -1,0 +1,32 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/State/Refinement.lean -R ./././. -o ././.lake/build/lib/PokerLean/State/Refinement.olean -i ././.lake/build/lib/PokerLean/State/Refinement.ilean -c ././.lake/build/ir/PokerLean/State/Refinement.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:459:5: unused variable `h_br`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:478:24: unused variable `h_pot`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:478:31: unused variable `h_ante`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:478:39: unused variable `h_rake`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:478:47: unused variable `h_addon`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:521:31: unused variable `h_ante`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:521:39: unused variable `h_rake`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:521:47: unused variable `h_addon`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/Refinement.lean:525:9: unused variable `h_sb`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"}],
+ "depHash": "18119916578154366191"}

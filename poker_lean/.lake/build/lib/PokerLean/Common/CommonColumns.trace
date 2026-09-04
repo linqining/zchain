@@ -1,0 +1,29 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Common/CommonColumns.lean -R ./././. -o ././.lake/build/lib/PokerLean/Common/CommonColumns.olean -i ././.lake/build/lib/PokerLean/Common/CommonColumns.ilean -c ././.lake/build/ir/PokerLean/Common/CommonColumns.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:78:39: this tactic is never executed\nnote: this linter can be disabled with `set_option linter.unreachableTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:78:39: 'rfl' tactic does nothing\nnote: this linter can be disabled with `set_option linter.unusedTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:81:38: this tactic is never executed\nnote: this linter can be disabled with `set_option linter.unreachableTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:81:38: 'norm_num' tactic does nothing\nnote: this linter can be disabled with `set_option linter.unusedTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:326:8: this tactic is never executed\nnote: this linter can be disabled with `set_option linter.unreachableTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:326:8: 'omega' tactic does nothing\nnote: this linter can be disabled with `set_option linter.unusedTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:331:6: this tactic is never executed\nnote: this linter can be disabled with `set_option linter.unreachableTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Common/CommonColumns.lean:331:6: 'ring' tactic does nothing\nnote: this linter can be disabled with `set_option linter.unusedTactic false`",
+   "level": "warning"}],
+ "depHash": "4640400706663007858"}

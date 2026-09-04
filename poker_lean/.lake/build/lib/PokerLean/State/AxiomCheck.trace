@@ -1,0 +1,107 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/State/AxiomCheck.lean -R ./././. -o ././.lake/build/lib/PokerLean/State/AxiomCheck.olean -i ././.lake/build/lib/PokerLean/State/AxiomCheck.ilean -c ././.lake/build/ir/PokerLean/State/AxiomCheck.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:9:0: 'TexasPoker.state_transition_preserves_invariants' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:10:0: 'TexasPoker.apply_raise_preserves_core_invariants' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:11:0: 'TexasPoker.apply_call_preserves_all_invariants' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:12:0: 'TexasPoker.reset_for_next_hand_preserves_all_invariants' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:13:0: 'TexasPoker.end_without_showdown_chip_conservation' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:14:0: 'TexasPoker.reset_for_next_hand_chip_conservation' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:15:0: 'TexasPoker.rust_apply_call_refines' does not depend on any axioms",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:16:0: 'TexasPoker.rust_apply_raise_refines' does not depend on any axioms",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:17:0: 'TexasPoker.process_call_panic_free' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:18:0: 'TexasPoker.process_raise_panic_free' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:19:0: 'TexasPoker.side_pot_conservation' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:20:0: 'TexasPoker.HandRank.hand_rank_total_order' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:21:0: 'TexasPoker.HandRank.evaluate_best_is_maximum' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:22:0: 'TexasPoker.subphase_chip_neutral' does not depend on any axioms",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:23:0: 'TexasPoker.round_monotonic' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:24:0: 'TexasPoker.round_no_skip_preflop_to_river' does not depend on any axioms",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:25:0: 'TexasPoker.round_reset_only_to_waiting' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:26:0: 'TexasPoker.shuffle_monotonic' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:27:0: 'TexasPoker.reveal_monotonic' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:28:0: 'TexasPoker.reconstruct_monotonic' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:29:0: 'TexasPoker.BettingRound.process_raise_strictly_increases_current_bet' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:30:0: 'TexasPoker.BettingRound.process_raise_min_raise_nondecreasing' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:31:0: 'TexasPoker.BettingRound.chips_to_call_correct' depends on axioms: [propext]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:32:0: 'TexasPoker.apply_fold_chip_conservation' depends on axioms: [propext]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:33:0: 'TexasPoker.apply_check_chip_conservation' depends on axioms: [propext]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:34:0: 'TexasPoker.apply_call_chip_conservation' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:35:0: 'TexasPoker.apply_raise_chip_conservation' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:36:0: 'TexasPoker.apply_addon_chip_conservation' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:37:0: 'TexasPoker.apply_rebuy_chip_conservation' depends on axioms: [propext, Classical.choice, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:38:0: 'TexasPoker.collect_rake_chip_conservation' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:39:0: 'TexasPoker.side_pot_eligibility_nested' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:40:0: 'TexasPoker.folded_not_eligible' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:41:0: 'TexasPoker.HandRank.lexLt_is_strict_total_order' depends on axioms: [propext, Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/State/AxiomCheck.lean:42:0: 'TexasPoker.HandRank.select_best_maximum' depends on axioms: [propext, Quot.sound]",
+   "level": "info"}],
+ "depHash": "8975099365811107975"}

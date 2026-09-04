@@ -1,0 +1,68 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Audit/TrustBoundary.lean -R ./././. -o ././.lake/build/lib/PokerLean/Audit/TrustBoundary.olean -i ././.lake/build/lib/PokerLean/Audit/TrustBoundary.ilean -c ././.lake/build/ir/PokerLean/Audit/TrustBoundary.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:92:0: 'PokerLean.create_table_soundness' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:93:0: 'PokerLean.fold_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:94:0: 'PokerLean.check_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:95:0: 'PokerLean.call_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:96:0: 'PokerLean.raise_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:97:0: 'PokerLean.bet_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:98:0: 'PokerLean.auto_fold_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:99:0: 'PokerLean.force_fold_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:100:0: 'PokerLean.kick_player_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:101:0: 'PokerLean.join_table_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:102:0: 'PokerLean.leave_table_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:103:0: 'PokerLean.start_hand_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:104:0: 'PokerLean.tick_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:105:0: 'PokerLean.reset_for_next_hand_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:106:0: 'PokerLean.addon_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:107:0: 'PokerLean.rebuy_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:108:0: 'PokerLean.join_and_shuffle_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:109:0: 'PokerLean.leave_with_proof_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:110:0: 'PokerLean.submit_shuffle_v2_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:111:0: 'PokerLean.submit_player_reveal_tokens_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/TrustBoundary.lean:112:0: 'PokerLean.submit_reconstruct_deck_air_sound' depends on axioms: [propext,\n Classical.choice,\n PokerLean.poseidon_hash,\n PokerLean.texasPokerTableToPreimage,\n Quot.sound]",
+   "level": "info"}],
+ "depHash": "11516577982126005511"}
