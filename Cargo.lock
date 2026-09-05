@@ -1594,52 +1594,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 
 [[package]]
-name = "poker-protocol-abi"
-version = "0.1.0"
-
-[[package]]
-name = "poker-protocol-bg"
-version = "0.1.0"
-dependencies = [
- "borsh",
- "poker-protocol-core",
- "rand_core 0.6.4",
-]
-
-[[package]]
-name = "poker-protocol-core"
-version = "0.1.0"
-dependencies = [
- "blstrs",
- "borsh",
- "curve25519-dalek",
- "ff",
- "group",
- "rand_core 0.6.4",
- "rayon",
- "sha2",
- "sha3",
-]
-
-[[package]]
-name = "poker-protocol-proofs"
-version = "0.1.0"
-dependencies = [
- "blstrs",
- "borsh",
- "group",
- "lazy_static",
- "merlin",
- "poker-protocol-bg",
- "poker-protocol-core",
- "rand 0.8.6",
- "rand_core 0.6.4",
- "rayon",
- "sha3",
- "tracing",
-]
-
-[[package]]
 name = "poker_l1"
 version = "0.1.0"
 dependencies = [
@@ -1688,9 +1642,6 @@ dependencies = [
  "hex",
  "lazy_static",
  "merlin",
- "poker-protocol-abi",
- "poker-protocol-core",
- "poker-protocol-proofs",
  "rand 0.8.6",
  "rand_core 0.6.4",
  "rayon",
