@@ -1,0 +1,17 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Audit/SoundnessAudit.lean -R ./././. -o ././.lake/build/lib/PokerLean/Audit/SoundnessAudit.olean -i ././.lake/build/lib/PokerLean/Audit/SoundnessAudit.ilean -c ././.lake/build/ir/PokerLean/Audit/SoundnessAudit.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Audit/SoundnessAudit.lean:97:0: PokerLean.Audit.currentClaimScope : ClaimScope",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/SoundnessAudit.lean:98:0: PokerLean.Audit.lean_model_implications_are_in_scope : currentClaimScope.leanModelImplications = true",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/SoundnessAudit.lean:99:0: PokerLean.Audit.end_to_end_claim_is_out_of_scope :\n  currentClaimScope.allVmSelectorsCovered = false ∧\n    currentClaimScope.rustAirEquivalence = false ∧\n      currentClaimScope.vmEndToEndRefinement = false ∧\n        currentClaimScope.publicInputAndRootBinding = false ∧\n          currentClaimScope.aggregatorVerification = false ∧ currentClaimScope.cryptographicSubproofVerification = false",
+   "level": "info"},
+  {"message":
+   "././././PokerLean/Audit/SoundnessAudit.lean:100:0: PokerLean.Audit.remainingCustomTrustRoots : List String",
+   "level": "info"}],
+ "depHash": "15337906948111667868"}

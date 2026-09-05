@@ -1,0 +1,86 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Proofs/CreateTableSoundness.lean -R ./././. -o ././.lake/build/lib/PokerLean/Proofs/CreateTableSoundness.olean -i ././.lake/build/lib/PokerLean/Proofs/CreateTableSoundness.ilean -c ././.lake/build/ir/PokerLean/Proofs/CreateTableSoundness.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:16:2: Used `tac1 <;> tac2` where `(tac1; tac2)` would suffice\nnote: this linter can be disabled with `set_option linter.unnecessarySeqFocus false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:23:2: Used `tac1 <;> tac2` where `(tac1; tac2)` would suffice\nnote: this linter can be disabled with `set_option linter.unnecessarySeqFocus false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:88:7: unused variable `hmp`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:92:6: this tactic is never executed\nnote: this linter can be disabled with `set_option linter.unreachableTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:92:6: 'omega' tactic does nothing\nnote: this linter can be disabled with `set_option linter.unusedTactic false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:96:5: unused variable `h`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:121:5: unused variable `h`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:200:4: try 'simp' instead of 'simpa'\nnote: this linter can be disabled with `set_option linter.unnecessarySimpa false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:142:7: unused variable `h_pre_ver`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:146:7: unused variable `h_pre_s`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:194:23: unused variable `h_ct`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:194:29: unused variable `h_cb`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:194:35: unused variable `h_mr`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:194:47: unused variable `h_sph`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:194:54: unused variable `h_sr`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:24: unused variable `h_ante`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:32: unused variable `h_cp`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:38: unused variable `h_ap`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:44: unused variable `h_pa`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:50: unused variable `h_pr`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:56: unused variable `h_rake`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:64: unused variable `h_tf`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:70: unused variable `h_hi`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:76: unused variable `h_cs`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:82: unused variable `h_sa`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:195:88: unused variable `h_la`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CreateTableSoundness.lean:196:21: unused variable `h_tid`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"}],
+ "depHash": "13006838649713835893"}

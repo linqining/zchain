@@ -1,0 +1,35 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Proofs/CryptoSoundness.lean -R ./././. -o ././.lake/build/lib/PokerLean/Proofs/CryptoSoundness.olean -i ././.lake/build/lib/PokerLean/Proofs/CryptoSoundness.ilean -c ././.lake/build/ir/PokerLean/Proofs/CryptoSoundness.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:111:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:122:26: unused variable `h_rs_unch`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:169:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:180:26: unused variable `h_rs_unch`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:222:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:233:26: unused variable `h_rs_unch`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:276:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:287:26: unused variable `h_rs_unch`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:330:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/CryptoSoundness.lean:341:26: unused variable `h_rs_unch`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"}],
+ "depHash": "3625451491541728206"}

@@ -1,0 +1,53 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/State/SidePot.lean -R ./././. -o ././.lake/build/lib/PokerLean/State/SidePot.olean -i ././.lake/build/lib/PokerLean/State/SidePot.ilean -c ././.lake/build/ir/PokerLean/State/SidePot.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:227:32: unused variable `total`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:377:56: unused variable `h_levels_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:378:60: unused variable `h_r_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:379:23: unused variable `h_pots_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:380:23: unused variable `h_prev_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:550:15: unused variable `h_idx_norm`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:694:48: unused variable `h_total_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:695:56: unused variable `h_levels_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:696:70: unused variable `h_fold_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:697:33: unused variable `h_pots_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:698:33: unused variable `h_prev_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:1002:48: unused variable `h_total_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:1003:56: unused variable `h_levels_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:1004:60: unused variable `h_r_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:1005:23: unused variable `h_pots_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/State/SidePot.lean:1006:23: unused variable `h_prev_def`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"}],
+ "depHash": "2624248454962293759"}

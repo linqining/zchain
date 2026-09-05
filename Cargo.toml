@@ -1,7 +1,13 @@
 [workspace]
 resolver = "2"
-members = ["poker_l1", "poker_texas_air", "vm-common", "proving_service"]
-exclude = ["third_party/stwo-cairo/common", "third_party/stwo-cairo/prover"]
+members = ["poker_l1", "poker_zkvm", "poker-appchain", "vm-common"]
+# guest_sdk 和 guests/texas_poker 是独立 crate（no_std + riscv32im target），
+# 不加入 workspace.members 以避免 target/feature 污染。
+# 用 exclude 而非 [workspace] 表，使它们可被 poker_zkvm 作为 path dev-dependency 引用。
+exclude = [
+    "poker_zkvm/guest_sdk",
+    "poker_zkvm/guests/texas_poker",
+]
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]

@@ -1,0 +1,35 @@
+[package]
+name = "poker-appchain"
+version = "0.1.0"
+edition = "2024"
+description = "Dedicated poker settlement L1 (appchain): note ledger, provable rake, soft-confirm sequencer, proof pipeline"
+license = "BUSL-1.1"
+
+[dependencies]
+# ===== Poseidon252 哈希（承诺/nullifier/状态根）=====
+starknet-ff = { workspace = true }
+starknet-crypto = { workspace = true }
+# ===== P 层签名（每笔消耗 note 的动作）=====
+secp256k1 = { workspace = true }
+# ===== sequencer 软确认链签名 =====
+ed25519-dalek = { workspace = true }
+# ===== 稳定字节 ABI =====
+borsh = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# ===== 哈希与编码 =====
+blake2 = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+# ===== 证明管道并行 =====
+rayon = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+rand = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []

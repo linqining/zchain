@@ -1,0 +1,11 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/Proofs/FundsSoundness.lean -R ./././. -o ././.lake/build/lib/PokerLean/Proofs/FundsSoundness.olean -i ././.lake/build/lib/PokerLean/Proofs/FundsSoundness.ilean -c ././.lake/build/ir/PokerLean/Proofs/FundsSoundness.c --json",
+   "level": "trace"},
+  {"message":
+   "././././PokerLean/Proofs/FundsSoundness.lean:219:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"},
+  {"message":
+   "././././PokerLean/Proofs/FundsSoundness.lean:511:5: unused variable `hseat`\nnote: this linter can be disabled with `set_option linter.unusedVariables false`",
+   "level": "warning"}],
+ "depHash": "1628767356408100282"}

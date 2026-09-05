@@ -1,0 +1,5 @@
+{"log":
+ [{"message":
+   ".> LEAN_PATH=././.lake/packages/batteries/.lake/build/lib:././.lake/packages/Qq/.lake/build/lib:././.lake/packages/aesop/.lake/build/lib:././.lake/packages/proofwidgets/.lake/build/lib:././.lake/packages/Cli/.lake/build/lib:././.lake/packages/importGraph/.lake/build/lib:././.lake/packages/LeanSearchClient/.lake/build/lib:././.lake/packages/plausible/.lake/build/lib:././.lake/packages/mathlib/.lake/build/lib:././.lake/build/lib DYLD_LIBRARY_PATH= /Users/mac/.elan/toolchains/leanprover--lean4---v4.13.0/bin/lean ././././PokerLean/AIR/FundsAir.lean -R ./././. -o ././.lake/build/lib/PokerLean/AIR/FundsAir.olean -i ././.lake/build/lib/PokerLean/AIR/FundsAir.ilean -c ././.lake/build/ir/PokerLean/AIR/FundsAir.c --json",
+   "level": "trace"}],
+ "depHash": "7156620488390922628"}
