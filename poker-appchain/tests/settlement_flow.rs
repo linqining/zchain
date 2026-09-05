@@ -8,14 +8,13 @@
 mod common;
 
 use common::{
-    assert_note_status, deposit_and_find, export_credentials, find_note, new_sequencer,
+    assert_note_status, deposit_and_find, export_credentials, new_sequencer,
     rake_policy, two_player_settlement, ProofRegistry, TestUser,
 };
 use poker_appchain::client_view::{balances_from_credentials, NoteCredential};
 use poker_appchain::fee::FeePolicy;
 use poker_appchain::metrics::MetricsRegistry;
 use poker_appchain::note::{AssetClass, Note};
-use poker_appchain::ops::scope;
 use poker_appchain::ops::Operation;
 use poker_appchain::pipeline::{
     PipelineConfig, ProofJob, ProofPipeline, Priority, ValidationEngine,
@@ -52,7 +51,7 @@ fn full_hand_flow_with_rake_and_audit() {
     seq.submit(
         Operation::BuyIn {
             table_id: table,
-            spends: vec![a.auth(&dep_a, scope::BUYIN)],
+            spends: vec![a.buyin_auth(&dep_a, table, a.pk())],
             notes: vec![dep_a.clone()],
             seat_owner: a.pk(),
         },
@@ -62,7 +61,7 @@ fn full_hand_flow_with_rake_and_audit() {
     seq.submit(
         Operation::BuyIn {
             table_id: table,
-            spends: vec![b.auth(&dep_b, scope::BUYIN)],
+            spends: vec![b.buyin_auth(&dep_b, table, b.pk())],
             notes: vec![dep_b.clone()],
             seat_owner: b.pk(),
         },
@@ -134,7 +133,7 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
     seq.submit(
         Operation::BuyIn {
             table_id: table,
-            spends: vec![a.auth(&dep_a, scope::BUYIN)],
+            spends: vec![a.buyin_auth(&dep_a, table, a.pk())],
             notes: vec![dep_a.clone()],
             seat_owner: a.pk(),
         },
@@ -144,7 +143,7 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
     seq.submit(
         Operation::BuyIn {
             table_id: table,
-            spends: vec![b.auth(&dep_b, scope::BUYIN)],
+            spends: vec![b.buyin_auth(&dep_b, table, b.pk())],
             notes: vec![dep_b.clone()],
             seat_owner: b.pk(),
         },
@@ -168,7 +167,7 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
             high_watermark: 16,
             batch_interval_ms: 1_000,
         },
-        Arc::new(ValidationEngine),
+        Arc::new(ValidationEngine::default()),
         Arc::new(MetricsRegistry::new()),
     );
     pipeline
@@ -224,7 +223,7 @@ fn play_and_real_classes_never_mix() {
     let err = seq
         .submit(
             Operation::Transfer {
-                spends: vec![a.auth(&play_dep, scope::TRANSFER)],
+                spends: vec![a.transfer_auth(&play_dep, &[out.clone(), out2.clone()])],
                 notes: vec![play_dep],
                 outputs: vec![out, out2],
             },

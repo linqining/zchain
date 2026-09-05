@@ -45,12 +45,12 @@ fn acc1_concurrent_double_spend_exactly_one_wins() {
         table_id: None,
     };
     let op1 = Operation::Transfer {
-        spends: vec![a.auth(&dep, scope::TRANSFER)],
+        spends: vec![a.transfer_auth(&dep, &[out_a.clone()])],
         notes: vec![dep.clone()],
         outputs: vec![out_a],
     };
     let op2 = Operation::Transfer {
-        spends: vec![a.auth(&dep, scope::TRANSFER)],
+        spends: vec![a.transfer_auth(&dep, &[out_b.clone()])],
         notes: vec![dep.clone()],
         outputs: vec![out_b],
     };
@@ -75,12 +75,20 @@ fn acc1_scope_replay_rejected() {
     seq.submit(Operation::OpenTable { table_id: 1, policy: FeePolicy::Zero }, 1_000)
         .unwrap();
     seq.mark_proven_through(seq.state().seq);
+    // 效果摘要按 BuyIn 正确计算，但 scope 用了 TRANSFER → scope 防线独立可测
+    let buyin_effect = Operation::BuyIn {
+        table_id: 1,
+        spends: vec![],
+        notes: vec![],
+        seat_owner: a.pk(),
+    }
+    .effect_digest();
     // 用 TRANSFER scope 的签名提交 BuyIn → 签名验证失败
     let err = seq
         .submit(
             Operation::BuyIn {
                 table_id: 1,
-                spends: vec![a.auth(&dep, scope::TRANSFER)], // 错误 scope
+                spends: vec![a.auth(&dep, scope::TRANSFER, &buyin_effect)], // 错误 scope
                 notes: vec![dep],
                 seat_owner: a.pk(),
             },
@@ -106,7 +114,7 @@ fn acc2_forged_settlement_rejected() {
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![a.auth(&dep_a, scope::BUYIN)],
+            spends: vec![a.buyin_auth(&dep_a, 1, a.pk())],
             notes: vec![dep_a.clone()],
             seat_owner: a.pk(),
         },
@@ -116,7 +124,7 @@ fn acc2_forged_settlement_rejected() {
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![b.auth(&dep_b, scope::BUYIN)],
+            spends: vec![b.buyin_auth(&dep_b, 1, b.pk())],
             notes: vec![dep_b.clone()],
             seat_owner: b.pk(),
         },
@@ -132,7 +140,7 @@ fn acc2_forged_settlement_rejected() {
         1_500, 500, 2_425, &policy, 0x11,
     );
     // 伪造 B 的授权：换成 A 冒签（密钥不对）
-    let forged = a.settle_auth(&seat_b, &[0x11; 32]);
+    let forged = a.settle_auth(&seat_b, &record);
     record.inputs[1].spend = forged;
     let err = seq
         .submit(Operation::Settle(Box::new(record)), 3_000)
@@ -153,7 +161,7 @@ fn acc3_unproven_note_cannot_buyin() {
         .submit(
             Operation::BuyIn {
                 table_id: 1,
-                spends: vec![a.auth(&dep, scope::BUYIN)],
+                spends: vec![a.buyin_auth(&dep, 1, a.pk())],
                 notes: vec![dep],
                 seat_owner: a.pk(),
             },
@@ -180,15 +188,13 @@ fn acc4_settlement_replay_rejected() {
 /// M8-ACC-5：费率篡改（换策略承诺 / 改抽取额）被拒。
 #[test]
 fn acc5_fee_tampering_rejected() {
-    // 5a. 换策略承诺：rake 桌结算伪造成零费（抽取归零、赔付补差保持守恒）
+    // 5a. 换策略承诺：**只**换 commitment（其余不动 → 签名仍有效——
+    // settle_effect 刻意不含 policy_commitment，该字段由注册表冻结检查
+    // 强制；这正是两层防线各司其职的验证）
     let mut seq = new_sequencer();
-    let record = setup_unsettled_hand(&mut seq, 0x41);
+    let (record, _a, _b) = setup_unsettled_hand(&mut seq, 0x41);
     let mut swapped = record;
     swapped.policy_commitment = FeePolicy::Zero.commitment_bytes();
-    swapped.rake.total = 0;
-    swapped.rake.treasury_out = None;
-    swapped.rake.operator_out = None;
-    swapped.payouts[0].amount += 75; // rake 归零的差额补给 A（守恒保持）
     let err = seq
         .submit(Operation::Settle(Box::new(swapped)), 4_000)
         .unwrap_err();
@@ -197,13 +203,16 @@ fn acc5_fee_tampering_rejected() {
         "swapped policy commitment must fail fee check, got {err:?}"
     );
 
-    // 5b. 谎报 pot（1500 → 1400）压低抽取：费率函数校验拒绝。
-    // 注意：rake note 不变（75），守恒仍成立——拒绝只能来自费率关系，
-    // 这正是 fee_of(pot) 校验存在的意义。
+    // 5b. 谎报 pot（1500 → 1400）压低抽取：即便合谋签名者按篡改后的
+    // 记录重签（pot 在结算效果摘要内，需重签才过签名防线），费率关系
+    // 仍然拒绝——rake note 不变（75），守恒成立，唯一的拒绝来源就是
+    // rake.total ≠ policy.rake_of(谎报的 pot)。
     let mut seq2 = new_sequencer();
-    let record2 = setup_unsettled_hand(&mut seq2, 0x42);
+    let (record2, a2, b2) = setup_unsettled_hand(&mut seq2, 0x42);
     let mut underreport = record2;
     underreport.pot = 1_400;
+    underreport.inputs[0].spend = a2.settle_auth(&underreport.inputs[0].note, &underreport);
+    underreport.inputs[1].spend = b2.settle_auth(&underreport.inputs[1].note, &underreport);
     let err = seq2
         .submit(Operation::Settle(Box::new(underreport)), 4_100)
         .unwrap_err();
@@ -269,11 +278,16 @@ fn acc6b_no_fork_on_identical_chain() {
 
 // ===== 测试脚手架 =====
 
-/// 标准 setup：开 rake 桌 + 双方入金买入（未结算），返回待提交的合法结算记录。
+/// 标准 setup：开 rake 桌 + 双方入金买入（未结算），返回待提交的合法结算
+/// 记录与双方用户（供合谋重签场景使用）。
 fn setup_unsettled_hand(
     seq: &mut Sequencer,
     binding_byte: u8,
-) -> poker_appchain::settlement::SettlementRecord {
+) -> (
+    poker_appchain::settlement::SettlementRecord,
+    TestUser,
+    TestUser,
+) {
     let a = TestUser::new(1);
     let b = TestUser::new(2);
     let treasury = TestUser::new(7);
@@ -286,7 +300,7 @@ fn setup_unsettled_hand(
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![a.auth(&dep_a, scope::BUYIN)],
+            spends: vec![a.buyin_auth(&dep_a, 1, a.pk())],
             notes: vec![dep_a.clone()],
             seat_owner: a.pk(),
         },
@@ -296,7 +310,7 @@ fn setup_unsettled_hand(
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![b.auth(&dep_b, scope::BUYIN)],
+            spends: vec![b.buyin_auth(&dep_b, 1, b.pk())],
             notes: vec![dep_b.clone()],
             seat_owner: b.pk(),
         },
@@ -305,9 +319,10 @@ fn setup_unsettled_hand(
     .unwrap();
     let seat_a = find_note(seq, &a, 1_000);
     let seat_b = find_note(seq, &b, 2_000);
-    two_player_settlement(
+    let record = two_player_settlement(
         1, &a, &b, &seat_a, &seat_b, 1_500, 500, 2_425, &policy, binding_byte,
-    )
+    );
+    (record, a, b)
 }
 
 /// 标准 setup：开 rake 桌 + 双方入金买入 + 结算一次，返回（结算记录副本, 策略）。
@@ -327,7 +342,7 @@ fn setup_settled_hand(
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![a.auth(&dep_a, scope::BUYIN)],
+            spends: vec![a.buyin_auth(&dep_a, 1, a.pk())],
             notes: vec![dep_a.clone()],
             seat_owner: a.pk(),
         },
@@ -337,7 +352,7 @@ fn setup_settled_hand(
     seq.submit(
         Operation::BuyIn {
             table_id: 1,
-            spends: vec![b.auth(&dep_b, scope::BUYIN)],
+            spends: vec![b.buyin_auth(&dep_b, 1, b.pk())],
             notes: vec![dep_b.clone()],
             seat_owner: b.pk(),
         },

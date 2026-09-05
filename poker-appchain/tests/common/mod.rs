@@ -15,6 +15,7 @@ use poker_appchain::settlement::{
 use std::sync::Arc;
 
 /// 测试用户：OwnerKey 与 spend secret 绑定（生产中 secret 由客户端派生）。
+#[derive(Clone)]
 pub struct TestUser {
     pub key: OwnerKey,
     pub secret: [u8; 32],
@@ -42,11 +43,16 @@ impl TestUser {
         Note::new(class, amount, self.pk(), nonce, None).unwrap()
     }
 
-    /// 对 note 构造花费授权。
+    /// 对 note 构造花费授权（S1：签名绑定操作效果摘要）。
     #[must_use]
-    pub fn auth(&self, note: &Note, scope_tag: &[u8]) -> SpendAuth {
+    pub fn auth(&self, note: &Note, scope_tag: &[u8], effect: &[u8; 32]) -> SpendAuth {
         let nf = note.nullifier(&self.secret);
-        let d = spend_digest(&note.commitment_bytes(), &felt_to_bytes32(&nf), scope_tag);
+        let d = spend_digest(
+            &note.commitment_bytes(),
+            &felt_to_bytes32(&nf),
+            scope_tag,
+            effect,
+        );
         SpendAuth {
             commitment: note.commitment_bytes(),
             nullifier: felt_to_bytes32(&nf),
@@ -54,21 +60,50 @@ impl TestUser {
         }
     }
 
-    /// 对结算输入构造花费授权（scope = 结算域 + hand_binding）。
+    /// 对结算输入构造花费授权（scope = 结算域 + hand_binding；
+    /// effect = 完整结算效果摘要，由记录本身导出）。
     #[must_use]
-    pub fn settle_auth(&self, note: &Note, hand_binding: &[u8; 32]) -> SpendAuth {
-        let scope = poker_appchain::settlement::settle_spend_scope(hand_binding);
-        self.auth_with_scope(note, &scope)
-    }
-
-    fn auth_with_scope(&self, note: &Note, scope_bytes: &[u8]) -> SpendAuth {
+    pub fn settle_auth(&self, note: &Note, record: &SettlementRecord) -> SpendAuth {
+        let scope =
+            poker_appchain::settlement::settle_spend_scope(&record.hand_binding);
+        let effect = poker_appchain::settlement::settle_effect(record);
         let nf = note.nullifier(&self.secret);
-        let d = spend_digest(&note.commitment_bytes(), &felt_to_bytes32(&nf), scope_bytes);
+        let d = spend_digest(
+            &note.commitment_bytes(),
+            &felt_to_bytes32(&nf),
+            &scope,
+            &effect,
+        );
         SpendAuth {
             commitment: note.commitment_bytes(),
             nullifier: felt_to_bytes32(&nf),
             sig: self.key.sign(&d),
         }
+    }
+
+    /// 买入授权（effect 自动从 (table_id, seat_owner) 导出）。
+    #[must_use]
+    pub fn buyin_auth(&self, note: &Note, table_id: u64, seat_owner: [u8; 33]) -> SpendAuth {
+        let effect = poker_appchain::ops::Operation::BuyIn {
+            table_id,
+            spends: vec![],
+            notes: vec![],
+            seat_owner,
+        }
+        .effect_digest();
+        self.auth(note, poker_appchain::ops::scope::BUYIN, &effect)
+    }
+
+    /// 转账授权（effect 自动从 outputs 导出）。
+    #[must_use]
+    pub fn transfer_auth(&self, note: &Note, outputs: &[NoteSpec]) -> SpendAuth {
+        let effect = poker_appchain::ops::Operation::Transfer {
+            spends: vec![],
+            notes: vec![],
+            outputs: outputs.to_vec(),
+        }
+        .effect_digest();
+        self.auth(note, poker_appchain::ops::scope::TRANSFER, &effect)
     }
 }
 
@@ -163,7 +198,7 @@ pub fn two_player_settlement(
     } else {
         (None, None)
     };
-    SettlementRecord {
+    let mut record = SettlementRecord {
         table_id,
         hand_binding: [hand_binding_byte; 32],
         policy_commitment: policy.commitment_bytes(),
@@ -171,11 +206,19 @@ pub fn two_player_settlement(
         inputs: vec![
             SettleInput {
                 note: seat_a.clone(),
-                spend: a.settle_auth(seat_a, &[hand_binding_byte; 32]),
+                spend: SpendAuth {
+                    commitment: seat_a.commitment_bytes(),
+                    nullifier: [0; 32],
+                    sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                },
             },
             SettleInput {
                 note: seat_b.clone(),
-                spend: b.settle_auth(seat_b, &[hand_binding_byte; 32]),
+                spend: SpendAuth {
+                    commitment: seat_b.commitment_bytes(),
+                    nullifier: [0; 32],
+                    sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                },
             },
         ],
         payouts: vec![
@@ -187,7 +230,12 @@ pub fn two_player_settlement(
             treasury_out,
             operator_out,
         },
-    }
+        hand_proof: None,
+    };
+    // S1：授权对完整结算效果签名（记录完整后构造）
+    record.inputs[0].spend = a.settle_auth(seat_a, &record);
+    record.inputs[1].spend = b.settle_auth(seat_b, &record);
+    record
 }
 
 /// 从账本导出全部 note 的包含证明（证明注册表/客户端分发模拟）。

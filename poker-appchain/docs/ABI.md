@@ -67,23 +67,34 @@ SettlementRecord {
   inputs:  Vec<SettleInput>  // SettleInput { note: Note, spend: SpendAuth }
   payouts: Vec<NoteSpec>     // NoteSpec { asset_class, amount, owner, table_id }
   rake: RakeSplitRecord { total, treasury_out: Option<NoteSpec>, operator_out }
+  hand_proof: Option<HandProofBinding>   // v1.1 追加字段
 }
 SpendAuth { commitment: [u8;32], nullifier: [u8;32], sig: EcdsaSig(64B compact) }
+HandProofBinding { archive_bytes: Vec<u8> /* borsh */, post_state_commitment: [u8;32] }
 ```
 
 **校验关系（顺序即实现，全部 fail-closed）**：
 1. hand_binding 非零；inputs 非空
 2. 每个 input：note.table_id == record.table_id；同类；commitment 匹配；nullifier 非零
-3. P 层签名：owner ECDSA over `spend_digest = blake2s(DOMAIN_SPEND_DIGEST, commitment, nullifier, scope)`，
-   scope = `DOMAIN_SETTLEMENT_BINDING || hand_binding`
+3. P 层签名（v1.1）：owner ECDSA over
+   `spend_digest = blake2s(DOMAIN_SPEND_DIGEST, commitment, nullifier, scope, effect)`，
+   scope = `DOMAIN_SETTLEMENT_BINDING || hand_binding`；
+   **effect = settle_effect(record)** = blake2s(`settle.effect.v1`, hand_binding,
+   pot, Σinput commitments, Σoutputs(owner,amount), rake.total)——签名绑定
+   全部分配语义，sequencer 无法改打给别人（S1）；policy_commitment 刻意
+   不在 effect 内，由注册表冻结检查（第 6 条）独立强制
 4. 输出同类、非零
 5. 守恒：`Σinputs == Σpayouts + Σrake_notes`（rake note 已含在输出侧）
 6. 费率：`rake.total == policy.rake_of(pot)`；`record.policy_commitment == policy.commitment`
 7. 分账：treasury_out/operator_out 数额 == `policy.split_of(rake.total)` 且收款人匹配
+8. 手牌证明绑定（v1.1，可选）：`hand_proof` 存在时，归档 scope（borsh 镜像
+   `TexasArchiveScope`）必须满足 table_id 一致、终态承诺 == 声明值、
+   transition_count > 0。**完整 STARK 验证**由 `poker-appchain-texasair`
+   适配器 crate 的 `TexasAirEngine` 执行（`verify_tagged_texas_proof`）
 
-> 已知边界：`pot` 是声明值，P 层签名不直接覆盖它。pot 与牌局状态链的
-> 绑定由 G-STARK（canonical AIR 的 AdvanceRound/pot 关系）承担——host
-> admission 信任该链条。见 blockers #B2。
+> 已知边界（B2 剩余尾巴）：v1.1 后 pot 已在 effect 签名与归档终态承诺
+> 双重覆盖之下，但"终态承诺 → pot 数值"的逐字节绑定（状态镜像哈希复算）
+> 仍缺——需要 poker_texas_air 公开范围暴露 pot 或可复算镜像。见 BLOCKERS B2。
 
 ## 5. 软确认帧（M3）
 

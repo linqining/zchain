@@ -169,6 +169,7 @@ mod tests {
                 treasury_out: None,
                 operator_out: None,
             },
+            hand_proof: None,
         };
         let f = SignedFrame::sign(
             SoftConfirmFrame {

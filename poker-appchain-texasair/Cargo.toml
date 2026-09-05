@@ -1,0 +1,23 @@
+[package]
+name = "poker-appchain-texasair"
+version = "0.1.0"
+edition = "2024"
+description = "接入缝：poker-appchain 结算证明 ↔ poker_texas_air 手写约束 AIR（stwo circle-STARK）"
+license = "BUSL-1.1"
+
+# 独立 crate（自带 lockfile）：外部 poker_texas_air 携带自己的 poker_l1，
+# 与 zchain workspace 的 poker_l1 同名不同源，不能共享依赖图。
+[workspace]
+
+[dependencies]
+# ===== zchain 侧：结算证明 seam =====
+poker-appchain = { path = "../poker-appchain" }
+# ===== poker_texas_air 侧：手写约束 AIR 全量栈 =====
+poker_texas_air = { path = "../../poker_texas_air" }
+# ===== 编码与签名 =====
+borsh = "1"
+hex = "0.4.3"
+ed25519-dalek = "2.1.1"
+
+[lib]
+path = "src/lib.rs"

@@ -7,7 +7,17 @@
 > （本仓库内的同名 crate 是精简集成版）；实现 crate `poker-appchain/` 落在
 > **本仓库**根下，2026-09-05 迁入。
 
-## ⭐ 实现状态（2026-09-05 首轮落地）
+## ⭐ 实现状态（2026-09-05 v1.1：审计修复 + poker_texas_air 接入缝）
+
+**v1.1 增量**（poker_vm 路线搁置，证明路线定为 poker_texas_air 手写约束
+AIR）：① 审计修复 S1/C1/C3（见 BLOCKERS"已解决"）；② 新 crate
+`poker-appchain-texasair`——`TexasAirEngine` 适配器：验证 poker_texas_air
+手写约束 AIR 批次归档（`verify_tagged_texas_proof`）+ 终态承诺绑定 +
+attestation 签名，5 项负例回归全过；③ `SettlementRecord` v1.1 增加
+`hand_proof` 可选绑定；④ zchain 根 Cargo.toml 悬空依赖修复（P0）。
+测试：poker-appchain 61/61 + texasair 适配器 5/5（release）。
+
+## 实现状态（2026-09-05 首轮落地）
 
 实现载体：新 crate `poker-appchain/`（未触碰主 lib），零新增外部依赖。
 测试：**61 通过 / 0 失败**（release：48 lib + 8 attacks + 3 settlement_flow

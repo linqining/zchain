@@ -84,6 +84,41 @@ impl Operation {
             }
         }
     }
+
+    /// 效果摘要：绑定本操作**除签名外的全部语义载荷**（收款人、金额、桌、
+    /// 幂等键、结算分配），纳入每个花费授权的签名摘要（审计 S1 修复）。
+    ///
+    /// 无花费授权的操作（operator 帧）返回零摘要（不参与签名）。
+    #[must_use]
+    pub fn effect_digest(&self) -> [u8; 32] {
+        match self {
+            Operation::OpenTable { .. } | Operation::CloseTable { .. }
+            | Operation::Deposit { .. } => [0u8; 32],
+            Operation::WithdrawRequest { request_id, .. } => {
+                crate::keys::blake2s32(&[b"effect.withdraw.v1", request_id])
+            }
+            Operation::Transfer { outputs, .. } => {
+                let bytes =
+                    borsh::to_vec(outputs).expect("NoteSpec borsh encoding is infallible");
+                crate::keys::blake2s32(&[b"effect.transfer.v1", &bytes])
+            }
+            Operation::BuyIn {
+                table_id, seat_owner, ..
+            } => crate::keys::blake2s32(&[
+                b"effect.buyin.v1",
+                &table_id.to_be_bytes(),
+                seat_owner,
+            ]),
+            Operation::Settle(record) => {
+                // 结算效果 = 结算绑定（覆盖 pot、分配、全部输出）
+                let binding = crate::settlement::settlement_binding(record);
+                crate::keys::blake2s32(&[
+                    b"effect.settle.v1",
+                    &crate::felt::felt_to_bytes32(&binding),
+                ])
+            }
+        }
+    }
 }
 
 /// 花费 scope 标签（防跨操作重放：同一 note 在不同操作类型下摘要不同）。

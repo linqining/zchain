@@ -20,7 +20,6 @@ default = []
 
 [dependencies]
 poker_l1 = { path = "poker_l1" }
-poker_texas_air = { path = "poker_texas_air" }
 poker_protocol = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

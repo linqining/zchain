@@ -42,9 +42,14 @@ impl Robot {
         self.key.public_bytes()
     }
 
-    fn buyin_auth(&self, note: &Note) -> SpendAuth {
+    fn buyin_auth(&self, note: &Note, effect: &[u8; 32]) -> SpendAuth {
         let nf = note.nullifier(&self.secret);
-        let d = spend_digest(&note.commitment_bytes(), &felt_to_bytes32(&nf), scope::BUYIN);
+        let d = spend_digest(
+            &note.commitment_bytes(),
+            &felt_to_bytes32(&nf),
+            scope::BUYIN,
+            effect,
+        );
         SpendAuth {
             commitment: note.commitment_bytes(),
             nullifier: felt_to_bytes32(&nf),
@@ -52,12 +57,13 @@ impl Robot {
         }
     }
 
-    fn settle_auth(&self, note: &Note, binding: &[u8; 32]) -> SpendAuth {
+    fn settle_auth(&self, note: &Note, binding: &[u8; 32], effect: &[u8; 32]) -> SpendAuth {
         let nf = note.nullifier(&self.secret);
         let d = spend_digest(
             &note.commitment_bytes(),
             &felt_to_bytes32(&nf),
             &settle_spend_scope(binding),
+            effect,
         );
         SpendAuth {
             commitment: note.commitment_bytes(),
@@ -114,7 +120,7 @@ fn main() {
             batch_size: 64,
             batch_interval_ms: 5_000,
         },
-        Arc::new(ValidationEngine),
+        Arc::new(ValidationEngine::default()),
         Arc::clone(&metrics),
     );
 
@@ -160,11 +166,18 @@ fn main() {
             // 3. 买入（消费 proven 余额 note → 铸 seat note）
             for r in &robots {
                 let note = find_proven_note(&seq, &r.pk(), 1_000);
+                let effect = Operation::BuyIn {
+                    table_id: table as u64,
+                    spends: vec![],
+                    notes: vec![],
+                    seat_owner: r.pk(),
+                }
+                .effect_digest();
                 let t = Instant::now();
                 seq.submit(
                     Operation::BuyIn {
                         table_id: table as u64,
-                        spends: vec![r.buyin_auth(&note)],
+                        spends: vec![r.buyin_auth(&note, &effect)],
                         notes: vec![note],
                         seat_owner: r.pk(),
                     },
@@ -184,24 +197,22 @@ fn main() {
             assert_eq!(seats.len(), robots.len(), "one seat note per robot");
             let mut binding32 = [0u8; 32];
             binding32[..8].copy_from_slice(&binding_be);
-            // 4. 结算（零费：全 seat 消费 → 等额赔付）
-            let record = SettlementRecord {
+            // 4. 结算（零费：全 seat 消费 → 等额赔付）。两段构造：
+            // 先成型记录，再按结算效果摘要逐个补签名（S1）
+            let mut record = SettlementRecord {
                 table_id: table as u64,
                 hand_binding: binding32,
                 policy_commitment: FeePolicy::Zero.commitment_bytes(),
                 pot: 1_000 * seats.len() as u64,
                 inputs: seats
                     .iter()
-                    .map(|n| {
-                        // 按 note 的 owner 找机器人（HashMap 迭代序不定）
-                        let r = robots
-                            .iter()
-                            .find(|r| r.pk() == n.owner)
-                            .expect("seat owner is a robot");
-                        SettleInput {
-                            note: n.clone(),
-                            spend: r.settle_auth(n, &binding32),
-                        }
+                    .map(|n| SettleInput {
+                        note: n.clone(),
+                        spend: poker_appchain::settlement::SpendAuth {
+                            commitment: n.commitment_bytes(),
+                            nullifier: [0; 32],
+                            sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                        },
                     })
                     .collect(),
                 payouts: seats
@@ -218,7 +229,16 @@ fn main() {
                     treasury_out: None,
                     operator_out: None,
                 },
+                hand_proof: None,
             };
+            for (i, n) in seats.iter().enumerate() {
+                // 按 note 的 owner 找机器人（HashMap 迭代序不定）
+                let r = robots
+                    .iter()
+                    .find(|r| r.pk() == n.owner)
+                    .expect("seat owner is a robot");
+                record.inputs[i].spend = r.settle_auth(n, &binding32, &poker_appchain::settlement::settle_effect(&record));
+            }
             let op_index = seq.state().seq;
             seq.submit(Operation::Settle(Box::new(record.clone())), 2_000)
                 .unwrap();
@@ -265,7 +285,7 @@ fn main() {
         "wall_clock_s": total_elapsed.as_secs_f64(),
         "ops_total": seq.state().seq,
         "alert_count": evaluate_alerts(&pipeline.health()).len(),
-        "engine": poker_appchain::pipeline::SettlementProver::name(&ValidationEngine),
+        "engine": poker_appchain::pipeline::SettlementProver::name(&ValidationEngine::default()),
     });
     println!("{report:#}");
 }

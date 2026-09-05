@@ -52,9 +52,11 @@ pub struct ProofBundle {
     pub binding_hex: String,
     /// 帧链序号。
     pub op_index: u64,
-    /// 引擎标识（版本化，如 "host-validate-v1"）。
+    /// 引擎标识（版本化，如 "host-validate-v2"）。
     pub engine: &'static str,
-    /// 证明载荷（v1 = 校验摘要；v2 = stwo proof archive）。
+    /// attestation 签名公钥（32B ed25519）。
+    pub attestor_public: [u8; 32],
+    /// 证明载荷（v1 = attestation 签名 64B；v2 = stwo proof archive）。
     pub payload: Vec<u8>,
 }
 
@@ -74,29 +76,68 @@ pub trait SettlementProver: Send + Sync {
     fn verify(&self, bundle: &ProofBundle) -> AppchainResult<()>;
 }
 
-/// v1 host 校验引擎：prove = 关系纯函数校验 + 摘要打包。
+fn attestation_message(binding_hex: &str) -> AppchainResult<Vec<u8>> {
+    let binding = hex::decode(binding_hex)
+        .map_err(|_| AppchainError::AdmissionRejected("bad binding hex"))?;
+    if binding.len() != 32 {
+        return Err(AppchainError::AdmissionRejected("bad binding length"));
+    }
+    Ok(crate::keys::blake2s32(&[b"host-validate-v2", &binding]).to_vec())
+}
+
+/// v1 host 校验引擎：prove = 关系纯函数校验 + **attestor 签名**。
 ///
-/// 与主仓库 Phase 1 姿态一致（host 验证 + 浏览器可复验）；stwo 引擎接入
-/// 是已知后续项（见 docs/plan-appchain-v1-blockers.md）。
-#[derive(Debug, Default)]
-pub struct ValidationEngine;
+/// 与主仓库 Phase 1 姿态一致（host 验证 + 浏览器可复验）；审计 C3 修复：
+/// attestation 载荷由 attestor 密钥签名（可归属、不可伪造），不再是
+/// 任何人可算的摘要。stwo 引擎接入是 `texas-air` feature 适配器
+/// （`texas_air_engine`）。
+#[derive(Debug, Clone)]
+pub struct ValidationEngine {
+    attestor: ed25519_dalek::SigningKey,
+}
+
+impl ValidationEngine {
+    /// 指定 attestor 密钥构造（生产：环境注入；不得入库）。
+    #[must_use]
+    pub fn new(attestor: ed25519_dalek::SigningKey) -> Self {
+        Self { attestor }
+    }
+
+    /// attestor 公钥。
+    #[must_use]
+    pub fn attestor_public(&self) -> [u8; 32] {
+        self.attestor.verifying_key().to_bytes()
+    }
+}
+
+impl Default for ValidationEngine {
+    /// 默认构造：**确定性开发密钥，仅限测试**（生产必须 [`ValidationEngine::new`]）。
+    fn default() -> Self {
+        Self::new(ed25519_dalek::SigningKey::from_bytes(&[
+            0x50, 0x4f, 0x4b, 0x45, 0x52, 0x2d, 0x41, 0x50, 0x50, 0x43, 0x48, 0x41,
+            0x49, 0x4e, 0x2d, 0x44, 0x45, 0x56, 0x2d, 0x4b, 0x45, 0x59, 0x30, 0x30,
+            0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x30, 0x31,
+        ]))
+    }
+}
 
 impl SettlementProver for ValidationEngine {
     fn name(&self) -> &'static str {
-        "host-validate-v1"
+        "host-validate-v2"
     }
 
     fn prove(&self, job: &ProofJob) -> AppchainResult<ProofBundle> {
         crate::settlement::validate_settlement(&job.record, &job.policy)?;
-        let digest = crate::keys::blake2s32(&[
-            b"host-validate-v1",
-            &job.record.hand_binding,
-        ]);
+        let binding_hex = hex::encode(job.record.hand_binding);
+        let msg = attestation_message(&binding_hex)?;
+        use ed25519_dalek::Signer as _;
+        let payload = self.attestor.sign(&msg).to_bytes().to_vec();
         Ok(ProofBundle {
-            binding_hex: hex::encode(job.record.hand_binding),
+            binding_hex,
             op_index: job.op_index,
             engine: self.name(),
-            payload: digest.to_vec(),
+            attestor_public: self.attestor_public(),
+            payload,
         })
     }
 
@@ -104,8 +145,14 @@ impl SettlementProver for ValidationEngine {
         if bundle.engine != self.name() {
             return Err(AppchainError::AdmissionRejected("unknown engine"));
         }
-        if bundle.payload.len() != 32 {
+        if bundle.payload.len() != 64 {
             return Err(AppchainError::AdmissionRejected("bad payload"));
+        }
+        let msg = attestation_message(&bundle.binding_hex)?;
+        let mut sig = [0u8; 64];
+        sig.copy_from_slice(&bundle.payload);
+        if !crate::keys::SequencerKey::verify(&bundle.attestor_public, &msg, &sig) {
+            return Err(AppchainError::BadSignature);
         }
         Ok(())
     }
@@ -356,6 +403,7 @@ impl ProofPipeline {
 mod tests {
     use super::*;
     use crate::fee::FeePolicy;
+    use crate::keys::EcdsaSig;
     use crate::note::{AssetClass, NoteSpec};
     use crate::settlement::{
         RakeSplitRecord, SettleInput, SettlementRecord, SpendAuth,
@@ -374,12 +422,7 @@ mod tests {
         let note_commitment_bytes = note.commitment_bytes();
         let nf = note.nullifier(&[binding_byte; 32]);
         let scope = crate::settlement::settle_spend_scope(&[binding_byte; 32]);
-        let d = crate::keys::spend_digest(
-            &note.commitment_bytes(),
-            &crate::felt::felt_to_bytes32(&nf),
-            &scope,
-        );
-        SettlementRecord {
+        let mut record = SettlementRecord {
             table_id: 1,
             hand_binding: [binding_byte; 32],
             policy_commitment: FeePolicy::Zero.commitment_bytes(),
@@ -389,7 +432,7 @@ mod tests {
                 spend: SpendAuth {
                     commitment: note_commitment_bytes,
                     nullifier: crate::felt::felt_to_bytes32(&nf),
-                    sig: k.sign(&d),
+                    sig: EcdsaSig { bytes: [0; 64] },
                 },
             }],
             payouts: vec![NoteSpec {
@@ -403,7 +446,18 @@ mod tests {
                 treasury_out: None,
                 operator_out: None,
             },
-        }
+            hand_proof: None,
+        };
+        // S1：签名覆盖结算效果摘要（在记录完整后计算）
+        let effect = crate::settlement::settle_effect(&record);
+        let d = crate::keys::spend_digest(
+            &record.inputs[0].spend.commitment,
+            &record.inputs[0].spend.nullifier,
+            &scope,
+            &effect,
+        );
+        record.inputs[0].spend.sig = k.sign(&d);
+        record
     }
 
     #[test]
@@ -417,7 +471,7 @@ mod tests {
                 high_watermark: 64,
                 batch_interval_ms: 1_000,
             },
-            Arc::new(ValidationEngine),
+            Arc::new(ValidationEngine::default()),
             metrics,
         );
         for i in 0..8u8 {
@@ -454,7 +508,7 @@ mod tests {
                 high_watermark: 16,
                 batch_interval_ms: 1_000,
             },
-            Arc::new(ValidationEngine),
+            Arc::new(ValidationEngine::default()),
             Arc::clone(&metrics),
         );
         let mut rec = dummy_record(5);

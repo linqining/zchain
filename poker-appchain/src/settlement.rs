@@ -7,12 +7,14 @@
 //!
 //! ## fail-closed 校验面（M2-ACC-2 负例矩阵的判据）
 //!
-//! 1. 守恒：`Σ输入 = Σ赔付 + rake.total`
+//! 1. 守恒：`Σ输入 = Σ赔付 + Σrake note`（rake note 在输出侧）
 //! 2. 费率：`rake.total == policy.rake_of(pot)`，policy 以 commitment 绑定
-//! 3. 分账：treasury/operator note 数额 == `policy.split_of(rake.total)`
-//! 4. 签名：每个输入 seat note 的 owner 必须对结算绑定摘要签名
+//! 3. 分账：treasury/operator note 数额与收款人 == `policy.split_of(...)`
+//! 4. 签名：每个输入 seat note 的 owner 必须对（scope + **结算效果摘要**）签名
 //! 5. 范围：所有输入 note 的 table_id 一致、hand_binding 非零
 //! 6. 资产类：输入/输出全部同类，REAL/PLAY 不混
+//! 7. 手牌证明绑定（可选）：归档 scope 与声明终态一致（`texas-air`
+//!    feature 下由适配器执行完整 STARK 验证）
 
 use starknet_crypto::{poseidon_hash_many, FieldElement};
 
@@ -81,6 +83,9 @@ pub struct SettlementRecord {
     pub payouts: Vec<NoteSpec>,
     /// rake 分账。
     pub rake: RakeSplitRecord,
+    /// 手牌批次证明绑定（B1/B2 接入缝，可选；borsh 追加字段——
+    /// v1.1 ABI，未部署前无兼容包袱）。
+    pub hand_proof: Option<HandProofBinding>,
 }
 
 /// 结算绑定摘要：`poseidon(DOMAIN, table, hand_binding, policy, pot,
@@ -125,6 +130,84 @@ pub fn settle_spend_scope(hand_binding: &[u8; 32]) -> Vec<u8> {
     scope.extend_from_slice(DOMAIN_SETTLEMENT_BINDING);
     scope.extend_from_slice(hand_binding);
     scope
+}
+
+/// 结算效果摘要（S1）：覆盖 hand_binding、pot、全部输入承诺与全部输出
+/// （**不含** policy_commitment——策略由注册表冻结检查强制，签名绑定它
+/// 会让"换策略即重签"掩盖费率关系防线）。纳入每个 settle 花费授权签名。
+#[must_use]
+pub fn settle_effect(record: &SettlementRecord) -> [u8; 32] {
+    let mut h_input = Vec::with_capacity(record.inputs.len() * 64);
+    let mut h_output = Vec::with_capacity(record.payouts.len() * 64);
+    for i in &record.inputs {
+        h_input.extend_from_slice(&i.spend.commitment);
+    }
+    for o in &record.payouts {
+        h_output.extend_from_slice(&o.owner);
+        h_output.extend_from_slice(&o.amount.to_be_bytes());
+    }
+    crate::keys::blake2s32(&[
+        b"poker-appchain.settle.effect.v1",
+        &record.hand_binding,
+        &record.pot.to_be_bytes(),
+        &h_input,
+        &h_output,
+        &record.rake.total.to_be_bytes(),
+    ])
+}
+
+/// poker_texas_air 手牌批次证明的**公开范围镜像**（与
+/// `poker_texas_air::texas_tagged::ArchivedTaggedTexasProof` 字段序完全
+/// 一致，borsh 编码）。无适配器 crate 时用于 scope 级解析。
+#[derive(
+    Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize,
+)]
+pub struct TexasArchiveScope {
+    /// trace log2 尺寸。
+    pub log_size: u32,
+    /// 列数。
+    pub num_columns: u32,
+    /// 公开桌范围。
+    pub table_id: u64,
+    /// 公开手范围。
+    pub hand_id: u32,
+    /// 批内首个转移序号。
+    pub first_call_seq: u32,
+    /// 批内末个转移序号。
+    pub last_call_seq: u32,
+    /// 转移数。
+    pub transition_count: u16,
+    /// 批摘要。
+    pub batch_digest: [u8; 32],
+    /// 首状态承诺。
+    pub pre_state_commitment: [u8; 32],
+    /// 终态承诺。
+    pub post_state_commitment: [u8; 32],
+    /// STARK 证明字节。
+    pub stark_proof_bytes: Vec<u8>,
+}
+
+/// 归档字节 → 公开范围（borsh，字段序与 poker_texas_air 归档一致）。
+///
+/// # Errors
+/// 编码不合法 → [`AppchainError::Codec`]。
+pub fn parse_archive_scope(archive_bytes: &[u8]) -> AppchainResult<TexasArchiveScope> {
+    use borsh::BorshDeserialize as _;
+    TexasArchiveScope::try_from_slice(archive_bytes)
+        .map_err(|e| AppchainError::Codec(format!("archive scope: {e}")))
+}
+
+/// 手牌证明绑定（B1/B2 接入缝）：结算声明其对应的手牌批次证明。
+///
+/// `post_state_commitment` 是**声明的终态承诺**；默认构建下做 scope 级
+/// 一致性检查（table_id/终态承诺与归档一致），`texas-air` feature 下
+/// 适配器额外执行完整 STARK 验证（`verify_tagged_texas_proof`）。
+#[derive(Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize)]
+pub struct HandProofBinding {
+    /// poker_texas_air 归档字节（borsh）。
+    pub archive_bytes: Vec<u8>,
+    /// 声明的终态承诺（= 归档 post_state_commitment）。
+    pub post_state_commitment: [u8; 32],
 }
 
 /// 对 `SettlementRecord` 做纯函数校验（不触碰账本状态）。
@@ -173,11 +256,26 @@ pub fn validate_settlement(
         input_sum += u128::from(input.note.amount);
     }
 
-    // 4. P 层签名覆盖：每个输入 note 的 owner 对绑定摘要签名
+    // 4. P 层签名覆盖：每个输入 note 的 owner 对（绑定摘要 + 结算效果）签名
     let scope = settle_spend_scope(&record.hand_binding);
+    let effect = settle_effect(record);
     for input in &record.inputs {
-        let d = spend_digest(&input.spend.commitment, &input.spend.nullifier, &scope);
+        let d = spend_digest(&input.spend.commitment, &input.spend.nullifier, &scope, &effect);
         verify_ecsdsa(&input.note.owner, &d, &input.spend.sig)?;
+    }
+
+    // 7. 手牌证明绑定（B2 接入缝，scope 级 fail-closed）
+    if let Some(hp) = &record.hand_proof {
+        let scope = parse_archive_scope(&hp.archive_bytes)?;
+        if scope.table_id != record.table_id {
+            return Err(AppchainError::AdmissionRejected("archive table mismatch"));
+        }
+        if scope.post_state_commitment != hp.post_state_commitment {
+            return Err(AppchainError::AdmissionRejected("archive state commitment mismatch"));
+        }
+        if scope.transition_count == 0 {
+            return Err(AppchainError::AdmissionRejected("empty archive batch"));
+        }
     }
 
     // 6. 输出资产类一致

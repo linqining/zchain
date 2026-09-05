@@ -379,6 +379,8 @@ impl Sequencer {
     // ===== 语义应用（全部检查先行，应用段零失败）=====
 
     fn apply(&mut self, op: &Operation, _now_ms: u64) -> AppchainResult<()> {
+        // 效果摘要（审计 S1）：绑定操作全部语义载荷，纳入花费签名验证
+        let effect = op.effect_digest();
         let res = match op {
             Operation::OpenTable { table_id, policy } => self.apply_open_table(*table_id, policy),
             Operation::CloseTable { table_id } => self.apply_close_table(*table_id),
@@ -386,13 +388,13 @@ impl Sequencer {
                 self.apply_deposit(deposit_id, owner, *asset_class, *amount)
             }
             Operation::WithdrawRequest { spend, note, request_id } => {
-                self.apply_withdraw(spend, note, request_id)
+                self.apply_withdraw(spend, note, request_id, &effect)
             }
             Operation::Transfer { spends, notes, outputs } => {
-                self.apply_transfer(spends, notes, outputs)
+                self.apply_transfer(spends, notes, outputs, &effect)
             }
             Operation::BuyIn { table_id, spends, notes, seat_owner } => {
-                self.apply_buy_in(*table_id, spends, notes, seat_owner)
+                self.apply_buy_in(*table_id, spends, notes, seat_owner, &effect)
             }
             Operation::Settle(record) => self.apply_settle(record),
         };
@@ -435,11 +437,16 @@ impl Sequencer {
         asset_class: crate::note::AssetClass,
         amount: u64,
     ) -> AppchainResult<()> {
+        // C1：先完成全部可失败检查，幂等键最后插入（失败零状态变更）
+        let nonce = self.mint_nonce(b"deposit", deposit_id);
+        let note = Note::new(asset_class, amount, *owner, nonce, None)?;
+        let c = felt_to_bytes32(&note.commitment());
+        if self.state.notes.contains_key(&c) {
+            return Err(AppchainError::AdmissionRejected("duplicate note commitment"));
+        }
         if !self.state.deposit_ids.insert(*deposit_id) {
             return Err(AppchainError::WithdrawalConflict("duplicate deposit id".into()));
         }
-        let nonce = self.mint_nonce(b"deposit", deposit_id);
-        let note = Note::new(asset_class, amount, *owner, nonce, None)?;
         self.mint_note(note)?;
         Ok(())
     }
@@ -449,16 +456,18 @@ impl Sequencer {
         spend: &crate::settlement::SpendAuth,
         note: &Note,
         request_id: &[u8; 32],
+        effect: &[u8; 32],
     ) -> AppchainResult<()> {
+        // C1：签名/note/账本校验全部先行，幂等键销毁在变更段
+        let c = felt_to_bytes32(&note.commitment());
+        if c != spend.commitment || !self.state.notes.contains_key(&c) {
+            return Err(AppchainError::NoteNotFound);
+        }
+        let d = spend_digest(&spend.commitment, &spend.nullifier, scope::WITHDRAW, effect);
+        crate::keys::verify_ecsdsa(&note.owner, &d, &spend.sig)?;
         if !self.state.withdrawal_ids.insert(*request_id) {
             return Err(AppchainError::WithdrawalConflict("duplicate request id".into()));
         }
-        let c = felt_to_bytes32(&note.commitment());
-        if c != spend.commitment {
-            return Err(AppchainError::NoteNotFound);
-        }
-        let d = spend_digest(&spend.commitment, &spend.nullifier, scope::WITHDRAW);
-        crate::keys::verify_ecsdsa(&note.owner, &d, &spend.sig)?;
         self.consume_note(note, &spend.nullifier)?;
         self.state.burned.push((*request_id, note.amount));
         Ok(())
@@ -469,6 +478,7 @@ impl Sequencer {
         spends: &[crate::settlement::SpendAuth],
         notes: &[Note],
         outputs: &[crate::note::NoteSpec],
+        effect: &[u8; 32],
     ) -> AppchainResult<()> {
         if spends.len() != notes.len() || notes.is_empty() || outputs.is_empty() {
             return Err(AppchainError::AdmissionRejected("transfer arity"));
@@ -476,7 +486,7 @@ impl Sequencer {
         let class = notes[0].asset_class;
         let mut input_sum = 0u128;
         for (s, n) in spends.iter().zip(notes.iter()) {
-            let d = spend_digest(&s.commitment, &s.nullifier, scope::TRANSFER);
+            let d = spend_digest(&s.commitment, &s.nullifier, scope::TRANSFER, effect);
             crate::keys::verify_ecsdsa(&n.owner, &d, &s.sig)?;
             if n.asset_class != class {
                 return Err(AppchainError::AssetClassMismatch(
@@ -518,6 +528,7 @@ impl Sequencer {
         spends: &[crate::settlement::SpendAuth],
         notes: &[Note],
         seat_owner: &[u8; 33],
+        effect: &[u8; 32],
     ) -> AppchainResult<()> {
         let ts = self
             .state
@@ -537,7 +548,7 @@ impl Sequencer {
         let class = notes[0].asset_class;
         let mut total = 0u128;
         for (s, n) in spends.iter().zip(notes.iter()) {
-            let d = spend_digest(&s.commitment, &s.nullifier, scope::BUYIN);
+            let d = spend_digest(&s.commitment, &s.nullifier, scope::BUYIN, effect);
             crate::keys::verify_ecsdsa(&n.owner, &d, &s.sig)?;
             if n.asset_class != class {
                 return Err(AppchainError::AssetClassMismatch(
@@ -592,11 +603,9 @@ impl Sequencer {
         if !ts.open {
             return Err(AppchainError::TableNotOpen(record.table_id));
         }
-        if !self
-            .state
-            .settled_bindings
-            .insert(record.hand_binding)
-        {
+        // C1：replay 检查只读；hand_binding 的销毁移到全部校验通过之后——
+        // 校验失败的结算不得烧掉绑定（否则合法修正版会被误判重放）
+        if self.state.settled_bindings.contains(&record.hand_binding) {
             return Err(AppchainError::SettlementReplay);
         }
         let policy = *self.state.registry.require(record.table_id)?;
@@ -612,6 +621,10 @@ impl Sequencer {
             if e.note != input.note {
                 return Err(AppchainError::AdmissionRejected("input note mismatch"));
             }
+        }
+        // ===== 变更段（以上全部通过，以下不再失败）=====
+        if !self.state.settled_bindings.insert(record.hand_binding) {
+            return Err(AppchainError::SettlementReplay);
         }
         // 消费 + 铸造（已通过纯函数校验，守恒有保证）
         for input in &record.inputs {
@@ -722,9 +735,14 @@ mod tests {
             Note::new(class, amount, self.pk(), nonce, None).unwrap()
         }
 
-        fn auth(&self, note: &Note, scope_tag: &[u8]) -> SpendAuth {
+        fn auth(&self, note: &Note, scope_tag: &[u8], effect: &[u8; 32]) -> SpendAuth {
             let nf = note.nullifier(&self.secret);
-            let d = spend_digest(&note.commitment_bytes(), &felt_to_bytes32(&nf), scope_tag);
+            let d = spend_digest(
+                &note.commitment_bytes(),
+                &felt_to_bytes32(&nf),
+                scope_tag,
+                effect,
+            );
             SpendAuth {
                 commitment: felt_to_bytes32(&note.commitment()),
                 nullifier: felt_to_bytes32(&nf),
@@ -778,9 +796,15 @@ mod tests {
             owner: alice.pk(),
             table_id: None,
         };
+        let effect = Operation::Transfer {
+            spends: vec![],
+            notes: vec![],
+            outputs: vec![out.clone(), out2.clone()],
+        }
+        .effect_digest();
         s.submit(
             Operation::Transfer {
-                spends: vec![alice.auth(&note, scope::TRANSFER)],
+                spends: vec![alice.auth(&note, scope::TRANSFER, &effect)],
                 notes: vec![note],
                 outputs: vec![out, out2],
             },
@@ -821,8 +845,14 @@ mod tests {
             owner: alice.pk(),
             table_id: None,
         };
+        let effect = Operation::Transfer {
+            spends: vec![],
+            notes: vec![],
+            outputs: vec![out.clone()],
+        }
+        .effect_digest();
         let op = Operation::Transfer {
-            spends: vec![alice.auth(&note, scope::TRANSFER)],
+            spends: vec![alice.auth(&note, scope::TRANSFER, &effect)],
             notes: vec![note],
             outputs: vec![out],
         };
@@ -940,11 +970,20 @@ mod tests {
             1_100,
         )
         .unwrap();
+        let buyin_effect = |table_id: u64, seat_owner: [u8; 33]| {
+            Operation::BuyIn {
+                table_id,
+                spends: vec![],
+                notes: vec![],
+                seat_owner,
+            }
+            .effect_digest()
+        };
         let err = s
             .submit(
                 Operation::BuyIn {
                     table_id: 1,
-                    spends: vec![a.auth(&note, scope::BUYIN)],
+                    spends: vec![a.auth(&note, scope::BUYIN, &buyin_effect(1, a.pk()))],
                     notes: vec![note],
                     seat_owner: a.pk(),
                 },
@@ -965,6 +1004,7 @@ mod tests {
                         .unwrap()
                         .note,
                     scope::BUYIN,
+                    &buyin_effect(1, a.pk()),
                 )],
                 notes: vec![s
                     .state()

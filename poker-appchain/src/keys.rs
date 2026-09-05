@@ -24,18 +24,28 @@ pub fn blake2s32(parts: &[&[u8]]) -> [u8; 32] {
     arr
 }
 
-/// 花费摘要：绑定（note 承诺, nullifier, 操作 scope）三要素（均为规范
-/// 32B 字节）。
+/// 花费摘要 v2：绑定（note 承诺, nullifier, 操作 scope, **效果摘要**）四要素
+/// （均为规范字节）。
 ///
-/// P 层签名覆盖规则（plan §M2）：每个消耗 note 的动作必须由 note owner
-/// 对该摘要签名；scope 区分 spend 用途，防跨操作重放。
+/// P 层签名覆盖规则（plan §M2 + 审计 S1 修复）：每个消耗 note 的动作必须由
+/// note owner 对该摘要签名。效果摘要（[`crate::ops::Operation::effect_digest`]
+/// ）绑定操作的**全部语义载荷**（收款人、金额、桌、幂等键、结算分配），
+/// 使 sequencer 无法拿签名授权改打给别人；scope 区分 spend 用途，防跨操作
+/// 重放。
 #[must_use]
 pub fn spend_digest(
     commitment: &[u8; 32],
     nullifier: &[u8; 32],
     scope: &[u8],
+    effect: &[u8; 32],
 ) -> [u8; 32] {
-    blake2s32(&[crate::felt::DOMAIN_SPEND_DIGEST, commitment, nullifier, scope])
+    blake2s32(&[
+        crate::felt::DOMAIN_SPEND_DIGEST,
+        commitment,
+        nullifier,
+        scope,
+        effect,
+    ])
 }
 
 /// secp256k1 owner 密钥（测试/客户端辅助）。
