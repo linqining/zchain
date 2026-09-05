@@ -1711,6 +1711,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "poker-appchain"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "borsh",
+ "ed25519-dalek",
+ "hex",
+ "proptest",
+ "rand 0.8.6",
+ "rayon",
+ "secp256k1",
+ "serde",
+ "serde_json",
+ "starknet-crypto 0.6.2",
+ "starknet-ff",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "poker_l1"
 version = "0.1.0"
 dependencies = [
@@ -1765,34 +1784,6 @@ dependencies = [
  "sha2",
  "sha3",
  "tracing",
-]
-
-[[package]]
-name = "poker_texas_air"
-version = "0.1.0"
-dependencies = [
- "blake2",
- "blstrs",
- "borsh",
- "ff",
- "group",
- "pairing",
- "poker_l1",
- "poker_protocol",
- "poker_texas_air",
- "poker_zkvm",
- "proptest",
- "rayon",
- "serde",
- "starknet-crypto 0.6.2",
- "starknet-ff",
- "stwo",
- "stwo-air-utils",
- "stwo-air-utils-derive",
- "stwo-constraint-framework",
- "thiserror 1.0.69",
- "tracing",
- "vm-common",
 ]
 
 [[package]]
