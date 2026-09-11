@@ -12,6 +12,9 @@ license = "BUSL-1.1"
 [dependencies]
 # ===== zchain 侧：结算证明 seam =====
 poker-appchain = { path = "../poker-appchain" }
+# ===== E2E 验收测试用：结算计划派生（derive_settlement_plan 纯函数，
+# poker-appchain 的 SettlementRecord.plan 同源类型）=====
+poker-settlement-core = { path = "../poker-settlement-core" }
 # ===== poker_texas_air 侧：手写约束 AIR 全量栈 =====
 poker_texas_air = { path = "../../poker_texas_air" }
 # ===== 编码与签名 =====

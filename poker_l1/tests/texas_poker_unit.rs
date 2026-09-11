@@ -1287,12 +1287,22 @@ fn test_side_pot_is_eligible_boundary() {
 }
 
 #[test]
-#[should_panic(expected = "shift left with overflow")]
 fn test_side_pot_is_eligible_seat_over_15_panics() {
-    // seat >= 16 时位运算会溢出（u16 最多 16 位）
-    // 在实际使用中 seat 由 MAX_PLAYERS 限制为 0-8，不会触发
+    // seat >= 16 时位运算会溢出（u16 最多 16 位）。
+    // `1u16 << 16` 仅在 debug 构建（overflow-checks 开启）下 panic；
+    // release 构建移位量被掩码，不 panic。原 `#[should_panic]` 形式
+    // 在 --release 下必然失败（与 reconstruction 修复无关的既有潜伏问题）。
+    // 在实际使用中 seat 由 MAX_PLAYERS 限制为 0-8，不会触发。
     let pot = SidePot::new(100, 0xFFFF);
-    let _ = pot.is_eligible(16);
+    if cfg!(debug_assertions) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            pot.is_eligible(16);
+        }));
+        assert!(result.is_err(), "debug 构建下 shift 溢出必须 panic");
+    } else {
+        // release：仅确认调用本身不 panic；返回值无契约意义。
+        let _ = pot.is_eligible(16);
+    }
 }
 
 #[test]

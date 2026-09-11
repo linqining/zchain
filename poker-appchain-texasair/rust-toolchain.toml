@@ -1,0 +1,7 @@
+# 与 poker_texas_air（edition 2024 + stwo，见其 rust-toolchain.toml）对齐的
+# 工具链 pin。本 crate 是独立 workspace（自带 lockfile），不会继承外部
+# 目录的 toolchain 选择，必须自带。
+[toolchain]
+channel = "nightly-2026-04-15"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

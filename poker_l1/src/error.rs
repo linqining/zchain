@@ -781,6 +781,14 @@ impl From<borsh::io::Error> for PokerL1Error {
     }
 }
 
+impl From<poker_settlement_core::SettlementError> for PokerL1Error {
+    /// 结算语义错误映射（单一事实源搬运胶水，plan-appchain §5.2-1）：
+    /// 消息前缀与搬运前 `Serialization(String)` 逐字一致。
+    fn from(e: poker_settlement_core::SettlementError) -> Self {
+        Self::Serialization(e.to_string())
+    }
+}
+
 impl From<serde_json::Error> for PokerL1Error {
     fn from(e: serde_json::Error) -> Self {
         Self::Serialization(format!("json: {e}"))

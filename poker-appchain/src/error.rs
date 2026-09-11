@@ -83,6 +83,24 @@ pub enum AppchainError {
     /// 参数越界（bps > 10000 等）。
     #[error("out of range: {0}")]
     OutOfRange(&'static str),
+    /// REAL 结算在当前引擎/策略下不可出证（P0-3 fail-closed）：host 签名
+    /// 引擎天然不能给 REAL 出证；REAL 模式 Disabled / 引擎不在允许集 /
+    /// StarkRequired 未配置 verifier key 时同样拒绝（见 `real_policy`）。
+    #[error("real settlement requires a STARK proof (real settlement policy forbids this proving path)")]
+    RealRequiresStarkProof,
+    /// attestation 公钥与固定 verifier key 不一致（StarkRequired 钉扎检查：
+    /// 生产注入固定 attestor 公钥，非钉扎签名者的 bundle 一律拒绝）。
+    #[error("attestor public key mismatch against pinned verifier key")]
+    VerifierKeyMismatch,
+    /// 提现未达 finality 门槛（§5.4 配套）：REAL note 的来源 op 未被证明
+    /// 水位覆盖，或其所属批次根尚未记录（托管打款侧拒绝）。
+    #[error("withdrawal not finalized: source op {op_index} not covered by a proven batch (proven watermark {watermark})")]
+    WithdrawalNotFinalized {
+        /// 被提现 note 的铸出来源 op 序号。
+        op_index: u64,
+        /// 当前 proven 水位。
+        watermark: u64,
+    },
 }
 
 /// 带 stable category 的 Result 别名。

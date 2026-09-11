@@ -654,6 +654,13 @@ pub trait RpcBackend: Send + Sync {
     fn get_block_by_hash(&self, hash: &Hash) -> PokerL1Result<Option<Block>>;
     /// 按 height 查询 block。
     fn get_block_by_height(&self, height: BlockHeight) -> PokerL1Result<Option<Block>>;
+    /// 当前 tip height（无区块时为 None）。
+    ///
+    /// 默认返回 None 以保持既有外部后端实现的源码兼容；生产节点后端
+    /// （NodeRpcBackend）必须覆写以支撑 `get_block_count` 查询。
+    fn get_tip_height(&self) -> PokerL1Result<Option<BlockHeight>> {
+        Ok(None)
+    }
     /// 查询对象。
     fn get_object(&self, id: &ObjectID) -> PokerL1Result<Option<Object>>;
     /// 按 hash 查询 tx（遍历 block 查找；archive node 才支持）。
@@ -768,6 +775,7 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
         // 解析 params 为 serde_json::Value，方法内部再反序列化为具体类型
         let result = match req.method.as_str() {
             "get_block" => self.handle_get_block(&req.params),
+            "get_block_count" => self.handle_get_block_count(),
             "get_object" => self.handle_get_object(&req.params),
             "get_tx" => self.handle_get_tx(&req.params),
             "submit_tx" => self.handle_submit_tx(&req.params),
@@ -820,6 +828,17 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
         }
         .map_err(RpcHandlerError::from_poker_error)?;
         serde_json::to_value(block).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `get_block_count`：返回当前 tip height（尚未出块时为 null）。
+    ///
+    /// 供节点运维脚本 / e2e 校验各节点链高度一致性（读类别，限流同 get_block）。
+    fn handle_get_block_count(&self) -> Result<serde_json::Value, RpcHandlerError> {
+        let height = self
+            .backend
+            .get_tip_height()
+            .map_err(RpcHandlerError::from_poker_error)?;
+        Ok(serde_json::json!({ "height": height }))
     }
 
     fn handle_get_object(
@@ -1217,6 +1236,10 @@ impl RpcBackend for MemoryBackend {
         }
     }
 
+    fn get_tip_height(&self) -> PokerL1Result<Option<BlockHeight>> {
+        self.block_store.get_tip_height()
+    }
+
     fn get_object(&self, id: &ObjectID) -> PokerL1Result<Option<Object>> {
         let result = self
             .object_db
@@ -1424,6 +1447,30 @@ mod tests {
         assert_eq!(block_resp.header.height, 10);
         // hash 一致
         assert_eq!(block_resp.block_hash(DEFAULT_CHAIN_ID), hash);
+    }
+
+    #[test]
+    fn get_block_count_reports_tip_height() {
+        let backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        let handler = RpcHandler::new(&backend);
+
+        // 无区块时返回 null。
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_block_count".to_string(),
+            params: serde_json::json!({}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle(&req);
+        assert!(resp.error.is_none(), "get_block_count 应成功");
+        assert_eq!(resp.result.unwrap(), serde_json::json!({"height": null}));
+
+        // 入库后返回 tip height。
+        let block = dummy_block(3);
+        backend.insert_block(block).unwrap();
+        let resp = handler.handle(&req);
+        assert!(resp.error.is_none(), "get_block_count 应成功");
+        assert_eq!(resp.result.unwrap(), serde_json::json!({"height": 3}));
     }
 
     #[test]

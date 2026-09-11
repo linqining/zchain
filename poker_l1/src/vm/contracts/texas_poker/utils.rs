@@ -96,17 +96,14 @@ pub fn new_leave_transcript() -> MerlinTranscript {
 /// decoding and auditing historical V2 artifacts.
 #[must_use]
 pub fn new_reconstruct_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(
-        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_PROOF_LABEL,
-    )
+    // V2 标签常量来自 vendored 模块（zgame 版 poker_protocol 无此常量）。
+    FiatShamirTranscript::new(super::reconstruction_v3::RECONSTRUCTION_PROOF_LABEL)
 }
 
 /// Create the Fiat--Shamir transcript used by reconstruction V3.
 #[must_use]
 pub fn new_reconstruct_v3_transcript() -> FiatShamirTranscript {
-    FiatShamirTranscript::new(
-        poker_protocol::zk_shuffle::reconstruction::RECONSTRUCTION_V3_PROOF_LABEL,
-    )
+    FiatShamirTranscript::new(super::reconstruction_v3::RECONSTRUCTION_V3_PROOF_LABEL)
 }
 
 /// Return the previous-round owner-readable ciphertexts authenticated by the

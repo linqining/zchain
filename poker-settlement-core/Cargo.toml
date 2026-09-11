@@ -1,0 +1,12 @@
+[package]
+name = "poker-settlement-core"
+version = "0.1.0"
+edition = "2024"
+description = "德州扑克结算语义唯一事实源：SettlementPlan / side-pot / run-it-twice / payout_root（plan-appchain §5.2-1）"
+license = "BUSL-1.1"
+
+[dependencies]
+# 结算核心保持零重依赖：blake2b 摘要 + 稳定 borsh 编码 + 错误派生。
+blake2 = { workspace = true }
+borsh = { workspace = true }
+thiserror = { workspace = true }

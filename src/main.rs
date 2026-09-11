@@ -55,8 +55,6 @@ use tracing_subscriber::EnvFilter;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-mod poker_demo;
-
 /// 程序版本。
 const VERSION: &str = "0.1.0";
 
@@ -80,6 +78,40 @@ const MAX_VERTEX_RANGE_RESPONSE: usize = 512;
 const MAX_BLOCK_RANGE_HEIGHTS: u64 = 512;
 /// Bound untrusted peer-exchange payloads before they become dial targets.
 const MAX_DISCOVERED_PEERS: usize = 256;
+
+/// 出站 peer 重连的初始退避间隔（缺口：初始 --peer 连接失败无重试）。
+const PEER_DIAL_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+
+/// 出站 peer 重连的最大退避间隔（指数退避封顶）。
+const PEER_DIAL_MAX_BACKOFF: Duration = Duration::from_secs(15);
+
+/// catch-up 轮询间隔（启动 / 落后期间向 peer 请求缺失区块的周期）。
+const CATCH_UP_INTERVAL: Duration = Duration::from_secs(2);
+
+/// 单次 catch-up 请求覆盖的 height 数（<= MAX_BLOCK_RANGE_HEIGHTS）。
+const CATCH_UP_CHUNK: u64 = 64;
+
+/// 单个 catch-up 周期内最多连续导入的批次数（防止长时间独占 block 锁）。
+const MAX_CATCH_UP_BATCHES_PER_TICK: u64 = 16;
+
+/// shutdown 感知 sleep 的分片粒度。
+const SLEEP_POLL_CHUNK: Duration = Duration::from_millis(250);
+
+/// 在 `duration` 内睡眠，但每 [`SLEEP_POLL_CHUNK`] 检查一次 shutdown 标志。
+///
+/// 返回是否完整睡满（false 表示 shutdown 触发提前返回）。
+fn sleep_interruptible(duration: Duration, shutdown: &AtomicBool) -> bool {
+    let mut remaining = duration;
+    while !shutdown.load(Ordering::SeqCst) {
+        if remaining.is_zero() {
+            return true;
+        }
+        let chunk = remaining.min(SLEEP_POLL_CHUNK);
+        std::thread::sleep(chunk);
+        remaining = remaining.saturating_sub(chunk);
+    }
+    false
+}
 
 /// Bidirectional stream used by the persistent P2P connection handler.
 ///
@@ -155,6 +187,10 @@ struct VoteCollector {
 }
 
 impl VoteCollector {
+    /// 投票上限：不同 (cert_signing_hash) 的过期投票在 tip 前进后永不 commit，
+    /// 无上限会随运行时间无界增长。
+    const MAX_VOTES: usize = 8192;
+
     fn new() -> Self {
         Self {
             votes: std::sync::Mutex::new(Vec::new()),
@@ -167,9 +203,15 @@ impl VoteCollector {
         let exists = votes.iter().any(|v| {
             v.signer_pubkey == vote.signer_pubkey && v.cert_signing_hash == vote.cert_signing_hash
         });
-        if !exists {
-            votes.push(vote);
+        if exists {
+            return;
         }
+        if votes.len() >= Self::MAX_VOTES {
+            // FIFO 淘汰最旧投票（活跃 cert 的投票会在下轮重新广播/重签）。
+            let drop_count = votes.len() / 4 + 1;
+            votes.drain(0..drop_count);
+        }
+        votes.push(vote);
     }
 
     /// 取出针对指定 cert_signing_hash 的全部已收集投票（清空该 key 对应的投票）。
@@ -206,15 +248,12 @@ fn main() {
     let subcommand = args[1].as_str();
     let rest = &args[2..];
 
-    // poker-demo 自带 tracing 双写初始化（stderr + 文件），跳过全局 init
-    if subcommand != "poker-demo" {
-        // 初始化 tracing：默认 INFO 级别，可通过 RUST_LOG 环境变量覆盖
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-            )
-            .init();
-    }
+    // 初始化 tracing：默认 INFO 级别，可通过 RUST_LOG 环境变量覆盖
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
     match subcommand {
         "node" => {
             if let Err(e) = run_node(rest) {
@@ -231,12 +270,6 @@ fn main() {
         "test-e2e" => {
             if let Err(e) = run_test_e2e(rest) {
                 error!("test-e2e 失败：{e}");
-                std::process::exit(1);
-            }
-        }
-        "poker-demo" => {
-            if let Err(e) = poker_demo::run(rest) {
-                error!("poker-demo 失败：{e}");
                 std::process::exit(1);
             }
         }
@@ -265,7 +298,6 @@ fn print_usage() {
     eprintln!("  node      启动节点（运行 JSON-RPC server）");
     eprintln!("  keygen    生成密钥对（secp256k1 / ed25519）");
     eprintln!("  test-e2e  端到端链路测试（构造交易→签名→提交→出块→查询）");
-    eprintln!("  poker-demo  运行 Texas Poker 完整牌局演示（in-process，绕过 RPC）");
     eprintln!("  version   打印版本号");
     eprintln!("  help      打印此帮助");
     eprintln!();
@@ -689,39 +721,47 @@ fn run_node(args: &[String]) -> Result<(), String> {
         .map_err(|e| format!("P2P set_nonblocking 失败：{e}"))?;
     info!("P2P server 监听 {p2p_listen}（length-prefixed BCS）");
 
-    // 主动连接 --peer 列表。每条连接都运行同一 P2P 读取循环，否则对端发回的
-    // Response*/Compact fallback 永远不会被本节点消费。
+    // 出站连接管理器：--peer 与 PEX 学到的地址都经它维持持久广播连接
+    //（断线指数退避重连；自身监听地址跳过，避免 PEX 自拨回环）。
+    let supervisor = Arc::new(ConnectionSupervisor::new(
+        Arc::clone(&transport),
+        p2p_listen.clone(),
+        Arc::clone(&shutdown_flag),
+    ));
+
+    // 主动连接 --peer 列表：每条地址交给 supervisor 的持久 dialer 线程
+    //（连接失败/断开按指数退避自动重连，修复原先只 warn 一次的缺口）。
     for peer_addr in &peers {
-        match transport.connect_peer(peer_addr) {
-            Ok(stream) => {
-                let node = Arc::clone(&node_arc);
-                let reader_transport = Arc::clone(&transport);
-                let dag = Arc::clone(&shared_dag);
-                let votes = Arc::clone(&vote_collector);
-                let reader_gossip = Arc::clone(&gossip);
-                if let Err(error) = std::thread::Builder::new()
-                    .name("p2p-outbound-reader".to_string())
-                    .spawn(move || {
-                        handle_p2p_connection(
-                            stream,
-                            node,
-                            reader_transport,
-                            dag,
-                            votes,
-                            reader_gossip,
-                        );
-                    })
-                {
-                    warn!("主动 peer 读取线程启动失败：{error}");
-                }
-            }
-            Err(error) => warn!("初始连接 peer {peer_addr} 失败：{error}（后续可重试）"),
+        let started = supervisor.ensure_dialing(
+            peer_addr.clone(),
+            &node_arc,
+            &shared_dag,
+            &vote_collector,
+            &gossip,
+        );
+        if !started {
+            info!("peer {peer_addr} 已有 dialer 或为本机地址，跳过重复拨号");
         }
     }
-    info!("P2P 已连接 {} 个 peer", transport.peer_count());
+    info!("P2P peer 地址 {} 个（dialer 已启动）", transport.peer_count());
     if let Err(error) = transport.broadcast_peer_exchange() {
         warn!("初始 PEX 广播失败：{error}");
     }
+
+    // === 启动 catch-up 线程（light 角色不存全量区块，跳过）===
+    let catch_up_thread = if role != NodeRole::Light {
+        let c_node = Arc::clone(&node_arc);
+        let c_transport = Arc::clone(&transport);
+        let c_shutdown = Arc::clone(&shutdown_flag);
+        Some(
+            std::thread::Builder::new()
+                .name("catch-up".to_string())
+                .spawn(move || run_catch_up_loop(c_node, c_transport, c_shutdown))
+                .map_err(|e| format!("catch-up 线程启动失败：{e}"))?,
+        )
+    } else {
+        None
+    };
 
     // === P2P accept loop 线程 ===
     let p2p_node = Arc::clone(&node_arc);
@@ -730,6 +770,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let p2p_dag = Arc::clone(&shared_dag);
     let p2p_votes = Arc::clone(&vote_collector);
     let p2p_gossip = Arc::clone(&gossip);
+    let p2p_supervisor = Arc::clone(&supervisor);
     let p2p_thread = std::thread::Builder::new()
         .name("p2p-accept".to_string())
         .spawn(move || {
@@ -746,8 +787,17 @@ fn run_node(args: &[String]) -> Result<(), String> {
                         let dag = Arc::clone(&p2p_dag);
                         let votes = Arc::clone(&p2p_votes);
                         let gossip = Arc::clone(&p2p_gossip);
+                        let supervisor = Arc::clone(&p2p_supervisor);
                         std::thread::spawn(move || {
-                            handle_p2p_connection(stream, node, transport, dag, votes, gossip);
+                            handle_p2p_connection(
+                                stream,
+                                node,
+                                transport,
+                                dag,
+                                votes,
+                                gossip,
+                                Some(&supervisor),
+                            );
                         });
                     }
                     Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -854,6 +904,9 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let _ = p2p_thread.join();
     if let Some(vt) = validator_thread {
         let _ = vt.join();
+    }
+    if let Some(ct) = catch_up_thread {
+        let _ = ct.join();
     }
 
     info!("节点已关闭");
@@ -1062,9 +1115,11 @@ impl TcpTransport {
     }
 
     /// 缺口 #5：合并 PEX 发现的新 peer 地址（去重）。
-    fn merge_discovered_peers(&self, new_peers: &[PeerInfo]) -> bool {
+    ///
+    /// 返回本次新加入的规范化地址列表（调用方据此升级为持久拨号连接）。
+    fn merge_discovered_peers(&self, new_peers: &[PeerInfo]) -> Vec<String> {
         let mut addrs = self.peer_addrs.lock().unwrap_or_else(|e| e.into_inner());
-        let mut changed = false;
+        let mut added = Vec::new();
         for peer in new_peers.iter().take(MAX_DISCOVERED_PEERS) {
             // PEX 是不可信网络输入。仅保留可拨号 socket 地址，避免随后同步请求
             // 把任意字符串变成连接目标；同时限制总条目数，防止地址表无界增长。
@@ -1087,10 +1142,10 @@ impl TcpTransport {
                 let mut peer = peer.clone();
                 peer.address = address.to_string();
                 addrs.push(peer);
-                changed = true;
+                added.push(address.to_string());
             }
         }
-        changed
+        added
     }
 
     /// Merge one light-client header and report whether it added new material.
@@ -1145,6 +1200,217 @@ impl TcpTransport {
             }
         }
     }
+}
+
+/// 出站连接管理器：为每个已知 peer 地址维持一条持久广播连接。
+///
+/// 覆盖三个组网鲁棒性缺口：
+/// 1. 配置的 `--peer` 地址在连接失败/断开后按指数退避（2s 起、15s 封顶）持续重拨，
+///    节点存活期间不放弃（原先只 warn 一次）。
+/// 2. PEX 学到的新地址自动升级为同样的持久拨号连接（原先只进临时请求地址表）。
+/// 3. 以地址为粒度去重（同一地址只保留一个 dialer 线程），不与已有连接重复拨号。
+struct ConnectionSupervisor {
+    transport: Arc<TcpTransport>,
+    /// 已有 dialer 线程的目标地址集合（去重）。
+    dialing: Mutex<BTreeSet<String>>,
+    /// 本节点 P2P 监听地址（跳过自拨，避免 PEX 回环）。
+    own_addr: String,
+    shutdown: Arc<AtomicBool>,
+}
+
+impl ConnectionSupervisor {
+    fn new(transport: Arc<TcpTransport>, own_addr: String, shutdown: Arc<AtomicBool>) -> Self {
+        Self {
+            transport,
+            dialing: Mutex::new(BTreeSet::new()),
+            own_addr,
+            shutdown,
+        }
+    }
+
+    /// 若 `addr` 尚无 dialer 线程，则启动一个持久拨号线程。返回是否新启动。
+    ///
+    /// `self` 必须位于 [`Arc`] 中：dialer 线程持有同一个 supervisor 引用，
+    /// 退出时从去重集合摘除自己的地址。自身监听地址与重复地址直接跳过；
+    /// dialer 总数受 [`MAX_DISCOVERED_PEERS`] 约束，防止恶意 PEX 把线程数
+    /// 变成无界资源。
+    fn ensure_dialing(
+        self: &Arc<Self>,
+        addr: String,
+        node: &Arc<Node>,
+        dag: &Arc<Mutex<Dag>>,
+        votes: &Arc<VoteCollector>,
+        gossip: &Arc<GossipManager>,
+    ) -> bool {
+        if addr == self.own_addr || addr.is_empty() {
+            return false;
+        }
+        {
+            let mut dialing = self.dialing.lock().unwrap_or_else(|e| e.into_inner());
+            if dialing.contains(&addr) || dialing.len() >= MAX_DISCOVERED_PEERS {
+                return false;
+            }
+            dialing.insert(addr.clone());
+        }
+
+        let supervisor = Arc::clone(self);
+        let node = Arc::clone(node);
+        let dag = Arc::clone(dag);
+        let votes = Arc::clone(votes);
+        let gossip = Arc::clone(gossip);
+        let spawned = std::thread::Builder::new()
+            .name("p2p-dialer".to_string())
+            .spawn({
+                let addr = addr.clone();
+                move || {
+                    run_outbound_dialer(
+                        &addr,
+                        Arc::clone(&supervisor.transport),
+                        node,
+                        dag,
+                        votes,
+                        gossip,
+                        &supervisor,
+                    );
+                    // 线程退出（shutdown）：释放去重槽位。
+                    supervisor
+                        .dialing
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(&addr);
+                }
+            });
+        if spawned.is_err() {
+            // 线程启动失败：释放去重槽位，下次仍可重试。
+            self.dialing
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&addr);
+            return false;
+        }
+        true
+    }
+}
+
+/// 单个出站地址的持久拨号循环（缺口：连接失败/断开无重连）。
+///
+/// - 连接成功后运行 [`handle_p2p_connection`] 读取循环（该函数同时把写端注册进
+///   广播列表），直到连接关闭。
+/// - 连接失败或关闭后按指数退避重拨（[`PEER_DIAL_INITIAL_BACKOFF`] 起、
+///   [`PEER_DIAL_MAX_BACKOFF`] 封顶）；一次连接存活超过初始退避时长才重置退避，
+///   避免对端立即拒绝对应的忙轮询。
+fn run_outbound_dialer(
+    addr: &str,
+    transport: Arc<TcpTransport>,
+    node: Arc<Node>,
+    dag: Arc<Mutex<Dag>>,
+    votes: Arc<VoteCollector>,
+    gossip: Arc<GossipManager>,
+    supervisor: &Arc<ConnectionSupervisor>,
+) {
+    let mut backoff = PEER_DIAL_INITIAL_BACKOFF;
+    while !supervisor.shutdown.load(Ordering::SeqCst) {
+        match transport.connect_peer(addr) {
+            Ok(stream) => {
+                let connected_at = std::time::Instant::now();
+                info!("outbound peer {addr} 已连接，进入读取循环");
+                // 阻塞直到连接关闭；handle_p2p_connection 内部已注册广播写端，
+                // 并可通过 supervisor 把 PEX 学到的新地址升级为持久拨号。
+                handle_p2p_connection(
+                    stream,
+                    Arc::clone(&node),
+                    Arc::clone(&transport),
+                    Arc::clone(&dag),
+                    Arc::clone(&votes),
+                    Arc::clone(&gossip),
+                    Some(supervisor),
+                );
+                if connected_at.elapsed() >= PEER_DIAL_INITIAL_BACKOFF {
+                    backoff = PEER_DIAL_INITIAL_BACKOFF;
+                }
+                info!("outbound peer {addr} 连接关闭，{backoff:?} 后重连");
+            }
+            Err(error) => {
+                warn!("outbound peer {addr} 连接失败：{error}（{backoff:?} 后重试）");
+            }
+        }
+        if !sleep_interruptible(backoff, &supervisor.shutdown) {
+            break;
+        }
+        backoff = backoff.saturating_mul(2).min(PEER_DIAL_MAX_BACKOFF);
+    }
+}
+
+/// 启动 / 落后 catch-up 循环（缺口：bin 从不调用 `request_blocks_by_range`，
+/// 重启或落后的节点无法追上网络高度）。
+///
+/// 周期性行为（仅当存在已注册 peer 地址时）：
+/// 1. 取本地 tip height，向任一 peer 请求 `(tip+1, tip+CHUNK]` 缺失区间；
+/// 2. 收到的每个 block 都走完整 `Node::put_block` 验证（结构 + prev_hash + cert
+///    验证 + 执行重放 + state_root 比对）后才入库 —— 不绕过任何共识校验；
+/// 3. peer 返回空区间说明其对端不高于本节点，结束本轮。
+///
+/// 注意 `put_block` 严格要求 tip+1 顺序导入，gossip 乱序到达的区块会被拒绝并
+/// 由下一轮 catch-up 按序补齐，因此该循环同时充当乱序区块的修复路径。
+fn run_catch_up_loop(node: Arc<Node>, transport: Arc<TcpTransport>, shutdown: Arc<AtomicBool>) {
+    info!("catch-up 循环已启动（间隔={}ms）", CATCH_UP_INTERVAL.as_millis());
+    while !shutdown.load(Ordering::SeqCst) {
+        if !sleep_interruptible(CATCH_UP_INTERVAL, &shutdown) {
+            break;
+        }
+        if transport.peer_count() == 0 {
+            continue;
+        }
+        for _ in 0..MAX_CATCH_UP_BATCHES_PER_TICK {
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+            let tip = node
+                .block_store()
+                .get_tip_height()
+                .ok()
+                .flatten()
+                .unwrap_or(0);
+            let start = tip.saturating_add(1);
+            let end = start.saturating_add(CATCH_UP_CHUNK.saturating_sub(1));
+            match transport.request_blocks_by_range(start, end) {
+                Ok(blocks) if blocks.is_empty() => break,
+                Ok(blocks) => {
+                    let mut imported = 0usize;
+                    for block in &blocks {
+                        match node.put_block(block) {
+                            Ok(_) => imported += 1,
+                            Err(error) => {
+                                // 典型原因：peer 返回区间稀疏导致缺父块。留给下一轮。
+                                debug!(
+                                    height = block.header.height,
+                                    "catch-up put_block 拒绝：{error}"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    if imported == 0 {
+                        break;
+                    }
+                    info!(
+                        "catch-up: 从网络导入 {imported} 个区块（本地 tip {tip} → {}）",
+                        node
+                            .block_store()
+                            .get_tip_height()
+                            .ok()
+                            .flatten()
+                            .unwrap_or(tip)
+                    );
+                }
+                Err(error) => {
+                    debug!("catch-up 请求失败（下轮重试）：{error}");
+                    break;
+                }
+            }
+        }
+    }
+    info!("catch-up 循环已停止");
 }
 
 /// Load canonical proving-service sidecars named `<64-hex-job-id>.proof`.
@@ -1444,6 +1710,10 @@ impl NetworkTransport for TcpTransport {
 ///
 /// 用于 `request_blocks_by_range` / `request_vertices_by_range` 等请求-响应协议。
 /// 创建独立连接以避免与持久 P2P 读取循环冲突。
+///
+/// 接收端在每条新入站连接上会立即广播 PeerExchange / LightClientHeader 公告，
+/// 临时请求连接因此可能先读到无请求公告：本函数持续读取直至真正的响应，
+/// 公告直接丢弃（无响应时由 socket read timeout / EOF 兜底报错）。
 fn send_request_and_recv(peer_addr: &str, req: &NetworkMessage) -> Result<NetworkMessage, String> {
     let mut stream =
         TcpStream::connect(peer_addr).map_err(|e| format!("连接 {peer_addr} 失败：{e}"))?;
@@ -1454,9 +1724,22 @@ fn send_request_and_recv(peer_addr: &str, req: &NetworkMessage) -> Result<Networ
         .set_write_timeout(Some(P2P_REQUEST_TIMEOUT))
         .map_err(|e| format!("set_write_timeout 失败：{e}"))?;
     send_p2p_message(&mut stream, req)?;
-    match recv_p2p_message(&mut stream)? {
-        Some(msg) => Ok(msg),
-        None => Err("连接在响应前关闭".to_string()),
+    loop {
+        match recv_p2p_message(&mut stream)? {
+            Some(msg) => {
+                if matches!(
+                    msg,
+                    NetworkMessage::PeerExchange(_) | NetworkMessage::LightClientHeader(_)
+                ) {
+                    // 接收端在每条新入站连接上立即广播 PEX / light header 公告；
+                    // 临时请求连接可能先读到公告。丢弃公告直至真正响应。
+                    debug!("send_request_and_recv: 跳过无请求公告（{peer_addr}）");
+                    continue;
+                }
+                return Ok(msg);
+            }
+            None => return Err("连接在响应前关闭".to_string()),
+        }
     }
 }
 
@@ -1622,6 +1905,7 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
     dag: Arc<Mutex<Dag>>,
     votes: Arc<VoteCollector>,
     gossip: Arc<GossipManager>,
+    supervisor: Option<&Arc<ConnectionSupervisor>>,
 ) {
     let peer_addr = stream.peer_socket_addr();
     // The read loop owns `stream`; every write path shares this cloned writer.
@@ -1670,7 +1954,22 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                     }
                     NetworkMessage::PeerExchange(peers) => {
                         // 缺口 #5：Peer Discovery / PEX —— 合并发现的 peer。
-                        if transport.merge_discovered_peers(&peers)
+                        let new_addresses = transport.merge_discovered_peers(&peers);
+                        // 缺口：PEX 学到的地址不再只用于临时请求 —— 自动升级为
+                        // 持久广播连接（supervisor 以地址去重，已拨号的跳过）。
+                        if let Some(supervisor) = supervisor {
+                            for addr in &new_addresses {
+                                supervisor.ensure_dialing(
+                                    addr.clone(),
+                                    &node,
+                                    &dag,
+                                    &votes,
+                                    &gossip,
+                                );
+                            }
+                        }
+                        // 仅在学到新地址时转发，避免 PEX 回声风暴（与原行为一致）。
+                        if !new_addresses.is_empty()
                             && let Err(error) = transport.broadcast_peer_exchange()
                         {
                             warn!("P2P 转发新增 PEX 结果失败：{error}");
@@ -2323,6 +2622,44 @@ fn build_block_from_commit_projection(
     Ok(Block::new(header, public_txs, gameturn_txs))
 }
 
+/// 把 `(last_folded_height, tip]` 区间内每个区块 cert 的 `vertex_hash_list` 并入
+/// committed 集合。
+///
+/// 区块无论来自本地 commit 还是从 peer gossip / catch-up 导入，tip 前进后都必须把
+/// cert 覆盖的 vertex 标记为已提交；否则 Bullshark 投影会把它们再次纳入 commit，
+/// 造成重复执行 / 各节点 cert hash 不一致（投票永远凑不齐 quorum）。
+/// 每次调用有界处理，避免长时间阻塞产出循环。
+fn fold_committed_vertices(
+    node: &Node,
+    committed_vertices: &mut BTreeSet<Hash>,
+    last_folded_height: &mut u64,
+) {
+    const MAX_FOLD_PER_CALL: u64 = 256;
+    let tip = match node.block_store().get_tip_height() {
+        Ok(Some(tip)) => tip,
+        _ => return,
+    };
+    let mut processed = 0u64;
+    while *last_folded_height < tip && processed < MAX_FOLD_PER_CALL {
+        let next = *last_folded_height + 1;
+        match node.block_store().get_by_height(next) {
+            Ok(block) => {
+                committed_vertices.extend(
+                    block
+                        .header
+                        .dag_commit_certificate
+                        .vertex_hash_list
+                        .iter()
+                        .copied(),
+                );
+                *last_folded_height = next;
+            }
+            Err(_) => break, // 稀缺缺口留给下一轮（put_block 保证 tip 连续，正常不发生）
+        }
+        processed += 1;
+    }
+}
+
 /// validator 产块循环（后台线程）。
 ///
 /// 单 validator 自闭环模式：
@@ -2378,7 +2715,18 @@ fn run_validator_loop(
     let mut last_vertex: Option<DagVertex> = None;
     // Keep committed frontier vertices in the live DAG for ancestry traversal, but filter them
     // out of later block projections so their transactions cannot execute twice.
+    //
+    // 启动时从链上重建（重启后必须知道历史 cert 覆盖了哪些 vertex），运行期间每个
+    // tick 增量折叠 tip 新增区块（含 gossip/catch-up 导入的 peer 区块）。
     let mut committed_vertices: BTreeSet<Hash> = BTreeSet::new();
+    let mut last_folded_height: u64 = 0;
+    loop {
+        let before = last_folded_height;
+        fold_committed_vertices(&node, &mut committed_vertices, &mut last_folded_height);
+        if last_folded_height == before {
+            break;
+        }
+    }
     // 缺口 #3 §3.6：epoch 推进周期（每 EPOCH_LENGTH 个 commit 推进一次 epoch）。
     const EPOCH_LENGTH: u64 = 10;
 
@@ -2389,6 +2737,9 @@ fn run_validator_loop(
     );
 
     while !shutdown.load(Ordering::SeqCst) {
+        // 折叠 tip 新增区块的 cert vertex（本地 commit / peer gossip / catch-up 导入
+        // 都汇入 block_store），保持 committed 投影过滤集合与链一致。
+        fold_committed_vertices(&node, &mut committed_vertices, &mut last_folded_height);
         // 混合模式核心：等待 tx 或超时
         // - 有 tx 时被 submit_tx 的 notify_one 立即唤醒 → 零延迟出 vertex
         // - 超时返回 false → 检查是否需要出空 vertex 推进 commit
@@ -2462,15 +2813,35 @@ fn run_validator_loop(
                     .map(|v| vec![v.vertex_hash()])
                     .unwrap_or_default()
             } else {
-                // 多 validator：round 同步到 dag.max_round()+1。
+                // 多 validator：parent 引用「本节点自身最新 vertex 所在轮」的全部不同
+                // author vertex（含自身），新 vertex 放在该轮 +1。
+                //
+                // 不能直接用 dag.max_round() 作为引用轮：
+                // (1) peer 在 round R 的 vertex 先于本节点自身的 R 轮 vertex 到达时，
+                //     max_round 已被推到 R，而 put_vertex 要求所有 parent 恰好位于
+                //     round-1 —— 本节点只能出 R+1，R 轮将永远凑不齐 required 个
+                //     distinct author，全网活性死锁。以自身 last_vertex.round 为基准
+                //     使落后节点能在 R 轮继续补充 author。
+                // (2) 本节点从未产出过 vertex（启动 / 新 epoch）时必须引导为
+                //     round 1 无 parent：validate_vertex 对 round=1 仅要求无 parent，
+                //     允许任意时刻加入。若以 max_r 为基准，先启动节点的 vertex 会把
+                //     后启动节点直接卡死在 max_r+1。
                 let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                match dag_guard.max_round() {
-                    None => Vec::new(), // Dag 空（创世）
-                    Some(max_r) => {
-                        // 引用 max_r 轮的所有不同 author vertex（含自身）。
+                match last_vertex.as_ref() {
+                    None => {
+                        // 引导（含 Dag 为空的创世情形）。
+                        round = 1;
+                        Vec::new()
+                    }
+                    Some(own) => {
+                        let max_r = dag_guard.max_round().unwrap_or(own.round);
+                        // 引用轮基准：自身 last vertex 所在轮；越界（DAG 被重置等
+                        // 异常）时回退 max_r。
+                        let ref_round = if own.round <= max_r { own.round } else { max_r };
+                        // 引用 ref_round 轮的所有不同 author vertex（含自身）。
                         let mut seen_authors: BTreeSet<Vec<u8>> = BTreeSet::new();
                         let mut parents: Vec<Hash> = Vec::new();
-                        for vh in dag_guard.round_vertices(max_r) {
+                        for vh in dag_guard.round_vertices(ref_round) {
                             if let Some(v) = dag_guard.get(vh) {
                                 if node.is_active_validator(&v.author_pubkey)
                                     && seen_authors.insert(v.author_pubkey.to_bytes())
@@ -2479,8 +2850,8 @@ fn run_validator_loop(
                                 }
                             }
                         }
-                        // 同步本地 round 到 max_r+1（使后续 vertex 的 round 与全局对齐）。
-                        round = max_r + 1;
+                        // 同步本地 round 到 ref_round+1（使后续 vertex 的 round 连续）。
+                        round = ref_round + 1;
                         parents
                     }
                 }
@@ -2656,13 +3027,32 @@ fn run_validator_loop(
                                 };
                             (leader_vertex, ordered_hashes, commit_vertices)
                         };
-                        let height = node
-                            .block_store()
-                            .get_tip_height()
-                            .ok()
-                            .flatten()
-                            .map(|h| h + 1)
-                            .unwrap_or(1);
+                        // commit 语句四元组永远从本地 tip 现取，而不是用本地缓存：
+                        // peer 提交的区块经 gossip 入库后，本节点 tip 已前进，但缓存
+                        // 变量只在「自己 commit」时更新 —— 不同步会导致各节点对不同的
+                        // (commit_round, prev_commit_hash, height) 签名，投票永不凑齐
+                        // quorum，首次 commit 后全网卡死。
+                        let (height, tip_commit_round, tip_prev_commit_hash, tip_prev_block_hash) = {
+                            match node
+                                .block_store()
+                                .get_tip_height()
+                                .ok()
+                                .flatten()
+                                .and_then(|h| node.block_store().get_by_height(h).ok())
+                            {
+                                Some(tip) => (
+                                    tip.header.height + 1,
+                                    tip.header
+                                        .dag_commit_certificate
+                                        .commit_round
+                                        .checked_add(1)
+                                        .unwrap_or(u64::MAX),
+                                    tip.header.dag_commit_certificate.cert_hash(chain_id),
+                                    tip.block_hash(chain_id),
+                                ),
+                                None => (1, 1, [0u8; 32], [0u8; 32]),
+                            }
+                        };
 
                         if vc <= 1 {
                             // 单 validator：自签出块。
@@ -2673,9 +3063,9 @@ fn run_validator_loop(
                                 &node,
                                 &secret_key,
                                 chain_id,
-                                commit_round,
-                                prev_commit_hash,
-                                prev_block_hash,
+                                tip_commit_round,
+                                tip_prev_commit_hash,
+                                tip_prev_block_hash,
                                 height,
                                 &transport,
                                 &dag,
@@ -2694,8 +3084,8 @@ fn run_validator_loop(
                                 &leader_vertex,
                                 chain_id,
                                 epoch,
-                                commit_round,
-                                prev_commit_hash,
+                                tip_commit_round,
+                                tip_prev_commit_hash,
                                 &node,
                                 height,
                             ) {
@@ -2708,7 +3098,7 @@ fn run_validator_loop(
                             let self_sig = secp256k1_sign_hash(&secret_key, &cert_signing_hash);
                             let self_vote = CommitVote {
                                 epoch,
-                                commit_round,
+                                commit_round: tip_commit_round,
                                 cert_signing_hash,
                                 signer_pubkey: author_pubkey.clone(),
                                 signature: self_sig,
@@ -2748,7 +3138,7 @@ fn run_validator_loop(
                             let quorum = required_quorum(vc);
                             if sig_pairs.len() < quorum {
                                 debug!(
-                                    commit_round,
+                                    commit_round = tip_commit_round,
                                     votes = sig_pairs.len(),
                                     quorum,
                                     "waiting for commit certificate quorum"
@@ -2764,9 +3154,9 @@ fn run_validator_loop(
                                 &node,
                                 chain_id,
                                 epoch,
-                                commit_round,
-                                prev_commit_hash,
-                                prev_block_hash,
+                                tip_commit_round,
+                                tip_prev_commit_hash,
+                                tip_prev_block_hash,
                                 height,
                                 &sig_pairs,
                                 vc,
@@ -2789,29 +3179,56 @@ fn run_validator_loop(
             }
 
             // 缺口 #3 §3.6：epoch 推进触发（每 EPOCH_LENGTH 个 commit 推进一次 epoch，
-            // 并用 VRF 派生新 epoch_randomness）。仅在发生 commit 时计数。
-            if commit_round > 1 && (commit_round - 1) % EPOCH_LENGTH == 0 && round > 1 {
-                let new_epoch = epoch + 1;
-                if let Err(error) = node.advance_epoch_with_vrf(new_epoch, vrf_secret.as_ref()) {
-                    error!("[validator-loop] epoch 状态持久化失败：{error}");
-                    break;
+            // 并用 VRF 派生新 epoch_randomness）。
+            //
+            // 触发基准必须取自 tip cert（epoch, commit_round），不能只用本地缓存：
+            // gossip / catch-up 导入的 peer 区块同样推进链高度 —— 只看「自己 commit」
+            // 会让主要导入区块的节点错过 epoch 边界，全网 epoch 分叉，vertex 互相被
+            // InvalidVertexEpoch 拒绝。
+            let tip_state = node
+                .block_store()
+                .get_tip_height()
+                .ok()
+                .flatten()
+                .and_then(|h| node.block_store().get_by_height(h).ok())
+                .map(|tip_block| {
+                    let cert = &tip_block.header.dag_commit_certificate;
+                    (cert.epoch, cert.commit_round)
+                });
+            let crossed_boundary = matches!(tip_state, Some((cert_epoch, cert_commit_round))
+                if cert_epoch == epoch
+                    && cert_commit_round > 1
+                    && (cert_commit_round - 1) % EPOCH_LENGTH == 0);
+            let chain_epoch_ahead = matches!(tip_state, Some((cert_epoch, _)) if cert_epoch > epoch);
+            if crossed_boundary || chain_epoch_ahead {
+                let target_epoch = if chain_epoch_ahead {
+                    tip_state.map(|(cert_epoch, _)| cert_epoch).unwrap_or(epoch)
+                } else {
+                    epoch + 1
+                };
+                'epoch_advance: while epoch < target_epoch {
+                    let new_epoch = epoch + 1;
+                    if let Err(error) = node.advance_epoch_with_vrf(new_epoch, vrf_secret.as_ref()) {
+                        error!("[validator-loop] epoch 状态持久化失败：{error}");
+                        break 'epoch_advance;
+                    }
+                    epoch = new_epoch;
+                    // DAG parents are epoch-local. Start the new epoch from a parentless round 1
+                    // and discard the old-epoch live DAG so the next vertex cannot accidentally
+                    // reference a parent which admission must reject. Certificate commit rounds are
+                    // chain-global and must remain continuous across the epoch boundary: resetting
+                    // them here would make the next locally produced block fail Node's prev+1 check.
+                    round = 1;
+                    last_vertex = None;
+                    committed_vertices.clear();
+                    *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
+                    info!(
+                        "[validator-loop] epoch 推进至 {}（DAG round 已重置，tip commit_round={}，VRF={}）",
+                        epoch,
+                        tip_state.map(|(_, r)| r).unwrap_or(0),
+                        vrf_secret.is_some()
+                    );
                 }
-                epoch = new_epoch;
-                // DAG parents are epoch-local. Start the new epoch from a parentless round 1
-                // and discard the old-epoch live DAG so the next vertex cannot accidentally
-                // reference a parent which admission must reject. Certificate commit rounds are
-                // chain-global and must remain continuous across the epoch boundary: resetting
-                // them here would make the next locally produced block fail Node's prev+1 check.
-                round = 1;
-                last_vertex = None;
-                committed_vertices.clear();
-                *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
-                info!(
-                    "[validator-loop] epoch 推进至 {}（DAG round 已重置，commit_round={}，VRF={}）",
-                    epoch,
-                    commit_round,
-                    vrf_secret.is_some()
-                );
             } else {
                 last_vertex = Some(vertex);
                 round += 1;
@@ -3192,11 +3609,93 @@ mod tests {
             validator_pubkey: None,
         };
 
-        assert!(transport.merge_discovered_peers(&[valid.clone(), invalid]));
-        assert!(!transport.merge_discovered_peers(&[valid]));
+        assert_eq!(
+            transport.merge_discovered_peers(&[valid.clone(), invalid]),
+            vec!["127.0.0.1:9001".to_string()],
+            "合法地址应被加入并返回为新增地址"
+        );
+        assert!(
+            transport.merge_discovered_peers(&[valid]).is_empty(),
+            "重复地址不应再次返回"
+        );
         let peers = transport.discover_peers().unwrap();
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].address, "127.0.0.1:9001");
+    }
+
+    #[test]
+    fn sleep_interruptible_returns_early_on_shutdown() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let killer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let started = std::time::Instant::now();
+        assert!(!sleep_interruptible(Duration::from_secs(5), &shutdown));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        killer.join().unwrap();
+
+        // shutdown 未触发的全新标志下应睡满并返回 true。
+        let fresh = Arc::new(AtomicBool::new(false));
+        let started = std::time::Instant::now();
+        assert!(sleep_interruptible(Duration::from_millis(100), &fresh));
+        assert!(started.elapsed() >= Duration::from_millis(100));
+    }
+
+    #[test]
+    fn connection_supervisor_dedups_and_skips_own_address() {
+        let transport = Arc::new(TcpTransport::new());
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let supervisor = Arc::new(ConnectionSupervisor::new(
+            Arc::clone(&transport),
+            "127.0.0.1:9999".to_string(),
+            Arc::clone(&shutdown),
+        ));
+        let node = Arc::new(Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap());
+        let dag = Arc::new(Mutex::new(Dag::new()));
+        let votes = Arc::new(VoteCollector::new());
+        let gossip = Arc::new(GossipManager::new());
+
+        // 自身监听地址永不拨号。
+        assert!(!supervisor.ensure_dialing(
+            "127.0.0.1:9999".to_string(),
+            &node,
+            &dag,
+            &votes,
+            &gossip
+        ));
+        // 同一地址只启动一个 dialer。
+        assert!(supervisor.ensure_dialing(
+            "127.0.0.1:19001".to_string(),
+            &node,
+            &dag,
+            &votes,
+            &gossip
+        ));
+        assert!(!supervisor.ensure_dialing(
+            "127.0.0.1:19001".to_string(),
+            &node,
+            &dag,
+            &votes,
+            &gossip
+        ));
+        assert_eq!(supervisor.dialing.lock().unwrap_or_else(|e| e.into_inner()).len(), 1);
+        // shutdown 后 dialer 退出并释放去重槽位。
+        shutdown.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !supervisor
+            .dialing
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_empty()
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "dialer 线程应在 shutdown 后释放去重槽位"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -3331,6 +3830,7 @@ mod tests {
                     dag,
                     Arc::new(VoteCollector::new()),
                     gossip,
+                    None,
                 );
             })
         };
@@ -3347,6 +3847,7 @@ mod tests {
                     dag,
                     Arc::new(VoteCollector::new()),
                     gossip,
+                    None,
                 );
             })
         };

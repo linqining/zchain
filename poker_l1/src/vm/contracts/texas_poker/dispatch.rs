@@ -31,8 +31,9 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::ShuffleProof;
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
-use poker_protocol::zk_shuffle::reconstruction::{ReconstructProofV3, ReconstructionV3Statement};
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+// V3 reconstruction 家族为 vendored 模块（zgame 版 poker_protocol 从未提供 V3 API）。
+use super::reconstruction_v3::{ReconstructProofV3, ReconstructionV3Statement};
 
 use super::constants::{FOLD_REASON_FORCE_ADMIN, KICK_REASON_ADMIN};
 use super::events::TexasPokerEvent;
@@ -3272,18 +3273,19 @@ mod tests {
             sum_c2_schnorr_proof: schnorr,
             nonce: super::super::utils::scalar_zero(),
         };
-        ShuffleProof::LegacyV1(legacy)
+        // zgame 版 poker_protocol 的 ShuffleProof 是 `ZKShuffleProof<DefaultCurve>`
+        // 结构体（无 poker_texas_air 的 VersionedShuffleProof::LegacyV1 枚举包装），
+        // 直接返回该结构体即可；skip 模式下字段不参与验证。
+        legacy
     }
 
     fn empty_reconstruct_v3() -> (
         ReconstructionV3Statement<DefaultCurve>,
         ReconstructProofV3<DefaultCurve>,
     ) {
-        use poker_protocol::zk_shuffle::bayer_groth::{
-            BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument,
-        };
-        use poker_protocol::zk_shuffle::reconstruction::{
-            CrossKeyNegationProof, SlotContributionOrProof,
+        use super::super::reconstruction_v3::{
+            BayerGrothShuffleProof, CrossKeyNegationProof, MultiExponentiationArgument,
+            ProductArgument, SlotContributionOrProof,
         };
 
         let zero = super::super::utils::scalar_zero();

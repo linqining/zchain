@@ -167,6 +167,11 @@ impl Note {
 }
 
 /// 输出 note 规格（铸造侧，无 owner 公钥前置于结算输出）。
+///
+/// ABI v1.2（plan-appchain §5.2-7，P0-7）：追加 `pot_index`/`runout_index`
+/// 两个 borsh 尾缀字段，使赔付 note 精确引用结算计划的
+/// （pot 层， runout）投影。非结算输出（转账/买入/入金）恒填 0/0；
+/// 校验器只对 `SettlementRecord.payouts` 检查其与 plan 投影一一对应。
 #[derive(
     Debug, Clone, PartialEq, Eq, borsh::BorshSerialize, borsh::BorshDeserialize,
 )]
@@ -179,6 +184,10 @@ pub struct NoteSpec {
     pub owner: [u8; 33],
     /// 桌绑定。
     pub table_id: Option<u64>,
+    /// 结算：本赔付所属的 pot 分层索引（0 = 主池；非结算输出恒 0）。
+    pub pot_index: u8,
+    /// 结算：本赔付所属的 runout 索引（单板恒 0；非结算输出恒 0）。
+    pub runout_index: u8,
 }
 
 impl NoteSpec {

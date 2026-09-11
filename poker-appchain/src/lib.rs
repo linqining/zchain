@@ -12,8 +12,10 @@
 //!   fail-closed 校验，AIR witness 形状就绪）
 //! - **M3 Sequencer**：[`ops`]（封闭操作集）、[`soft_confirm`]（软确认链）、
 //!   [`wal`]（写前日志）、[`sequencer`]（查重/准入/限流/应用）
-//! - **M4 证明管道**：[`pipeline`]（worker 池/批次聚合/积压降级）
-//! - **M7 出入金**：[`vault`]（托管对账）
+//! - **M4 证明管道**：[`pipeline`](pipeline)（worker 池/批次聚合/积压降级）、
+//!   [`real_policy`](real_policy)（P0-3 REAL 出证策略：fail-closed 模式 +
+//!   verifier key 钉扎）
+//! - **M7 出入金**：[`vault`](vault)（托管对账 + §5.4 提现 finality 门）
 //! - **M8 安全**：[`watcher`]（等价性/分叉检测）；攻击回归在 `tests/`
 //! - **M9 可观测**：[`metrics`]（计数器/直方图 + 文本导出 + 告警规则）
 //! - **M6 客户端**：[`client_view`]（余额聚合视图最小实现）
@@ -37,6 +39,7 @@ pub mod note;
 pub mod nullifier_set;
 pub mod ops;
 pub mod pipeline;
+pub mod real_policy;
 pub mod sequencer;
 pub mod settlement;
 pub mod soft_confirm;

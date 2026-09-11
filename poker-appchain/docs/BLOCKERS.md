@@ -2,8 +2,9 @@
 
 > 纪律来源：用户指令"遇到阻塞项不要停，做记录，继续下一项"。
 > 格式沿用 `PERFORMANCE_FOLLOWUPS.md` 的处置风格：每项标注状态与
-> 解除条件。更新时间：2026-09-05（v1.1 修订：S1/C1/C3 修复落地、
-> texasair 适配器 crate 接入缝成立、poker_vm 路线搁置转手写约束 AIR）。
+> 解除条件。更新时间：2026-09-12（v1.2.1 修订：P0-3 REAL 出证策略三层门
+> + attestation v2.1 + §5.4 提现 finality 门槛落地；B2 收尾、B1 状态更新；
+> 新增遗留项 rake 口径）。
 
 ## 已解决（第二轮：审计修复 + 接入缝，2026-09-05）
 
@@ -45,27 +46,75 @@
   proven 水位机制失效。修复：apply 成功路径末尾 `seq += 1`，
   帧序号捕获于 apply 前。
 
+## 已解决（第三轮：P0-3 REAL 出证策略 + §5.4 finality，2026-09-12）
+
+- **[已落地][P0-3] REAL 结算必须使用真实证明**：`real_policy` 模块
+  （`RealSettlementPolicy`/`RealMode`，默认 = `StarkRequired` + 未钉 key →
+  REAL 全拒，fail-closed）+ 三层门：① 引擎层 `ValidationEngine::prove` 对
+  REAL 一律 `RealRequiresStarkProof`；② 管道提交层准入（模式/引擎能力
+  `texas-air-*`/钉扎/`hand_proof`）；③ 批次层允许集 + attestor 钉扎复查
+  （`VerifierKeyMismatch`），违反则 op 不标记已证明、水位不推进并计
+  `real_settlement_rejected_total`。负例矩阵全过（REAL×ValidationEngine、
+  REAL×texas-air×Disabled、REAL×钉扎不匹配、REAL 缺 hand_proof、PLAY 对照
+  照常）。
+- **[已落地][P0-3] attestation v2.1**：texas-air 适配器消息追加
+  `pre_state_root` 与 `plan_digest`（域不变、payload 128B → 192B）——REAL
+  结算 attestation 覆盖四要素（verifier key=签名者、引擎版本、pre/post
+  状态根、已验证计划摘要）。正例仍走真实 stwo（`prove_canonical_tagged_batch`）。
+- **[已落地][§5.4] vault 提现 finality 门槛**：`CustodyLedger`
+  （`withdrawal_requires_finality` 默认 true）对 REAL note 提现要求来源 op
+  已证明 **且** 批次根已记录（`LedgerState.note_origins` provenance +
+  sequencer `record_batch_root`/`mark_proven_through_with_root` 证据；未满足
+  → `WithdrawalNotFinalized` + `withdrawal_finality_rejected_total`）。
+  PLAY 豁免；开关关闭为显式 opt-out（仅限非生产，文档标注）。
+- **[已解决][B2 收尾] pot 与牌局状态链绑定**：v1.2 的
+  `post_state_image_bytes` 镜像 pot 逐字节绑定（偏移 74）使"合谋低报 pot"
+  从不可检变为**密码学不可行**（状态镜像被 Fiat--Shamir 范围绑定 + 端点
+  投影约束 + STARK 全约束复核）。B2 关闭。
+  ⚠️ 已知语义缺口（**如实记录，不粉饰**）：rake 口径未统一——
+  `poker_l1` canonical rake 只对 contested 层计费（contested-only），而
+  appchain 费率关系 `rake.total == policy.rake_of(plan.gross_pot)` 按
+  **全额 gross pot** 计费。含 uncalled 返还层的计划（plan.rake <
+  policy.rake_of(gross_pot)）会被 fail-closed 拒绝（ABI.md §4 第 8 条注记）；
+  归档含 rake opening 的"sole-survivor 有抽水"终局同样拒绝。此类手暂不能
+  走 appchain 结算，需后续在 policy 或 plan 侧统一口径（见"当前阻塞项"
+  B9）。
+
 ## 当前阻塞项（不阻塞其余模块推进）
 
-### B1. stwo 真引擎：适配器已落地，剩余为"真实归档端到端"
-- 状态：**缝已成立**。`poker-appchain-texasair` 的 `TexasAirEngine` 实现
-  `SettlementProver`：验证 poker_texas_air 手写约束 AIR 的批次归档
-  （`verify_tagged_texas_proof`，poker_vm 路线搁置后的正式证明路线），
-  绑定终态承诺后出 attestation。管道机制（队列/并行/批次/降级）不变，
-  换引擎即换 `Arc<dyn SettlementProver>`。
-- 剩余：① 用 proving-tool 产出的**真实归档**跑一次正例端到端
-  （当前 5 项测试均为负例/密码学路径）；② 性能数字（M4-ACC-1/2）。
-- 解除条件：真实归档正例测试 + 基准落档 `plan-appchain-perf.md`。
-- 期间姿态：v1 = host attestation（`ValidationEngine` v2 签名形态）。
+### B9（新增遗留）. rake 口径统一：contested-only vs 全额 gross pot
+- 状态：**已知语义缺口，未修**。appchain 结算关系要求
+  `plan.rake == policy.rake_of(plan.gross_pot)`（全额口径），而 poker_l1
+  canonical 语义是 contested-only 计费。两条口径在含 uncalled 返还层/
+  sole-survivor 抽水的手上一致性不成立，当前行为是 fail-closed 拒绝
+  （不产生错误结算，但该类手无法结算）。
+- 解除条件：在 policy 侧引入 contested-only 费率档，或 plan 侧将
+  uncalled 返还显式建模为非计费层；两侧口径一致后补正负例回归。
+- 期间姿态：维持 fail-closed 拒绝（宁拒不错）。
 
-### B2. pot 与牌局状态链的绑定（v1.1 后剩余尾巴）
-- 状态：v1.1 三重收敛——① pot 在 `settle_effect` 签名内（篡改需重签，
-  acc5b 验证合谋重签仍被费率关系拒绝）；② `hand_proof.post_state_commitment`
-  把结算绑到**已验证的手牌终态承诺**（TexasAirEngine 强制，跨手混装
-  不可行）；③ 费率关系 `rake.total == rate_of(pot)` 独立强制。
-- 剩余尾巴：终态承诺 → pot 数值的逐字节绑定（状态镜像哈希复算或
-  poker_texas_air 公开范围暴露 pot）。届时"合谋低报 pot"从
-  不可检变为密码学不可行。
+### B1. stwo 真引擎：已接线并有真实 stwo 正例，剩余为性能数字
+- 状态：**已接线（2026-09-12 更新）**。`poker-appchain-texasair` 的
+  `TexasAirEngine` 实现 `SettlementProver`：验证 poker_texas_air 手写约束
+  AIR 的批次归档（`verify_canonical_tagged_proof`，poker_vm 路线搁置后的
+  正式证明路线），绑定终态承诺/pre-post 状态根/计划摘要后出 attestation
+  v2.1；REAL 出证受 `real_policy` 三层门约束（见上）。管道机制（队列/并行/
+  批次/降级）不变，换引擎即换 `Arc<dyn SettlementProver>`。
+- 剩余：**性能数字**（M4-ACC-1/2）——适配器测试已含真实 stwo 正例端到端
+  （`canonical_stark_proof_end_to_end_admits_and_deep_tamper_rejected` 与
+  `real_settlement_stark_required_end_to_end_with_real_stwo`，B1 ①已解除），
+  但更长批次/逐街切分的吞吐与延迟基准未落档。
+- 解除条件：基准落档 `plan-appchain-perf.md`。
+- 期间姿态：PLAY = host attestation（`ValidationEngine` v2 签名形态）；
+  REAL = 必须 texas-air STARK 引擎（P0-3，默认 StarkRequired）。
+
+### B2. pot 与牌局状态链的绑定（**已关闭，2026-09-12**）
+- 状态：**关闭**。v1.2 三重收敛 + 镜像 pot 逐字节绑定全部落地——① pot 在
+  `settle_effect` 签名内（篡改需重签）；② `hand_proof.post_state_commitment`
+  把结算绑到已验证的手牌终态承诺（跨手混装不可行）；③ 费率关系
+  `rake.total == rate_of(pot)` 独立强制；④（收尾）`post_state_image_bytes`
+  中 `pot` 字段（偏移 74，8B LE）与 `record.pot` 逐字节绑定——状态镜像被
+  Fiat--Shamir 范围绑定 + STARK 端点投影约束，"合谋低报 pot"已不可行。
+- 遗留（非绑定问题）：rake 口径缺口见 B9。
 
 ### B3. 逐街流式证明实验（M0-ACC-1）未做
 - 状态：需要 hand-bench 与 `texas_canonical_air` 的 street 级切分接线，

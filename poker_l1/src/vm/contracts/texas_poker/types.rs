@@ -945,40 +945,9 @@ impl RevealAssignment {
     }
 }
 
-/// Street at which a two-runout schedule started.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
-pub enum RitStartStreet {
-    /// No public cards were exposed; both boards receive five independent cards.
-    Preflop,
-    /// The flop is shared; both boards receive an independent turn and river.
-    Flop,
-    /// Flop and turn are shared; both boards receive an independent river.
-    Turn,
-}
-
-impl RitStartStreet {
-    /// Number of first-board cards shared by both runouts.
-    #[must_use]
-    pub const fn shared_board_len(self) -> u8 {
-        match self {
-            Self::Preflop => 0,
-            Self::Flop => 3,
-            Self::Turn => 4,
-        }
-    }
-
-    /// Recover the only canonical start street for a shared prefix length.
-    pub fn from_shared_board_len(shared_board_len: u8) -> PokerL1Result<Self> {
-        match shared_board_len {
-            0 => Ok(Self::Preflop),
-            3 => Ok(Self::Flop),
-            4 => Ok(Self::Turn),
-            value => Err(PokerL1Error::Serialization(format!(
-                "Texas RIT shared prefix {value} has no canonical start street"
-            ))),
-        }
-    }
-}
+// 单一事实源（plan-appchain §5.2-1，P0-1）：RitStartStreet 定义已搬运到
+// poker-settlement-core，此处再导出保持 `types::RitStartStreet` 路径不变。
+pub use poker_settlement_core::RitStartStreet;
 
 /// Per-hand Run It Twice state.
 ///

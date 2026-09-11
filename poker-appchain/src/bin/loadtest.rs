@@ -197,6 +197,42 @@ fn main() {
             assert_eq!(seats.len(), robots.len(), "one seat note per robot");
             let mut binding32 = [0u8; 32];
             binding32[..8].copy_from_slice(&binding_be);
+            // v1.2：等额买入零费计划（单层 contested pot，全员平分；P0-2）
+            let plan = {
+                use poker_settlement_core::{
+                    RunoutPotPlan, SettlementPlan, SettlementPotPlan,
+                    SettlementRunoutSchedule, SETTLEMENT_PLAN_VERSION, SETTLEMENT_SEATS,
+                };
+                let gross = 1_000u64 * seats.len() as u64;
+                let mask = if seats.len() >= 16 { u16::MAX } else { (1u16 << seats.len()) - 1 };
+                // awards 只对实际座位非零（Σawards 必须 == runout.amount ==
+                // gross，否则 plan.validate fail-closed 拒绝）
+                let mut awards = [0u64; SETTLEMENT_SEATS];
+                for a in awards.iter_mut().take(seats.len()) {
+                    *a = 1_000;
+                }
+                let mut runout = RunoutPotPlan::inactive();
+                runout.amount = gross;
+                runout.winner_mask = mask;
+                runout.awards = awards;
+                SettlementPlan {
+                    version: SETTLEMENT_PLAN_VERSION,
+                    schedule: SettlementRunoutSchedule::Single,
+                    gross_pot: gross,
+                    rake: 0,
+                    total_awards: gross,
+                    winner_mask: mask,
+                    awards,
+                    pots: vec![SettlementPotPlan {
+                        pot_index: 0,
+                        gross_amount: gross,
+                        rake: 0,
+                        net_amount: gross,
+                        eligible_mask: mask,
+                        runouts: [runout, RunoutPotPlan::inactive()],
+                    }],
+                }
+            };
             // 4. 结算（零费：全 seat 消费 → 等额赔付）。两段构造：
             // 先成型记录，再按结算效果摘要逐个补签名（S1）
             let mut record = SettlementRecord {
@@ -222,6 +258,8 @@ fn main() {
                         amount: n.amount,
                         owner: n.owner,
                         table_id: None,
+                        pot_index: 0,
+                        runout_index: 0,
                     })
                     .collect(),
                 rake: RakeSplitRecord {
@@ -229,6 +267,7 @@ fn main() {
                     treasury_out: None,
                     operator_out: None,
                 },
+                plan,
                 hand_proof: None,
             };
             for (i, n) in seats.iter().enumerate() {
@@ -266,6 +305,19 @@ fn main() {
         }
         std::thread::sleep(Duration::from_millis(10));
     }
+
+    // P0-5 接线（与生产装配点同构）：批次构建 + 验证通过回调 → sequencer
+    // 证明水位真实推进（不再直接跳水位）。注：本压测为内存模式（无 WAL），
+    // 不受 fsync 开关影响；若挂 WAL 复测可用 WalWriter::with_fsync(false)。
+    let seq = Arc::new(std::sync::Mutex::new(seq));
+    pipeline.set_on_batch_proven({
+        let seq = Arc::clone(&seq);
+        Arc::new(move |through| seq.lock().unwrap().mark_proven_through(through))
+    });
+    let mut batches_built = 0u64;
+    while pipeline.try_build_batch().unwrap().is_some() {
+        batches_built += 1;
+    }
     let total_elapsed = t0.elapsed();
 
     lat_us.sort_unstable();
@@ -281,9 +333,11 @@ fn main() {
         "players": players,
         "settlements": settle_count,
         "proof_completed": pipeline.completed_count(),
+        "batches_built": batches_built,
+        "proven_watermark": seq.lock().unwrap().proven_watermark(),
         "buyin_soft_confirm_us": { "p50": pct(0.5), "p99": pct(0.99), "max": lat_us.last().copied().unwrap_or(0) },
         "wall_clock_s": total_elapsed.as_secs_f64(),
-        "ops_total": seq.state().seq,
+        "ops_total": seq.lock().unwrap().state().seq,
         "alert_count": evaluate_alerts(&pipeline.health()).len(),
         "engine": poker_appchain::pipeline::SettlementProver::name(&ValidationEngine::default()),
     });

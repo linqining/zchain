@@ -17,6 +17,8 @@ path = "src/lib.rs"
 [dependencies]
 poker_protocol = { workspace = true }
 vm-common = { path = "../vm-common" }
+# 结算语义唯一事实源（plan-appchain §5.2-1）：settlement/side_pot/RIT 搬运目标 crate。
+poker-settlement-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bcs = { workspace = true }
@@ -28,6 +30,9 @@ blake2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
+# Vendored reconstruction V3 proof family（texas_poker/reconstruction_v3）的
+# RNG trait 依赖，与 zgame poker_protocol 同版本（0.6.x），保证 trait 同一。
+rand_core = { version = "0.6.4", features = ["getrandom"] }
 secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 subtle = { workspace = true }

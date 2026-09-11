@@ -2397,6 +2397,10 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
         self.node.get_block_by_height(height)
     }
 
+    fn get_tip_height(&self) -> PokerL1Result<Option<BlockHeight>> {
+        self.node.block_store().get_tip_height()
+    }
+
     fn get_object(&self, id: &ObjectID) -> PokerL1Result<Option<Object>> {
         self.node.get_object(id)
     }

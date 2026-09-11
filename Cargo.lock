@@ -854,7 +854,7 @@ dependencies = [
  "starknet-ff",
  "starknet-types-core",
  "stwo",
- "stwo-cairo-common 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stwo-cairo-common",
  "stwo-cairo-serialize",
  "stwo-constraint-framework",
  "thiserror 2.0.19",
@@ -2521,6 +2521,7 @@ dependencies = [
  "borsh",
  "ed25519-dalek",
  "hex",
+ "poker-settlement-core",
  "proptest",
  "rand 0.8.6",
  "rayon",
@@ -2529,6 +2530,15 @@ dependencies = [
  "serde_json",
  "starknet-crypto 0.6.2",
  "starknet-ff",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "poker-settlement-core"
+version = "0.1.0"
+dependencies = [
+ "blake2",
+ "borsh",
  "thiserror 1.0.69",
 ]
 
@@ -2548,9 +2558,11 @@ dependencies = [
  "hex",
  "openssl",
  "pairing",
+ "poker-settlement-core",
  "poker_protocol",
  "proptest",
  "rand 0.8.6",
+ "rand_core 0.6.4",
  "rayon",
  "rocksdb",
  "secp256k1",
@@ -2625,7 +2637,7 @@ dependencies = [
  "stwo-air-utils",
  "stwo-air-utils-derive",
  "stwo-cairo-adapter",
- "stwo-cairo-common 1.2.2",
+ "stwo-cairo-common",
  "stwo-cairo-prover",
  "stwo-constraint-framework",
  "subtle",
@@ -3637,7 +3649,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stwo",
- "stwo-cairo-common 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stwo-cairo-common",
  "thiserror 2.0.19",
  "tracing",
 ]
@@ -3649,26 +3661,6 @@ dependencies = [
  "bytemuck",
  "itertools 0.12.1",
  "rand 0.8.6",
- "rayon",
- "ruint",
- "serde",
- "serde_arrays",
- "starknet-curve 0.6.0",
- "starknet-ff",
- "starknet-types-core",
- "stwo",
- "stwo-cairo-serialize",
- "stwo-constraint-framework",
-]
-
-[[package]]
-name = "stwo-cairo-common"
-version = "1.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3aab6460cc6889fc9af246a677ce6465eb15d4574fd1361a30ed030f3c7b970b"
-dependencies = [
- "bytemuck",
- "itertools 0.12.1",
  "rayon",
  "ruint",
  "serde",
@@ -3710,7 +3702,7 @@ dependencies = [
  "stwo-air-utils",
  "stwo-air-utils-derive",
  "stwo-cairo-adapter",
- "stwo-cairo-common 1.2.2 (registry+https://github.com/rust-lang/crates.io-index)",
+ "stwo-cairo-common",
  "stwo-cairo-serialize",
  "stwo-constraint-framework",
  "tempfile",

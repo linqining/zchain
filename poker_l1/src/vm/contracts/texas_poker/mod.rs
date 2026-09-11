@@ -98,6 +98,10 @@ pub mod state_machine;
 // 与 poker_texas_air::prove_task 保持 borsh 二进制兼容（MethodInput 共享自 vm-common）。
 pub mod prove_task;
 
+// Vendored reconstruction V3 proof family（来源 poker_texas_air/poker-protocol-proofs，
+// 2026-09-12；适配 zgame 版 poker_protocol 类型世界，数学逻辑未改动）。
+pub mod reconstruction_v3;
+
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }
 // impl

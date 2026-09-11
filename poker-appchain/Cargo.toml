@@ -15,6 +15,8 @@ secp256k1 = { workspace = true }
 ed25519-dalek = { workspace = true }
 # ===== 稳定字节 ABI =====
 borsh = { workspace = true }
+# ===== 结算语义唯一事实源（plan-appchain §5.2-1：SettlementPlan/payout_root/side_pot_root）=====
+poker-settlement-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bincode = { workspace = true }

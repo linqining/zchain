@@ -166,8 +166,15 @@ pub fn find_note(seq: &Sequencer, user: &TestUser, amount: u64) -> Note {
         .clone()
 }
 
-/// 构造结算记录（两人桌）。`pot` 是本手**下注额**（rake 计费基数），
-/// `payout_a/b` 是结算后的新筹码堆（inputs 总额 = payouts + rake）。
+/// 构造结算记录（两人桌，ABI v1.2 含已验证计划）。
+///
+/// v1.2 语义（plan-appchain §5.2-2）：`pot == Σseat notes`（seat note 即
+/// 本手下注贡献），`Σpayouts == pot - rake`，计划为单层 contested pot
+/// （seat0/seat1 双 eligible），`plan.rake == policy.rake_of(pot)`，
+/// payouts 与 plan 投影一一对应（声明顺序 = seat 序）。
+///
+/// 标准数值：seat 1_000/2_000 → pot 3_000；5% 策略 → rake 150；
+/// payout_a/b = 结算后新筹码堆（如 500/2_350）。
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn two_player_settlement(
@@ -182,22 +189,36 @@ pub fn two_player_settlement(
     policy: &FeePolicy,
     hand_binding_byte: u8,
 ) -> SettlementRecord {
+    assert_eq!(
+        pot,
+        seat_a.amount + seat_b.amount,
+        "v1.2: pot must equal the summed seat-note contributions"
+    );
     let rake_total = policy.rake_of(pot);
     let (t_amt, o_amt) = policy.split_of(rake_total);
     let class = seat_a.asset_class;
-    let mk = |amount: u64, owner: [u8; 33]| NoteSpec {
+    let mk = |amount: u64, owner: [u8; 33], pot_index: u8, runout_index: u8| NoteSpec {
         asset_class: class,
         amount,
         owner,
         table_id: None,
+        pot_index,
+        runout_index,
     };
     let (treasury_out, operator_out) = if rake_total == 0 {
         (None, None)
     } else if let FeePolicy::FixedRake { split, .. } = policy {
-        (Some(mk(t_amt, split.treasury)), Some(mk(o_amt, split.operator)))
+        (
+            Some(mk(t_amt, split.treasury, 0, 0)),
+            Some(mk(o_amt, split.operator, 0, 0)),
+        )
     } else {
         (None, None)
     };
+    let mut awards = [0u64; 9];
+    awards[0] = payout_a;
+    awards[1] = payout_b;
+    let plan = poker_appchain::settlement::flat_settlement_plan(pot, 0b11, awards);
     let mut record = SettlementRecord {
         table_id,
         hand_binding: [hand_binding_byte; 32],
@@ -222,14 +243,15 @@ pub fn two_player_settlement(
             },
         ],
         payouts: vec![
-            mk(payout_a, a.pk()),
-            mk(payout_b, b.pk()),
+            mk(payout_a, a.pk(), 0, 0),
+            mk(payout_b, b.pk(), 0, 0),
         ],
         rake: RakeSplitRecord {
             total: rake_total,
             treasury_out,
             operator_out,
         },
+        plan,
         hand_proof: None,
     };
     // S1：授权对完整结算效果签名（记录完整后构造）

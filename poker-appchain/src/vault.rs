@@ -3,11 +3,32 @@
 //! v1 托管模式：REAL note 是运营方负债。本模块维护储备/浮存与已发行
 //! note 的恒等关系，提供日终对账与差异告警输入；报表结构对齐 v2
 //! STARK 储备证明的输入（note 集可导出）。
+//!
+//! ## 提现 finality 门槛（§5.4 配套，P0-3 同批落地）
+//!
+//! REAL note 的提现申请（托管打款侧）必须过 v1 finality 门：
+//!
+//! 1. 来源 op 已证明——`proven_watermark >= op_index`（连续前缀语义下
+//!    等价于"该 op 已证明"）；
+//! 2. 该 op 所属批次根已被记录——`batch_covered_through >= op_index`
+//!    （sequencer 侧 `record_batch_root` 快照）。
+//!
+//! 未满足 → [`AppchainError::WithdrawalNotFinalized`] 并计
+//! `withdrawal_finality_rejected_total`。PLAY note 不做此要求（软确认即可
+//! 提，§5.1 分层）。开关 [`CustodyLedger::without_finality_gate`] 为**显式
+//! opt-out，仅限测试/开发，非生产配置**（见 docs/ABI.md §9）。
+//! provenance 由调用方从 sequencer 导出（[`crate::real_policy::
+//! WithdrawalProvenance`]，`LedgerState.note_origins`：note 承诺 → 铸出
+//! op，消费后保留、WAL 重放重建），类型系统保证不可缺省——未知
+//! provenance 无法绕过门槛。
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use crate::error::{AppchainError, AppchainResult};
-use crate::metrics::HealthInputs;
+use crate::metrics::{HealthInputs, MetricsRegistry};
+use crate::note::AssetClass;
+use crate::real_policy::{FinalityEvidence, WithdrawalProvenance};
 
 /// 提现请求。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,19 +75,58 @@ pub struct ReconciliationReport {
 }
 
 /// 托管账（vault）。
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct CustodyLedger {
     reserved: u128,
     deposits: BTreeMap<[u8; 32], u64>,
     withdrawals: BTreeMap<[u8; 32], WithdrawalEntry>,
     known_note_ids: HashSet<[u8; 32]>,
+    /// 提现 finality 门槛（默认开启；关闭 = 显式 opt-out，仅限非生产）。
+    withdrawal_requires_finality: bool,
+    /// 可选 metrics（finality 拒绝计数 `withdrawal_finality_rejected_total`）。
+    metrics: Option<Arc<MetricsRegistry>>,
+}
+
+impl Default for CustodyLedger {
+    /// 默认 = finality 门**开启**（fail-closed；生产语义）。
+    fn default() -> Self {
+        Self {
+            reserved: 0,
+            deposits: BTreeMap::new(),
+            withdrawals: BTreeMap::new(),
+            known_note_ids: HashSet::new(),
+            withdrawal_requires_finality: true,
+            metrics: None,
+        }
+    }
 }
 
 impl CustodyLedger {
-    /// 空账。
+    /// 空账（提现 finality 门默认开启）。
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// **显式 opt-out**：关闭提现 finality 门。仅限测试/开发环境——放宽路径
+    /// 必须显式构造，文档标注非生产（docs/ABI.md §9）。
+    #[must_use]
+    pub fn without_finality_gate(mut self) -> Self {
+        self.withdrawal_requires_finality = false;
+        self
+    }
+
+    /// 注入 metrics（finality 拒绝计数）。
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: Arc<MetricsRegistry>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// 提现 finality 门是否开启。
+    #[must_use]
+    pub fn finality_required(&self) -> bool {
+        self.withdrawal_requires_finality
     }
 
     /// 外部储备录入（链上余额读取由上层周期性注入）。
@@ -104,12 +164,22 @@ impl CustodyLedger {
 
     /// 提现入队（幂等：同 id 同载荷返回既有条目；异载荷冲突）。
     ///
+    /// §5.4 finality 门（默认开启，见 [`CustodyLedger::finality_required`]）：
+    /// REAL note 的提现要求来源 op 已被证明水位覆盖 **且** 其所属批次根已
+    /// 记录（幂等命中先行——已受理的重复申请不受门槛复审影响）；未满足 →
+    /// [`AppchainError::WithdrawalNotFinalized`] 并计
+    /// `withdrawal_finality_rejected_total`。PLAY note 不做此要求。
+    ///
     /// # Errors
-    /// 同 id 异载荷 → [`AppchainError::WithdrawalConflict`]。
+    /// 同 id 异载荷 → [`AppchainError::WithdrawalConflict`]；
+    /// REAL note 未达 finality → [`AppchainError::WithdrawalNotFinalized`]。
     pub fn enqueue_withdrawal(
         &mut self,
         request: WithdrawalRequest,
+        provenance: WithdrawalProvenance,
+        finality: FinalityEvidence,
     ) -> AppchainResult<&WithdrawalEntry> {
+        // 幂等语义保持：已受理的同 id 同载荷申请直接返回既有条目
         match self.withdrawals.get(&request.request_id) {
             Some(e) if e.request.payout_address == request.payout_address
                 && e.request.amount == request.amount =>
@@ -125,6 +195,20 @@ impl CustodyLedger {
                 ))
             }
             None => {}
+        }
+        // §5.4：REAL note 提现的 v1 finality 门（水位覆盖 + 批次根覆盖；
+        // PLAY 豁免——软确认即可提，§5.1 分层）
+        if self.withdrawal_requires_finality
+            && provenance.asset_class == AssetClass::Real
+            && !finality.covers(provenance.source_op_index)
+        {
+            if let Some(m) = &self.metrics {
+                m.inc("withdrawal_finality_rejected_total");
+            }
+            return Err(AppchainError::WithdrawalNotFinalized {
+                op_index: provenance.source_op_index,
+                watermark: finality.proven_watermark,
+            });
         }
         let id = request.request_id;
         self.withdrawals.insert(
@@ -238,6 +322,30 @@ impl CustodyLedger {
 mod tests {
     use super::*;
 
+    fn request(id_byte: u8, payout_byte: u8, amount: u64) -> WithdrawalRequest {
+        WithdrawalRequest {
+            request_id: [id_byte; 32],
+            payout_address: [payout_byte; 32],
+            amount,
+        }
+    }
+
+    /// PLAY provenance（finality 门豁免类）。
+    fn play_prov() -> WithdrawalProvenance {
+        WithdrawalProvenance {
+            asset_class: AssetClass::Play,
+            source_op_index: 3,
+        }
+    }
+
+    /// REAL provenance（来源 op = 5）。
+    fn real_prov() -> WithdrawalProvenance {
+        WithdrawalProvenance {
+            asset_class: AssetClass::Real,
+            source_op_index: 5,
+        }
+    }
+
     #[test]
     fn deposit_idempotent_and_conflict() {
         let mut v = CustodyLedger::new();
@@ -252,19 +360,18 @@ mod tests {
     #[test]
     fn withdrawal_idempotent_and_conflict() {
         let mut v = CustodyLedger::new();
-        let req = WithdrawalRequest {
-            request_id: [1; 32],
-            payout_address: [2; 32],
-            amount: 50,
-        };
-        v.enqueue_withdrawal(req.clone()).unwrap();
-        v.enqueue_withdrawal(req).unwrap(); // 幂等
+        let req = request(1, 2, 50);
+        v.enqueue_withdrawal(req.clone(), play_prov(), FinalityEvidence::default())
+            .unwrap();
+        // 幂等：同 id 同载荷重复申请（finality 证据不同也不复审既有条目）
+        v.enqueue_withdrawal(req, play_prov(), FinalityEvidence::default())
+            .unwrap();
         let bad = WithdrawalRequest {
             request_id: [1; 32],
             payout_address: [3; 32],
             amount: 50,
         };
-        assert!(v.enqueue_withdrawal(bad).is_err());
+        assert!(v.enqueue_withdrawal(bad, play_prov(), FinalityEvidence::default()).is_err());
     }
 
     #[test]
@@ -279,14 +386,131 @@ mod tests {
     #[test]
     fn paid_twice_rejected() {
         let mut v = CustodyLedger::new();
-        v.enqueue_withdrawal(WithdrawalRequest {
-            request_id: [1; 32],
-            payout_address: [2; 32],
-            amount: 50,
-        })
-        .unwrap();
+        v.enqueue_withdrawal(request(1, 2, 50), play_prov(), FinalityEvidence::default())
+            .unwrap();
         v.mark_paid([1; 32], [3; 32]).unwrap();
         assert!(v.mark_paid([1; 32], [4; 32]).is_err());
         assert_eq!(v.queued_withdrawals(), 0);
+    }
+
+    /// §5.4 finality 门（REAL）：水位未覆盖 → 拒；水位覆盖但批次根未记录
+    /// → 拒；两者齐备 → 成功。
+    #[test]
+    fn withdrawal_finality_gate_real_note() {
+        let metrics = Arc::new(MetricsRegistry::new());
+        let mut v = CustodyLedger::new().with_metrics(Arc::clone(&metrics));
+        assert!(v.finality_required(), "finality gate must default on");
+
+        // 负例 A：水位未覆盖来源 op → WithdrawalNotFinalized
+        let err = v
+            .enqueue_withdrawal(
+                request(1, 2, 50),
+                real_prov(),
+                FinalityEvidence {
+                    proven_watermark: 4,
+                    batch_covered_through: Some(4),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppchainError::WithdrawalNotFinalized {
+                op_index: 5,
+                watermark: 4
+            }
+        ));
+        assert_eq!(metrics.counter("withdrawal_finality_rejected_total"), 1);
+
+        // 负例 B：水位已覆盖但批次根未记录（mark_proven 直推无批次回调）→ 拒
+        let err = v
+            .enqueue_withdrawal(
+                request(1, 2, 50),
+                real_prov(),
+                FinalityEvidence {
+                    proven_watermark: 9,
+                    batch_covered_through: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppchainError::WithdrawalNotFinalized { .. }
+        ));
+        assert_eq!(metrics.counter("withdrawal_finality_rejected_total"), 2);
+
+        // 负例 C：op 0 与「尚无批次根」在水位侧不可区分——批次根为 None 时
+        // 即便水位覆盖也不放行（fail-closed 的存在性判定）
+        let err = v
+            .enqueue_withdrawal(
+                WithdrawalRequest {
+                    request_id: [7; 32],
+                    payout_address: [8; 32],
+                    amount: 1,
+                },
+                WithdrawalProvenance {
+                    asset_class: AssetClass::Real,
+                    source_op_index: 0,
+                },
+                FinalityEvidence {
+                    proven_watermark: 9,
+                    batch_covered_through: None,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            AppchainError::WithdrawalNotFinalized { op_index: 0, .. }
+        ));
+        assert_eq!(metrics.counter("withdrawal_finality_rejected_total"), 3);
+
+        // 正例：水位 + 批次根都覆盖 → 入队成功
+        let entry = v
+            .enqueue_withdrawal(
+                request(1, 2, 50),
+                real_prov(),
+                FinalityEvidence {
+                    proven_watermark: 9,
+                    batch_covered_through: Some(7),
+                },
+            )
+            .unwrap();
+        assert_eq!(entry.status, WithdrawalStatus::Queued);
+        assert_eq!(metrics.counter("withdrawal_finality_rejected_total"), 3);
+
+        // 幂等复审豁免：finality 证据回退（异常构造）也不影响既有条目
+        v.enqueue_withdrawal(
+            request(1, 2, 50),
+            real_prov(),
+            FinalityEvidence::default(),
+        )
+        .unwrap();
+    }
+
+    /// §5.4：PLAY note 不做 finality 要求（软确认即可提，§5.1 分层）。
+    #[test]
+    fn play_withdrawal_exempt_from_finality() {
+        let mut v = CustodyLedger::new();
+        let entry = v
+            .enqueue_withdrawal(request(2, 3, 70), play_prov(), FinalityEvidence::default())
+            .unwrap();
+        assert_eq!(entry.status, WithdrawalStatus::Queued);
+    }
+
+    /// §5.4：finality 开关关闭 = 显式 opt-out——REAL 未证明也可提现。
+    /// 该构造是显式的（`without_finality_gate`），仅限非生产。
+    #[test]
+    fn finality_opt_out_allows_unproven_real_withdrawal() {
+        let v_builder = CustodyLedger::new().without_finality_gate();
+        assert!(!v_builder.finality_required(), "opt-out must be explicit");
+        let mut v = v_builder;
+        let entry = v
+            .enqueue_withdrawal(request(4, 5, 90), real_prov(), FinalityEvidence::default())
+            .unwrap();
+        assert_eq!(entry.status, WithdrawalStatus::Queued);
+        // 默认构造仍是 fail-closed（同证据下拒绝）
+        let mut strict = CustodyLedger::new();
+        assert!(strict
+            .enqueue_withdrawal(request(4, 5, 90), real_prov(), FinalityEvidence::default())
+            .is_err());
     }
 }

@@ -16,7 +16,7 @@ use common::{
 };
 use poker_appchain::fee::FeePolicy;
 use poker_appchain::keys::SequencerKey;
-use poker_appchain::note::{AssetClass, NoteSpec};
+use poker_appchain::note::{AssetClass, Note, NoteSpec};
 use poker_appchain::ops::{scope, Operation};
 use poker_appchain::sequencer::{Sequencer, SequencerConfig};
 use poker_appchain::soft_confirm::{
@@ -37,12 +37,16 @@ fn acc1_concurrent_double_spend_exactly_one_wins() {
         amount: 1_000,
         owner: a.pk(),
         table_id: None,
+        pot_index: 0,
+        runout_index: 0,
     };
     let out_b = NoteSpec {
         asset_class: AssetClass::Play,
         amount: 1_000,
         owner: b.pk(),
         table_id: None,
+        pot_index: 0,
+        runout_index: 0,
     };
     let op1 = Operation::Transfer {
         spends: vec![a.transfer_auth(&dep, &[out_a.clone()])],
@@ -137,7 +141,7 @@ fn acc2_forged_settlement_rejected() {
     // 攻击者（无 B 签名）构造结算：把 B 的钱划走
     let mut record = two_player_settlement(
         1, &a, &b, &seat_a, &seat_b,
-        1_500, 500, 2_425, &policy, 0x11,
+        3_000, 500, 2_350, &policy, 0x11,
     );
     // 伪造 B 的授权：换成 A 冒签（密钥不对）
     let forged = a.settle_auth(&seat_b, &record);
@@ -191,6 +195,8 @@ fn acc5_fee_tampering_rejected() {
     // 5a. 换策略承诺：**只**换 commitment（其余不动 → 签名仍有效——
     // settle_effect 刻意不含 policy_commitment，该字段由注册表冻结检查
     // 强制；这正是两层防线各司其职的验证）
+    let treasury = TestUser::new(7);
+    let operator = TestUser::new(8);
     let mut seq = new_sequencer();
     let (record, _a, _b) = setup_unsettled_hand(&mut seq, 0x41);
     let mut swapped = record;
@@ -203,20 +209,71 @@ fn acc5_fee_tampering_rejected() {
         "swapped policy commitment must fail fee check, got {err:?}"
     );
 
-    // 5b. 谎报 pot（1500 → 1400）压低抽取：即便合谋签名者按篡改后的
-    // 记录重签（pot 在结算效果摘要内，需重签才过签名防线），费率关系
-    // 仍然拒绝——rake note 不变（75），守恒成立，唯一的拒绝来源就是
-    // rake.total ≠ policy.rake_of(谎报的 pot)。
+    // 5b. 谎报抽取额压低 rake：合谋签名者按篡改后的记录**完整重签**
+    // （pot/payout_root 都在结算效果摘要内，需重签才过签名防线）：
+    // rake.total 150→100，plan.rake 同步 100，payouts 同步上调、分账 note
+    // 同步 20/80——记录整体自洽，唯一的拒绝来源就是
+    // rake.total(=plan.rake=100) ≠ policy.rake_of(pot=3000)=150。
     let mut seq2 = new_sequencer();
     let (record2, a2, b2) = setup_unsettled_hand(&mut seq2, 0x42);
     let mut underreport = record2;
-    underreport.pot = 1_400;
+    underreport.rake.total = 100;
+    underreport.rake.treasury_out = Some(poker_appchain::note::NoteSpec {
+        asset_class: AssetClass::Real,
+        amount: 20,
+        owner: treasury.pk(),
+        table_id: None,
+        pot_index: 0,
+        runout_index: 0,
+    });
+    underreport.rake.operator_out = Some(poker_appchain::note::NoteSpec {
+        asset_class: AssetClass::Real,
+        amount: 80,
+        owner: operator.pk(),
+        table_id: None,
+        pot_index: 0,
+        runout_index: 0,
+    });
+    underreport.payouts[1].amount = 2_400; // Σpayouts = pot − 100
+    underreport.plan = poker_appchain::settlement::flat_settlement_plan(3_000, 0b11, {
+        let mut awards = [0u64; 9];
+        awards[0] = 500;
+        awards[1] = 2_400;
+        awards
+    });
     underreport.inputs[0].spend = a2.settle_auth(&underreport.inputs[0].note, &underreport);
     underreport.inputs[1].spend = b2.settle_auth(&underreport.inputs[1].note, &underreport);
     let err = seq2
         .submit(Operation::Settle(Box::new(underreport)), 4_100)
         .unwrap_err();
-    assert!(matches!(err, poker_appchain::AppchainError::FeeMismatch { .. }));
+    assert!(
+        matches!(err, poker_appchain::AppchainError::FeeMismatch { .. }),
+        "under-reported rake must fail the fee relation, got {err:?}"
+    );
+
+    // 5c. 谎报 pot（3000 → 2999）压低抽取：即便同步改 plan + payouts 并
+    // 完整重签（签名防线全过），Σseat notes(3000) ≠ plan.gross_pot(2999)
+    // 的贡献守恒仍然拒绝——pot 不再是独立可信输入（plan-appchain §5.2-2）。
+    let mut seq3 = new_sequencer();
+    let (record3, a3, b3) = setup_unsettled_hand(&mut seq3, 0x43);
+    let mut underreport_pot = record3;
+    underreport_pot.pot = 2_999;
+    underreport_pot.payouts[1].amount = 2_349;
+    underreport_pot.plan = poker_appchain::settlement::flat_settlement_plan(2_999, 0b11, {
+        let mut awards = [0u64; 9];
+        awards[0] = 500;
+        awards[1] = 2_349;
+        awards
+    });
+    underreport_pot.inputs[0].spend = a3.settle_auth(&underreport_pot.inputs[0].note, &underreport_pot);
+    underreport_pot.inputs[1].spend = b3.settle_auth(&underreport_pot.inputs[1].note, &underreport_pot);
+    let err = seq3
+        .submit(Operation::Settle(Box::new(underreport_pot)), 4_200)
+        .unwrap_err();
+    assert!(
+        matches!(err, poker_appchain::AppchainError::AdmissionRejected("seat inputs do not equal plan gross pot")),
+        "under-reported pot must fail contribution conservation, got {err:?}"
+    );
 }
 
 /// M8-ACC-6：等价性分叉——向 watcher 喂两条冲突软确认链，分叉被定位。
@@ -276,6 +333,220 @@ fn acc6b_no_fork_on_identical_chain() {
     assert!(poker_appchain::watcher::require_equivalent(&chain, &chain).is_ok());
 }
 
+/// P0-2：pot 与 plan.gross_pot 不一致被拒（pot 不再是独立可信输入）。
+#[test]
+fn p0_2_pot_plan_gross_mismatch_rejected() {
+    let mut seq = new_sequencer();
+    let (record, _a, _b) = setup_unsettled_hand(&mut seq, 0x51);
+    let mut tampered = record;
+    tampered.pot = 2_999; // plan.gross_pot 仍 3_000
+    let err = seq
+        .submit(Operation::Settle(Box::new(tampered)), 4_000)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        poker_appchain::AppchainError::AdmissionRejected(
+            "plan gross pot does not match record pot"
+        )
+    ));
+}
+
+/// P0-2：plan 自身守恒破裂被拒（settlement-core validate fail-closed）。
+#[test]
+fn p0_2_plan_conservation_broken_rejected() {
+    let mut seq = new_sequencer();
+    let (record, _a, _b) = setup_unsettled_hand(&mut seq, 0x52);
+    let mut tampered = record;
+    tampered.plan.pots[0].net_amount += 1; // gross/rake/net 不再守恒
+    let err = seq
+        .submit(Operation::Settle(Box::new(tampered)), 4_000)
+        .unwrap_err();
+    assert!(
+        matches!(err, poker_appchain::AppchainError::Codec(_)),
+        "broken plan conservation must fail plan.validate, got {err:?}"
+    );
+}
+
+/// P0-7：payout 与 plan.awards 不符（金额投影）被拒。
+#[test]
+fn p0_7_payout_awards_mismatch_rejected() {
+    let mut seq = new_sequencer();
+    let (record, a, b) = setup_unsettled_hand(&mut seq, 0x53);
+    let mut tampered = record;
+    tampered.payouts[1].amount += 1; // 偏离 plan 投影（签名也不同）
+    tampered.inputs[0].spend = a.settle_auth(&tampered.inputs[0].note, &tampered);
+    tampered.inputs[1].spend = b.settle_auth(&tampered.inputs[1].note, &tampered);
+    let err = seq
+        .submit(Operation::Settle(Box::new(tampered)), 4_000)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        poker_appchain::AppchainError::AdmissionRejected(
+            "payout does not match plan projection (table/pot/runout/amount)"
+        )
+    ));
+}
+
+/// P0-7：payout 索引越界（pot_index 超出 plan 层数）被拒。
+#[test]
+fn p0_7_payout_index_out_of_range_rejected() {
+    let mut seq = new_sequencer();
+    let (record, a, b) = setup_unsettled_hand(&mut seq, 0x54);
+    let mut tampered = record;
+    tampered.payouts[0].pot_index = 5; // plan 只有 1 层
+    tampered.payouts[1].pot_index = 5;
+    tampered.inputs[0].spend = a.settle_auth(&tampered.inputs[0].note, &tampered);
+    tampered.inputs[1].spend = b.settle_auth(&tampered.inputs[1].note, &tampered);
+    let err = seq
+        .submit(Operation::Settle(Box::new(tampered)), 4_000)
+        .unwrap_err();
+    assert!(matches!(
+        err,
+        poker_appchain::AppchainError::AdmissionRejected(
+            "payout does not match plan projection (table/pot/runout/amount)"
+        )
+    ));
+}
+
+/// P0-7：payout_root 篡改被**签名判据**拒绝——赔付结构整体平移（记录
+/// 自洽：Σpayouts 不变、plan.awards 同步、投影一致），但花费授权仍是
+/// 旧 payout_root 上的签名 → BadSignature（玩家签名覆盖精确赔付结构）。
+#[test]
+fn p0_7_payout_root_tamper_rejected_by_signature() {
+    let mut seq = new_sequencer();
+    let (record, _a, _b) = setup_unsettled_hand(&mut seq, 0x55);
+    let mut shifted = record;
+    shifted.payouts[0].amount -= 1; // A→B 挪 1 筹码
+    shifted.payouts[1].amount += 1;
+    shifted.plan = poker_appchain::settlement::flat_settlement_plan(3_000, 0b11, {
+        let mut awards = [0u64; 9];
+        awards[0] = 499;
+        awards[1] = 2_351;
+        awards
+    });
+    // 刻意不重签：settle_effect 因 payout_root 变化而改变
+    let err = seq
+        .submit(Operation::Settle(Box::new(shifted)), 4_000)
+        .unwrap_err();
+    assert!(matches!(err, poker_appchain::AppchainError::BadSignature));
+}
+
+/// 构造 canonical 布局（scope v2）的手牌归档字节：终态镜像 pot 可指定，
+/// 前后状态根/终态承诺可指定（validate_settlement 第 11 条的直接判据）。
+fn archive_scope_bytes(pot: u64, pre_root: [u8; 32], post_root: [u8; 32]) -> Vec<u8> {
+    use poker_appchain::settlement::{
+        BlindOpeningScope, RakeOpeningScope, TexasArchiveScope,
+    };
+    let mut image = vec![0u8; poker_appchain::settlement::CANONICAL_STATE_IMAGE_BORSH_BYTES];
+    image[poker_appchain::settlement::STATE_IMAGE_POT_OFFSET..][..8]
+        .copy_from_slice(&pot.to_le_bytes());
+    let scope = TexasArchiveScope {
+        log_size: 10,
+        num_columns: 1_574,
+        table_id: 1,
+        first_hand_id: 1,
+        last_hand_id: 1,
+        first_call_seq: 0,
+        last_call_seq: 2,
+        transition_count: 3,
+        first_transition_kind: 0,
+        last_transition_kind: 0,
+        reveal_timeout_cascade_count: 0,
+        reveal_timeout_cascade_schedule: [u8::MAX; 9],
+        batch_digest: [2; 32],
+        pre_state_commitment: [3; 32],
+        post_state_commitment: [4; 32],
+        pre_state_root: pre_root,
+        post_state_root: post_root,
+        pre_lifecycle_root: [0; 32],
+        post_lifecycle_root: [0; 32],
+        pre_overlay_root: [0; 32],
+        post_overlay_root: [0; 32],
+        pre_settlement_commitment: [0; 32],
+        post_settlement_commitment: [0; 32],
+        pre_custody_commitment: [0; 32],
+        post_custody_commitment: [0; 32],
+        pre_state_image_bytes: image.clone(),
+        post_state_image_bytes: image,
+        range_claimed_sum: [0; 4],
+        rake_opening: None::<RakeOpeningScope>,
+        blind_opening: None::<BlindOpeningScope>,
+    };
+    borsh::to_vec(&scope).unwrap()
+}
+
+/// P0-2：终态镜像 pot ≠ record.pot 的归档绑定被拒；一致时校验通过
+/// （直接调用 validate_settlement，走第 11 条 scope 级绑定）。
+#[test]
+fn p0_2_gross_pot_bound_to_terminal_state_image() {
+    use poker_appchain::settlement::{
+        parse_archive_scope, validate_settlement, HandProofBinding,
+    };
+    let a = TestUser::new(1);
+    let b = TestUser::new(2);
+    let treasury = TestUser::new(7);
+    let operator = TestUser::new(8);
+    let policy = rake_policy(&treasury, &operator);
+    let seat_a = Note::new(AssetClass::Real, 1_000, a.pk(), [0x71; 32], Some(1)).unwrap();
+    let seat_b = Note::new(AssetClass::Real, 2_000, b.pk(), [0x72; 32], Some(1)).unwrap();
+    let record = two_player_settlement(
+        1, &a, &b, &seat_a, &seat_b, 3_000, 500, 2_350, &policy, 0x56,
+    );
+    assert!(validate_settlement(&record, &policy).is_ok());
+
+    // 正例绑定：镜像 pot == record.pot == 3_000
+    let mut bound = record.clone();
+    bound.hand_proof = Some(HandProofBinding {
+        archive_bytes: archive_scope_bytes(3_000, [0x11; 32], [0x22; 32]),
+        post_state_commitment: [4; 32],
+        pre_state_root: [0x11; 32],
+        post_state_root: [0x22; 32],
+    });
+    assert!(validate_settlement(&bound, &policy).is_ok());
+    // scope 可解析且镜像 pot 逐字节 == record.pot
+    let scope = parse_archive_scope(&bound.hand_proof.as_ref().unwrap().archive_bytes).unwrap();
+    assert_eq!(scope.table_id, bound.table_id);
+    assert_eq!(
+        u64::from_le_bytes(
+            scope.post_state_image_bytes
+                [poker_appchain::settlement::STATE_IMAGE_POT_OFFSET..][..8]
+                .try_into()
+                .unwrap()
+        ),
+        bound.pot
+    );
+
+    // 负例 A：镜像 pot 谎报 1（终态与结算脱钩）→ 拒绝
+    let mut unbound = record.clone();
+    unbound.hand_proof = Some(HandProofBinding {
+        archive_bytes: archive_scope_bytes(1, [0x11; 32], [0x22; 32]),
+        post_state_commitment: [4; 32],
+        pre_state_root: [0x11; 32],
+        post_state_root: [0x22; 32],
+    });
+    let err = validate_settlement(&unbound, &policy).unwrap_err();
+    assert!(matches!(
+        err,
+        poker_appchain::AppchainError::AdmissionRejected(
+            "archive terminal state pot does not match record pot"
+        )
+    ));
+
+    // 负例 B：声明状态根与归档不一致 → 拒绝
+    let mut wrong_root = record;
+    wrong_root.hand_proof = Some(HandProofBinding {
+        archive_bytes: archive_scope_bytes(3_000, [0x11; 32], [0x22; 32]),
+        post_state_commitment: [4; 32],
+        pre_state_root: [0x33; 32], // ≠ 归档 pre_state_root
+        post_state_root: [0x22; 32],
+    });
+    let err = validate_settlement(&wrong_root, &policy).unwrap_err();
+    assert!(matches!(
+        err,
+        poker_appchain::AppchainError::AdmissionRejected("archive state root mismatch")
+    ));
+}
+
 // ===== 测试脚手架 =====
 
 /// 标准 setup：开 rake 桌 + 双方入金买入（未结算），返回待提交的合法结算
@@ -320,7 +591,7 @@ fn setup_unsettled_hand(
     let seat_a = find_note(seq, &a, 1_000);
     let seat_b = find_note(seq, &b, 2_000);
     let record = two_player_settlement(
-        1, &a, &b, &seat_a, &seat_b, 1_500, 500, 2_425, &policy, binding_byte,
+        1, &a, &b, &seat_a, &seat_b, 3_000, 500, 2_350, &policy, binding_byte,
     );
     (record, a, b)
 }
@@ -362,7 +633,7 @@ fn setup_settled_hand(
     let seat_a = find_note(seq, &a, 1_000);
     let seat_b = find_note(seq, &b, 2_000);
     let record = two_player_settlement(
-        1, &a, &b, &seat_a, &seat_b, 1_500, 500, 2_425, &policy, binding_byte,
+        1, &a, &b, &seat_a, &seat_b, 3_000, 500, 2_350, &policy, binding_byte,
     );
     seq.submit(Operation::Settle(Box::new(record.clone())), 3_000)
         .unwrap();

@@ -71,28 +71,31 @@ fn full_hand_flow_with_rake_and_audit() {
     let seat_a = find_seat_note(&seq, table, a.pk(), 1_000);
     let seat_b = find_seat_note(&seq, table, b.pk(), 2_000);
 
-    // 结算：A 赢 500（pot=1500 → rake 75 = treasury 15 + operator 60）
+    // 结算（v1.2：pot = Σseat notes = 3000；5% → rake 150 = treasury 30 + operator 120）
+    // A 保 500（本手输 500），B 拿 2350（赢 500 − rake 150）
     let record = two_player_settlement(
         table, &a, &b, &seat_a, &seat_b,
-        1_500, // pot
-        500,   // payout_a: 1000 - 500 - 亏给 rake 的一部分? 保持守恒：见下
-        2_425, // payout_b
+        3_000, // pot = Σseat notes（plan.gross_pot）
+        500,   // payout_a
+        2_350, // payout_b（Σpayouts = pot − rake）
         &policy,
         0xAB,
     );
-    assert_eq!(record.rake.total, 75);
+    assert_eq!(record.rake.total, 150);
+    assert_eq!(record.plan.gross_pot, 3_000);
+    assert_eq!(record.plan.rake, 150);
     seq.submit(Operation::Settle(Box::new(record)), 3_000)
         .unwrap();
 
-    // 余额断言（A 500、B 2425、treasury 15、operator 60）
+    // 余额断言（A 500、B 2350、treasury 30、operator 120）
     let (r, _) = seq.state().balances_of(&a.pk());
     assert_eq!(r, 500);
     let (r, _) = seq.state().balances_of(&b.pk());
-    assert_eq!(r, 2_425);
+    assert_eq!(r, 2_350);
     let (r, _) = seq.state().balances_of(&treasury.pk());
-    assert_eq!(r, 15);
+    assert_eq!(r, 30);
     let (r, _) = seq.state().balances_of(&operator.pk());
-    assert_eq!(r, 60);
+    assert_eq!(r, 120);
 
     // 桌 seat 计数回落
     assert_eq!(seq.state().tables.get(&table).unwrap().seats, 0);
@@ -119,6 +122,11 @@ fn full_hand_flow_with_rake_and_audit() {
 
 #[test]
 fn proof_pipeline_covers_settlements_and_audit_passes() {
+    // 注（P0-3）：本测试走 ValidationEngine（host attestation）——该引擎
+    // 对 REAL 结算一律拒绝出证（`RealRequiresStarkProof`，真实 STARK 路径
+    // 的 REAL 全流程回归见 poker-appchain-texasair 适配器测试）。管道覆盖
+    // /审计语义与资产类无关，故用 PLAY 资金流验证；Priority::Real 仅影响
+    // 调度，与出证策略门无关。
     let mut seq = new_sequencer();
     let a = TestUser::new(1);
     let b = TestUser::new(2);
@@ -127,9 +135,11 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
     let policy = rake_policy(&treasury, &operator);
     let table = 1u64;
     seq.submit(Operation::OpenTable { table_id: table, policy }, 1_000).unwrap();
-    let dep_a = deposit_and_find(&mut seq, &a, 1_000, AssetClass::Real, 1);
-    let dep_b = deposit_and_find(&mut seq, &b, 2_000, AssetClass::Real, 2);
-    seq.mark_proven_through(seq.state().seq);
+    let dep_a = deposit_and_find(&mut seq, &a, 1_000, AssetClass::Play, 1);
+    let dep_b = deposit_and_find(&mut seq, &b, 2_000, AssetClass::Play, 2);
+    // 只标记到最后的实际操作（0..=seq-1）——结算 op 留给批次回调覆盖
+    seq.mark_proven_through(seq.state().seq - 1);
+    let proven_before_settle = seq.proven_watermark();
     seq.submit(
         Operation::BuyIn {
             table_id: table,
@@ -153,12 +163,18 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
     let seat_a = find_seat_note(&seq, table, a.pk(), 1_000);
     let seat_b = find_seat_note(&seq, table, b.pk(), 2_000);
     let record = two_player_settlement(
-        table, &a, &b, &seat_a, &seat_b, 1_500, 500, 2_425, &policy, 0xCD,
+        table, &a, &b, &seat_a, &seat_b, 3_000, 500, 2_350, &policy, 0xCD,
     );
     let binding = record.hand_binding;
     seq.submit(Operation::Settle(Box::new(record.clone())), 3_000).unwrap();
+    let settle_op_index = seq.state().seq - 1;
+    // P0-5：批次验证通过前水位停在存款阶段（不得越过未证明的结算 op）
+    assert_eq!(seq.proven_watermark(), proven_before_settle);
+    assert!(proven_before_settle < settle_op_index);
 
-    // 证明管道：结算进管道 → 批次 → watcher 审计通过
+    // 证明管道：结算进管道 → 批次 → watcher 审计通过。
+    // P0-5 接线（与生产装配点同构）：批次验证通过回调推进 sequencer 水位。
+    let seq = Arc::new(std::sync::Mutex::new(seq));
     let pipeline = ProofPipeline::new(
         PipelineConfig {
             workers: 2,
@@ -170,9 +186,13 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
         Arc::new(ValidationEngine::default()),
         Arc::new(MetricsRegistry::new()),
     );
+    pipeline.set_on_batch_proven({
+        let seq = Arc::clone(&seq);
+        Arc::new(move |through| seq.lock().unwrap().mark_proven_through(through))
+    });
     pipeline
         .submit(ProofJob {
-            op_index: seq.state().seq - 1,
+            op_index: settle_op_index,
             table_id: table,
             record: Arc::new(record),
             policy,
@@ -187,10 +207,13 @@ fn proof_pipeline_covers_settlements_and_audit_passes() {
     }
     let batch = pipeline.try_build_batch().unwrap().expect("batch");
     assert_eq!(batch.count, 1);
+    assert_eq!(batch.through_op, settle_op_index);
+    // P0-5：接线真实生效——水位由批次回调推进到结算 op
+    assert_eq!(seq.lock().unwrap().proven_watermark(), settle_op_index);
 
     let mut registry = ProofRegistry::new();
     registry.record_settled(binding);
-    let report = audit_settlement_coverage(&seq.export_chain(), &registry.bindings);
+    let report = audit_settlement_coverage(&seq.lock().unwrap().export_chain(), &registry.bindings);
     assert!(
         report.uncovered_settlements.is_empty(),
         "settled hand must be covered by proof registry"
@@ -213,12 +236,16 @@ fn play_and_real_classes_never_mix() {
         amount: 250,
         owner: b.pk(),
         table_id: None,
+        pot_index: 0,
+        runout_index: 0,
     };
     let out2 = poker_appchain::note::NoteSpec {
         asset_class: AssetClass::Play,
         amount: 250,
         owner: a.pk(),
         table_id: None,
+        pot_index: 0,
+        runout_index: 0,
     };
     let err = seq
         .submit(

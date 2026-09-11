@@ -169,6 +169,11 @@ mod tests {
                 treasury_out: None,
                 operator_out: None,
             },
+            plan: crate::settlement::flat_settlement_plan(1, 0b01, {
+                let mut awards = [0u64; 9];
+                awards[0] = 1;
+                awards
+            }),
             hand_proof: None,
         };
         let f = SignedFrame::sign(
