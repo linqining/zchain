@@ -2,3 +2,4 @@
 .vscode
 *.crabmap/
 poker-appchain-texasair/target/
+poker-appchain-texasair/target*
