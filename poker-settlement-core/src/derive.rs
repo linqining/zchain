@@ -627,6 +627,55 @@ mod tests {
         plan.validate(3).unwrap();
     }
 
+    /// B9 口径锚点（含 uncalled 返还层的手）：座0 加注全下 200、座1 覆盖
+    /// 全下 500、座2 弃牌（50 死钱）。分层 = [150 contested, 300 contested,
+    /// 300 uncontested uncalled 返还]；rake 只对 contested 基数 450 计费，
+    /// 与 appchain 费率关系 `rake.total == policy.rake_of(plan.rake_base())`
+    /// 同口径（ABI v1.2.2）。
+    #[test]
+    fn uncalled_return_layer_is_excluded_from_rake_base() {
+        let board: Vec<u8> = vec![10, 9, 8, 13, 26]; // ♠Q ♠J ♠10 ♥2 ♦2
+        let holes: Vec<&'static [u8]> = vec![
+            Box::leak(vec![0u8, 1].into_boxed_slice()),     // ♠2 ♠3
+            Box::leak(vec![12u8, 11].into_boxed_slice()),   // ♠A ♠K
+            Box::leak(Vec::<u8>::new().into_boxed_slice()), // 弃牌无手牌
+        ];
+        let snap = TableSnapshot {
+            seat_count: 3,
+            button: 0,
+            total_bets: Box::leak(vec![200u64, 500, 50].into_boxed_slice()),
+            inactive: Box::leak(vec![false, false, true].into_boxed_slice()),
+            all_in: Box::leak(vec![true, true, false].into_boxed_slice()),
+            hole_cards: Box::leak(holes.into_boxed_slice()),
+            rake_mode: crate::RAKE_MODE_PERCENTAGE,
+            rake_bps: 500,
+            rake_cap: 1_000,
+        };
+        let boards = SettlementBoards::single(board);
+        let plan = derive_settlement_plan(&snap, &boards).unwrap();
+
+        assert_eq!(plan.gross_pot, 750);
+        // 分层：450 contested（座0/1 争夺 + 座2 的 50 死钱并入主层）+
+        // 300 uncontested（座1 的 uncalled 加注差额返还）。
+        assert_eq!(plan.pots.len(), 2);
+        assert!(plan.pots[0].is_contested());
+        assert!(!plan.pots[1].is_contested());
+        assert_eq!(plan.pots[0].gross_amount, 450);
+        assert_eq!(plan.pots[1].gross_amount, 300);
+        assert_eq!(plan.rake_base(), 450, "uncalled 返还层不进入计费基数");
+        // 5% 只作用于 contested 基数 450 → 22（uncalled 层 rake 0）
+        assert_eq!(plan.rake, 22);
+        assert_eq!(plan.pots[0].rake, 22);
+        assert_eq!(plan.pots[1].rake, 0);
+        assert_eq!(plan.pots[1].runouts[0].awards[1], 300, "uncalled 全额返还");
+        assert_eq!(plan.total_awards, 728);
+        assert_eq!(
+            crate::payout::rake_for(plan.rake_base(), 500, 10_000),
+            plan.rake
+        );
+        plan.validate(3).unwrap();
+    }
+
     #[test]
     fn two_runouts_split_each_side_pot_before_selecting_winners() {
         // runout0（♥Q ♥K ♥A ♥2 ♥3）seat0 两对独大；runout1（♦2 ♦3 ♦8 ♦9 ♦Q）

@@ -1,11 +1,14 @@
-# poker-appchain ABI 规范 v1.2（M0 冻结稿 + v1.1/v1.2 追加字段）
+# poker-appchain ABI 规范 v1.2.2（M0 冻结稿 + v1.1/v1.2 追加字段 + v1.2.2 语义修正）
 
 > 状态：2026-09-05 冻结（v1）；v1.1 追加 `hand_proof`；**v1.2（2026-09-12，
 > plan-appchain §5.2 P0-1/P0-2/P0-7）追加 `SettlementRecord.plan`、
 > `NoteSpec.pot_index/runout_index`、`HandProofBinding.pre/post_state_root`、
 > `settlement_binding`/`settle_effect` 新摘要输入、scope v2（canonical 布局）**；
 > **v1.2.1 同日追加 §8 REAL 出证策略与 attestation v2.1（plan-appchain
-> §5.2-3/P0-3）、§9 提现 finality 门槛（§5.4 配套）**。
+> §5.2-3/P0-3）、§9 提现 finality 门槛（§5.4 配套）**；
+> **v1.2.2（2026-09-12，BLOCKERS B9）修正 rake 计费口径为 contested-only
+> （`rake.total == plan.rake == policy.rake_of(plan.rake_base())`）——纯
+> 语义修正，wire format 不变**（变更记录见文末 changelog）。
 > 所有跨边界结构走 borsh；本文档是 wire format 的唯一事实源。任何变更必须
 > 升版本号（`.v2` 域标签 / 新枚举变体）；v1.2 均为 borsh 尾缀字段追加，
 > 未部署前无兼容包袱。
@@ -55,11 +58,18 @@ enum FeePolicy {
 }
 FeeSplit { treasury_bps: u16(≤10000), treasury: [u8;33], operator: [u8;33] }
 
-rake_of(pot)  = min(pot * rate_bps / 10000, cap)   // 向下取整；Zero 恒 0
+rake_of(base) = min(base * rate_bps / 10000, cap)   // 向下取整；Zero 恒 0
 split_of(t)   = (t * treasury_bps / 10000, 余数)     // 零头归 operator
 commitment    = poseidon(DOMAIN_FEE_POLICY, mode, rate, cap, t_bps, t_x*, t_y*, o_x*, o_y*)
 ```
 
+- **rake 计费基数（v1.2.2，B9 口径统一）**：`rake_of` 的输入 `base` 是
+  **rake 基数**——结算路径传 `plan.rake_base()`（poker-settlement-core
+  `SettlementPlan::rake_base()`：plan 内 **contested 层**（eligible ≥ 2 座）
+  的 `gross_amount` 之和）。uncalled 返还层（uncontested）**不计费**：
+  `plan.validate` 强制其 rake == 0，故 `plan.rake` 只能来自 contested 层。
+  该口径与 poker_l1 canonical（`derive_settlement_plan` 对 contested gross
+  取费）**唯一一致**：无 uncalled 层的手二者恒等（rake_base == gross_pot）。
 - rake_mode 判别值对齐主仓库 `canonical_rake_opening`（NONE=0 / PERCENTAGE=1）。
 - 注册表：table_id → 策略，开桌绑定、**无更新路径**（幂等同策略重绑定允许）。
 
@@ -126,13 +136,16 @@ owner 和金额）。`settlement_binding`（Poseidon）在 rake.total 之后追�
    **payout_root**〔v1.2〕)——签名绑定精确赔付结构（P0-7），sequencer 无法
    改打给别人；policy_commitment 刻意不在 effect 内，由注册表冻结检查
    （第 8 条）独立强制
-8. 费率：`rake.total == plan.rake == policy.rake_of(pot)`；
+8. 费率（v1.2.2/B9 口径）：`rake.total == plan.rake ==
+   policy.rake_of(plan.rake_base())`；
    `record.policy_commitment == policy.commitment`
-   （语义注记：该链要求计划抽水与 appchain 策略在**全额 gross pot** 上一致。
-   poker_l1 的 rake 只对 contested 层计费——含 uncalled 返还层的计划其
-   plan.rake < policy.rake_of(gross_pot)，会被 fail-closed 拒绝。**已知语义
-   缺口**：此类手（含 uncalled 返还）暂不能走 appchain 结算，需后续在
-   policy 或 plan 侧统一口径——见 §8.3 前的口径记录与 BLOCKERS.md B9）
+   （**rake 基数 = contested 层 gross 之和**（`SettlementPlan::rake_base()`），
+   uncalled 返还层不计费——`plan.validate` 已强制 uncontested 层 rake == 0，
+   与 poker_l1 canonical 的 contested-only 计费同口径；v1.2.1 前误按全额
+   gross pot 计费导致含 uncalled 返还层的合法手被 fail-closed 拒绝，v1.2.2
+   修正。计费口径收敛不放松任何其他防线：`plan.gross_pot == record.pot ==
+   Σinputs == 镜像 pot`（第 3/4/11 条）与分账绑定（第 10 条）不变——即
+   gross 全额仍全额守恒，rake 只从 contested 基数计征）
 9. 守恒：`Σinputs == Σpayouts + Σrake_notes`（rake note 已含在输出侧）
 10. 分账：treasury_out/operator_out 数额 == `policy.split_of(rake.total)` 且收款人匹配
 11. 手牌证明绑定（v1.1/v1.2，可选）：`hand_proof` 存在时，归档 scope
@@ -149,9 +162,11 @@ owner 和金额）。`settlement_binding`（Poseidon）在 rake.total 之后追�
 > v1.2 关闭 BLOCKERS B2 末段：终态承诺 → pot 数值的逐字节绑定经由
 > `post_state_image_bytes`（被 Fiat--Shamir 范围绑定 + 端点投影约束）
 > 中 `pot` 字段的直接解析完成。
-> 已知边界：rake opening（批级 raked-award 终局）与 contested-only rake
-> 计划模型在"sole-survivor 有抽水"终局上语义不一致，此类组合被
-> fail-closed 拒绝（见第 8 条注记与 BLOCKERS.md B9），不做放宽。
+> 已知边界（v1.2.2 更新）：rake opening（批级 raked-award 终局，计费基数 =
+> 终态全池 pot）与 contested-only 计划模型在"含 uncalled 返还层的 raked
+> 终局"上基数不同，此类组合仍被 fail-closed 拒绝（不放宽）；终局**无**
+> uncalled 层时 `pot == plan.rake_base()`，rake opening 与 `plan.rake` 恒等
+> 复现（B9 已关闭主体口径缺口，见 BLOCKERS.md）。
 
 ### 4.2 TexasArchiveScope v2（canonical 布局镜像）
 
@@ -324,3 +339,25 @@ fail-closed 默认：`StarkRequired` + `verifier_key = None` → **REAL 结算�
 |---|---|---|
 | `real_settlement_rejected_total` | counter | REAL 结算出证在引擎/提交/批次层被拒 |
 | `withdrawal_finality_rejected_total` | counter | REAL note 提现未达 finality 门 |
+
+## 11. 变更记录（changelog）
+
+### v1.2.2（2026-09-12）— rake 计费口径统一（BLOCKERS B9 关闭）
+
+- **语义修正**：结算费率关系从 `rake.total == plan.rake ==
+  policy.rake_of(record.pot)`（全额 gross pot 口径）改为
+  `rake.total == plan.rake == policy.rake_of(plan.rake_base())`
+  （**contested-only 口径**：基数 = contested 层 gross 之和，uncalled 返还
+  层不计费）。对齐 poker_l1 canonical（`derive_settlement_plan` 只对
+  contested gross 取费）。
+- **行为变化边界**：仅限"此前被误拒的合法手（含 uncalled 返还层）现在可
+  结算"。此前被拒的手（篡改 rake、分账不符、跨层挪 rake、低报 pot）仍然
+  全拒：uncontested 层 rake == 0 由 `plan.validate` 强制（跨层挪 rake 到
+  uncalled 层不可行），gross 全额守恒（第 3/4/9/11 条）与分账/收款人绑定
+  （第 10 条）不变。
+- **wire format 不变**：无字段增删、无域标签变更；`rake_base` 是已验证
+  计划的派生量（`SettlementPlan::rake_base()`），不入编码。
+- **测试**：core（rake_base 单测 + derive uncalled 层锚点）、poker_l1
+  （canonical uncalled 层测试钉住 contested-only 基数）、appchain
+  （uncalled 层结算正例 + 负例矩阵回归）、texasair e2e（含 uncalled 层的
+  REAL 结算流）。

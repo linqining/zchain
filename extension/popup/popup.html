@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>ZChain Wallet</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="logo">Z</span>
+      <span class="title">ZChain Wallet</span>
+    </div>
+    <span id="net-badge" class="badge badge-devnet">devnet</span>
+  </header>
+
+  <main id="view">
+    <!-- 视图由 popup.js 渲染（无远程脚本；CSP script-src 'self'） -->
+  </main>
+
+  <footer>
+    <span>Extension 0.1 · PLAY / devnet · wallet-core WASM</span>
+  </footer>
+
+  <script src="popup.js" type="module"></script>
+</body>
+</html>

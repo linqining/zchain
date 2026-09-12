@@ -239,6 +239,31 @@ pub struct SettlementPlan {
 }
 
 impl SettlementPlan {
+    /// Rake billing basis: the sum of `gross_amount` over **contested**
+    /// layers (`SettlementPotPlan::is_contested`, i.e. layers with ≥ 2
+    /// eligible seats).
+    ///
+    /// Canonical rake semantics (poker_l1 `derive_settlement_plan`) only
+    /// charge rake on contested gross: an uncontested layer is an uncalled
+    /// return (or sole-survivor layer); it never carries rake (enforced by
+    /// [`SettlementPlan::validate`]) and therefore never enters the billing
+    /// basis. The appchain fee relation is
+    /// `rake.total == plan.rake == policy.rake_of(plan.rake_base())`
+    /// (ABI v1.2.2, BLOCKERS B9)。
+    ///
+    /// For a plan that passed [`SettlementPlan::validate`] the sum cannot
+    /// overflow (Σ contested gross ≤ gross_pot); a hostile unvalidated plan
+    /// saturates to `u64::MAX`, which can only over-state the base and thus
+    /// fail the fee relation (fail-closed).
+    #[must_use]
+    pub fn rake_base(&self) -> u64 {
+        self.pots
+            .iter()
+            .filter(|pot| pot.is_contested())
+            .try_fold(0u64, |sum, pot| sum.checked_add(pot.gross_amount))
+            .unwrap_or(u64::MAX)
+    }
+
     /// Domain-separated digest of the canonical plan encoding.
     ///
     /// `blake2b-256("zchain.texas_poker.settlement_plan.v2" ‖ borsh(plan))`。
@@ -392,5 +417,95 @@ impl SettlementPlan {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 单层 contested pot（`seats_mask.count_ones() >= 2`）计划。
+    fn single_pot_plan(
+        gross_amount: u64,
+        rake: u64,
+        eligible_mask: u16,
+    ) -> SettlementPlan {
+        let net_amount = gross_amount - rake;
+        let mut awards = [0u64; SETTLEMENT_SEATS];
+        awards[0] = net_amount;
+        let mut runout = RunoutPotPlan::inactive();
+        runout.amount = net_amount;
+        runout.winner_mask = if eligible_mask == 0 { 0b01 } else { eligible_mask };
+        runout.awards = awards;
+        SettlementPlan {
+            version: SETTLEMENT_PLAN_VERSION,
+            schedule: SettlementRunoutSchedule::Single,
+            gross_pot: gross_amount,
+            rake,
+            total_awards: net_amount,
+            winner_mask: runout.winner_mask,
+            awards,
+            pots: vec![SettlementPotPlan {
+                pot_index: 0,
+                gross_amount,
+                rake,
+                net_amount,
+                eligible_mask,
+                runouts: [runout, RunoutPotPlan::inactive()],
+            }],
+        }
+    }
+
+    /// contested 层（双 eligible）gross 全额进入 rake 基数。
+    #[test]
+    fn rake_base_sums_contested_gross() {
+        let plan = single_pot_plan(1_000, 50, 0b11);
+        assert!(plan.pots[0].is_contested());
+        assert_eq!(plan.rake_base(), 1_000);
+    }
+
+    /// uncontested 层（uncalled 返还/sole-survivor）gross 不进入 rake 基数；
+    /// 且 validate 强制该层 rake 必须为 0（B9 语义约束，core 侧钉死）。
+    #[test]
+    fn rake_base_excludes_uncontested_layers_and_validate_rejects_rake_on_them() {
+        let contested = single_pot_plan(1_000, 50, 0b11);
+        // 追加一个 uncalled 返还层（seat1 独占，rake 0）
+        let mut plan = contested;
+        plan.gross_pot += 300;
+        plan.total_awards += 300;
+        plan.awards[1] += 300;
+        plan.winner_mask |= 0b10;
+        let mut runout = RunoutPotPlan::inactive();
+        runout.amount = 300;
+        runout.winner_mask = 0b10;
+        runout.awards[1] = 300;
+        plan.pots.push(SettlementPotPlan {
+            pot_index: 1,
+            gross_amount: 300,
+            rake: 0,
+            net_amount: 300,
+            eligible_mask: 0b10,
+            runouts: [runout, RunoutPotPlan::inactive()],
+        });
+        assert!(plan.pots[0].is_contested());
+        assert!(!plan.pots[1].is_contested());
+        assert_eq!(plan.rake_base(), 1_000, "uncalled 层不计入基数");
+        assert_eq!(plan.rake, 50);
+        plan.validate(2).unwrap();
+
+        // 约束确认：uncontested 层携带非零 rake → validate 拒绝（fail-closed）
+        let mut raked_return = plan.clone();
+        raked_return.rake = 51; // 伪造者同步抬高 plan.rake
+        raked_return.pots[1].rake = 1;
+        raked_return.pots[1].net_amount = 299;
+        raked_return.pots[1].runouts[0].amount = 299;
+        raked_return.pots[1].runouts[0].awards[1] = 299;
+        raked_return.awards[1] -= 1;
+        raked_return.total_awards -= 1;
+        let error = raked_return.validate(2).unwrap_err();
+        assert!(
+            error.to_string().contains("uncontested pot must not be raked"),
+            "unexpected error: {error}"
+        );
     }
 }

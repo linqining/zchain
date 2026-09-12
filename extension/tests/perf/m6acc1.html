@@ -1,0 +1,40 @@
+<!doctype html>
+<!--
+  M6-ACC-1 浏览器验证吞吐 harness（Chrome for Testing，headless=new）。
+
+  加载与扩展同一 vendor 产物的 wallet-core wasm（../../vendor/wallet-core/，
+  与扩展 background/common 使用完全相同的字节），循环执行 10 手结算验证：
+    手 1..9  = 正例（完整签名的 ABI v1.2 SettlementRecord）
+    手 10    = 负例（P 层签名伪造注入，必须被拒）
+  每手记录 preview/sign 两段 wasm 调用耗时；每轮记录
+  performance.memory.usedJSHeapSize（--enable-precise-memory-info）与 wasm
+  线性内存。结果写入 window.__M6ACC1_RESULT / console（M6ACC1_RESULT 前缀），
+  由 run_m6acc1.mjs 经 CDP 取回落盘。
+
+  用法（repo 根目录）：
+    M6ACC1_ROUNDS=50 node extension/tests/perf/run_m6acc1.mjs
+  或手动：python3 -m http.server -d extension 8091 后访问
+    http://127.0.0.1:8091/tests/perf/m6acc1.html?rounds=50
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M6-ACC-1 浏览器验证吞吐（wallet-core wasm）</title>
+<style>
+  body { font: 13px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 24px; color: #1a1a1a; }
+  h1 { font-size: 16px; margin: 0 0 8px; }
+  .verdict { font-size: 15px; font-weight: 700; padding: 6px 10px; display: inline-block; margin: 8px 0; }
+  .pass { background: #dff5e1; color: #116629; }
+  .fail { background: #fde3e3; color: #8f1d1d; }
+  pre { background: #f5f5f5; border: 1px solid #ddd; padding: 10px; white-space: pre-wrap; word-break: break-all; max-height: 70vh; overflow: auto; }
+</style>
+</head>
+<body>
+<h1>M6-ACC-1 浏览器验证吞吐 — wallet-core wasm 结算验证面（10 手 × N 轮）</h1>
+<p id="progress">初始化…</p>
+<p id="verdict" class="verdict" style="display:none"></p>
+<pre id="summary">（等待运行结果）</pre>
+<script type="module" src="./m6acc1_page.js"></script>
+</body>
+</html>

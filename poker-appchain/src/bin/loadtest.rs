@@ -74,12 +74,13 @@ impl Robot {
 }
 
 fn find_proven_note(seq: &Sequencer, owner: &[u8; 33], amount: u64) -> Note {
+    // B5：经 owner 二级索引取该 owner 的 note（O(1) 命中 + k 次过滤），
+    // 不再全账本 O(n) 线性扫描——64 桌压测墙钟主因即此处
     seq.state()
-        .notes
-        .values()
+        .note_entries_of(owner)
+        .into_iter()
         .find(|e| {
-            e.note.owner == *owner
-                && e.note.amount == amount
+            e.note.amount == amount
                 && e.note.table_id.is_none()
                 && e.status == NoteStatus::Proven
         })
@@ -186,13 +187,18 @@ fn main() {
                 .unwrap();
                 lat_us.push(u64::try_from(t.elapsed().as_micros()).unwrap_or(u64::MAX));
             }
-            // 本桌 seat note（table_id = Some(table)，Pending 可直接结算）
-            let seats: Vec<Note> = seq
-                .state()
-                .notes
-                .values()
-                .filter(|e| e.note.table_id == Some(table as u64))
-                .map(|e| e.note.clone())
+            // 本桌 seat note（table_id = Some(table)，Pending 可直接结算）。
+            // B5：逐 robot 经 owner 二级索引取，不再全账本 O(n) 扫描
+            let seats: Vec<Note> = robots
+                .iter()
+                .map(|r| {
+                    seq.state()
+                        .note_entries_of(&r.pk())
+                        .into_iter()
+                        .find(|e| e.note.table_id == Some(table as u64))
+                        .map(|e| e.note.clone())
+                        .expect("one seat note per robot")
+                })
                 .collect();
             assert_eq!(seats.len(), robots.len(), "one seat note per robot");
             let mut binding32 = [0u8; 32];

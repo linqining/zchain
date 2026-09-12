@@ -1,0 +1,40 @@
+{
+  "manifest_version": 3,
+  "name": "ZChain Wallet",
+  "short_name": "ZChain",
+  "version": "0.1.0",
+  "description": "ZChain browser wallet (Extension 0.1): PLAY + devnet, versioned window.zchain provider, wallet-core WASM signing. Not an EIP-1193 provider.",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "background/service_worker.js",
+    "type": "module"
+  },
+  "permissions": ["storage", "alarms"],
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content/bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content/inpage.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["content/inpage.js"],
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"]
+    }
+  ],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "ZChain Wallet (0.1, devnet/PLAY)"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+  }
+}

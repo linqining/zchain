@@ -130,6 +130,15 @@ impl RateLimiter {
     pub struct LedgerState {
         /// notes：承诺字节 → 条目。
         pub notes: HashMap<[u8; 32], NoteEntry>,
+        /// owner 二级索引（B5）：owner 压缩公钥 → 该 owner 名下 **live**
+        /// note 承诺集合。纯性能结构（**不入状态根**，行为等价由
+        /// `tests/proptests.rs::owner_index_matches_full_scan` 属性测试
+        /// 钉住）：mint/consume 全路径（deposit/buy-in/settle payout+
+        /// rake/transfer 输出/withdraw 销毁）经 [`Sequencer::mint_note`]/
+        /// [`Sequencer::consume_note`] 同步维护，消费即移除（集合空则连
+        /// owner 键一并删除，索引语义 == 对 `notes` 的全量扫描）。WAL 重放
+        /// 复用同一 `apply_op` → mint/consume 路径，重启自然重建。
+        pub owner_index: HashMap<[u8; 33], HashSet<[u8; 32]>>,
         /// note 承诺 → 铸出来源 op（§5.4 provenance 映射）。与
         /// [`NoteEntry::created_at_op`] 同源（`mint_note` 写入），但**消费后
         /// 不删除**——提现销毁后托管打款侧仍需查来源 op 过 finality 门；
@@ -188,16 +197,46 @@ impl LedgerState {
         felt_to_bytes32(&acc)
     }
 
-    /// 某 owner 的余额聚合（(REAL, PLAY)）。
+    /// 某 owner 名下的全部 live note 承诺（B5：O(1) 索引命中；承诺集引用，
+    /// 零拷贝）。
+    #[must_use]
+    pub fn commitments_of(&self, owner: &[u8; 33]) -> Option<&HashSet<[u8; 32]>> {
+        self.owner_index.get(owner)
+    }
+
+    /// 某 owner 名下的全部 live note（B5：走 owner_index，O(1) 定位 +
+    /// k 次查表，不再全账本线性扫描）。
+    #[must_use]
+    pub fn notes_of(&self, owner: &[u8; 33]) -> Vec<Note> {
+        self.note_entries_of(owner).into_iter().map(|e| e.note.clone()).collect()
+    }
+
+    /// 某 owner 名下的全部 live 条目（含 leaf_index/status 等账本元数据；
+    /// B5 索引路径）。顺序不保证（HashSet 迭代序）。
+    #[must_use]
+    pub fn note_entries_of(&self, owner: &[u8; 33]) -> Vec<&NoteEntry> {
+        match self.owner_index.get(owner) {
+            Some(set) => set
+                .iter()
+                .filter_map(|c| self.notes.get(c))
+                .collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// 某 owner 的余额聚合（(REAL, PLAY)）。B5：走 owner_index，与全量
+    /// 扫描等价（`owner_index_matches_full_scan` 属性测试钉住）。
     #[must_use]
     pub fn balances_of(&self, owner: &[u8; 33]) -> (u128, u128) {
         let mut real = 0u128;
         let mut play = 0u128;
-        for e in self.notes.values() {
-            if &e.note.owner == owner {
-                match e.note.asset_class {
-                    crate::note::AssetClass::Real => real += u128::from(e.note.amount),
-                    crate::note::AssetClass::Play => play += u128::from(e.note.amount),
+        if let Some(set) = self.owner_index.get(owner) {
+            for c in set {
+                if let Some(e) = self.notes.get(c) {
+                    match e.note.asset_class {
+                        crate::note::AssetClass::Real => real += u128::from(e.note.amount),
+                        crate::note::AssetClass::Play => play += u128::from(e.note.amount),
+                    }
                 }
             }
         }
@@ -849,6 +888,9 @@ impl Sequencer {
         // §5.4 provenance：铸出即记录来源 op；消费后保留（提现打款侧
         // finality 判据），WAL 重放重建
         state.note_origins.insert(c, created);
+        // B5：owner 二级索引同步维护（铸入即登记；全部铸造路径——deposit/
+        // buy-in seat/transfer 输出/settle payout/rake note——都经此原语）
+        state.owner_index.entry(note.owner).or_default().insert(c);
         state.notes.insert(
             c,
             NoteEntry {
@@ -869,6 +911,14 @@ impl Sequencer {
         let c = felt_to_bytes32(&note.commitment());
         if state.notes.remove(&c).is_none() {
             return Err(AppchainError::NoteNotFound);
+        }
+        // B5：与 notes.remove 同步（索引语义 == 全量扫描，即便后续
+        // nullifier 步骤失败也不漂移）
+        if let Some(set) = state.owner_index.get_mut(&note.owner) {
+            set.remove(&c);
+            if set.is_empty() {
+                state.owner_index.remove(&note.owner);
+            }
         }
         let nf = crate::felt::felt_from_bytes32_exact(nullifier)?;
         state.nullifiers.try_consume(nf)?;

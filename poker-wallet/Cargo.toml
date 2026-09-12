@@ -1,0 +1,60 @@
+[package]
+name = "poker-wallet"
+version = "0.1.0"
+edition = "2024"
+description = "ZChain shared wallet core (wallet-core, plan-appchain §6.12.3) + minimal CLI wallet"
+license = "BUSL-1.1"
+
+# 库名 wallet_core：共享核心语义（浏览器扩展/Web/桌面/移动 不得各自实现密码学）。
+[lib]
+name = "wallet_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "poker-wallet"
+path = "src/bin/poker-wallet.rs"
+
+[dependencies]
+# ===== 校验面接入（复用 appchain 既有密码学，不重实现）=====
+poker-appchain = { path = "../poker-appchain" }
+# ===== Stark curve / SNIP-12 摘要（poseidon_hash_many + 签名验证）=====
+starknet-crypto = { workspace = true }
+# ===== secp256k1 owner / session key =====
+secp256k1 = { workspace = true }
+# ===== 稳定字节 ABI =====
+borsh = { workspace = true }
+# ===== 哈希与编码 =====
+blake2 = { workspace = true }
+sha3 = { workspace = true }
+hex = { workspace = true }
+# ===== 序列化（CLI JSON 文件驱动）=====
+serde = { workspace = true }
+serde_json = { workspace = true }
+# ===== 错误 =====
+thiserror = { workspace = true }
+# ===== 随机源（密钥/salt/nonce 生成；OsRng）=====
+rand = { workspace = true }
+# ===== keystore/backup：Argon2id + AEAD + zeroize =====
+argon2 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+zeroize = { workspace = true }
+
+[features]
+default = []
+# ===== 浏览器 WASM 绑定（plan-appchain §6.12.4 Extension 0.1）=====
+# 仅 wasm32 构建启用；默认构建/测试/CLI 完全不受影响。
+wasm = ["dep:wasm-bindgen"]
+
+# ---- 仅 wasm32 目标（native 构建不编译，43 个测试/CLI 零影响）----
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# OsRng 在 wasm32 下经浏览器 crypto.getRandomValues（getrandom js 后端）。
+# 不启用时 keystore/seal、密钥生成等 OsRng 路径在 wasm 运行时会 fail-closed panic。
+getrandom = { version = "0.2.17", features = ["js"] }
+# 与仓库已安装的 wasm-bindgen-cli 0.2.127 严格一致（跨版本不兼容）。
+wasm-bindgen = { version = "=0.2.127", optional = true }
+
+# WASM bin（src/wasm.rs 的模块文档含完整构建/绑定命令）。
+[[bin]]
+name = "wallet_core_wasm"
+path = "src/wasm.rs"
+required-features = ["wasm"]

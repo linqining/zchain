@@ -8,6 +8,48 @@
 > （本仓库内的同名 crate 是精简集成版）；实现 crate `poker-appchain/` 落在
 > **本仓库**根下，2026-09-05 迁入。
 
+## ⭐ 实现状态（2026-09-12 第二轮：BLOCKERS 全关 + wallet-core + 产品化站点）
+
+**BLOCKERS.md：B1–B9 全部关闭。** 逐项：B9 rake 口径统一（`rake_base()` =
+contested 层 gross 之和，uncalled 返还不计费，ABI v1.2.2，含 uncalled 手
+e2e 正例）；B5 owner 二级索引（proptest 全量扫描 oracle 等价 + loadtest）；
+B4 三个 fuzz target（note_abi 112k / soft_confirm_api 70k /
+settlement_witness 71k runs，ASan 0 crash）；B1 性能基准落档
+`docs/plan-appchain-perf.md`（证明就绪 777ms p95，M4-ACC-1/2 PASS，回归
+断言写死）；B3 逐街实验 DR-1（机制成立、经济学失败——log_size 8 下限使
+单证明成本与行数解耦，v1 定整手，数据落档）；B6 texas 结算出口接
+appchain sequencer（`texas/src/starknet/appchain/`：进程内 SettlementProver
+真调 canonical 验证、plan 派生、嵌入式 Sequencer+管道、SOFT_CONFIRM 事件、
+Starknet 旧路径保留可配回退）；B7 出入金链上侧（VaultProvider trait +
+Mock/Starknet 双实现、存款幂等桥、提现 finality 执行、自动对账告警）。
+B6/B7 残余边界如实记录于 BLOCKERS（REAL 归档实时生产者、fold-win 手回退、
+客户端密钥托管、线上桥校准）。
+
+**钱包（§6.12 / M6）**：新 crate `poker-wallet`（§6.12.3 九模块：key_manager /
+keystore Argon2id+AEAD / note_store REAL-PLAY 物理分库 / operation_signer
+结构化预览+拒绝任意字节 / sync / verifier / backup / vault_adapter /
+account_binding SNIP-12 rev1 AuthorizeZChainKey 实测可验签），43 测试；
+CLI 钱包 `poker-wallet` bin；**Extension 0.1**（MV3 + wallet-core WASM +
+`zchain_*` provider + origin/nonce/expiry 安全层 28 用例 + 真实浏览器 E2E）。
+M6-ACC 覆盖：2/3/4/7/8 全覆盖，1/5/6 部分（浏览器吞吐/真机兼容矩阵/插件
+发布工程为集成面），连接协议 WalletConnect/EIP-1193 适配器为 0.3。
+WALLET-ACC 覆盖对照见 `poker-wallet/README.md` 与 `extension/ACCEPTANCE.md`。
+
+**产品化（§6）**：`website/` 静态站（构建脚本 python3 标准库，41 页）——
+官网 13 路由（含 §6.3 中英文案与首屏四入口）、文档站 13 板块 28 页
+（15 分钟 quickstart、协议提炼、安全公式"数学式+伪代码"）、media-kit v0.1
+21 文件（logo/品牌规范/one-pager/新闻稿/FAQ/whitepaper/litepaper/90s 脚本/
+发布节奏模板）、/legal 全项。验收扫描：禁用词 0 命中（11 词表）、2567 内链
+0 断链、a11y 规则全过（对比度 ≥7.85:1）、桌面+375px 移动端实测截图
+（`website/ACCEPTANCE.md` 逐项记录，TLS/portal 后端/release 基础设施如实
+标"待部署"）。§6.10 指标面板为定义+数据源文档（实时面板属 portal 服务，
+待部署）。
+
+**测试基线（本轮收尾时）**：zchain workspace 全量 release 构建通过；
+poker_l1 / poker-appchain / poker-settlement-core / poker-wallet / zchain
+bin / poker-appchain-texasair / texas（poker_texas_air 工作区）全部套件
+绿（数字见最终验证报告）。
+
 ## ⭐ 实现状态（2026-09-12：§5.2 P0 全部关闭 + stwo 端到端 + 多节点组网验收）
 
 **本节为 §5.2 复核结论（v1.2 P0）的落地记录。** 验收基线：workspace 全量
@@ -288,18 +330,27 @@ B6 texas 接线、B7 出入金链上侧）。
 **职责**：note 自托管 + 验证即确认。
 
 **实现内容**：
-- [ ] note 钱包：加密存储、余额聚合视图、备份导出
-- [ ] wasm 验证集成：结算证明本地验证 + 软确认链跟随
-- [ ] REAL / PLAY 模式 UI 隔离与明确标识
-- [ ] 密钥恢复流程分模式：自托管账户只允许加密备份/恢复因子恢复；托管恢复必须
+- [x] note 钱包：加密存储、余额聚合视图、备份导出（`poker-wallet`：Argon2id+AEAD
+      keystore、REAL/PLAY 物理分库、加密备份/恢复）
+- [x] wasm 验证集成：结算证明本地验证 + 软确认链跟随（wallet-core 编译 wasm
+      供扩展使用；本地 verifier 覆盖 settlement/软确认链/批次根）
+- [x] REAL / PLAY 模式 UI 隔离与明确标识（逻辑层类型隔离 + 扩展徽章 + claim 门）
+- [x] 密钥恢复流程分模式：自托管账户只允许加密备份/恢复因子恢复；托管恢复必须
       经过旧 note 冻结、延迟窗口和可审计迁移，客服不能绕过账本直接重建私钥或增发
-- [ ] 钱包兼容性矩阵与适配层：区分 ZChain Note owner key、Starknet Vault account
+      （§6.12.6 恢复/轮换纪律 + 备份恢复全链路 fail-closed 测试）
+- [x] 钱包兼容性矩阵与适配层：区分 ZChain Note owner key、Starknet Vault account
       和可选 EVM 外部账户，禁止把地址/签名格式混用；评估并实现 ABI v2 的
-      Stark curve/SNIP-12 typed-data 路径
-- [ ] 原生钱包插件（浏览器扩展）和独立钱包应用的最小可用版本
-- [ ] 钱包连接协议：优先实现 Wallet Standard 风格能力发现；外部连接分别适配
+      Stark curve/SNIP-12 typed-data 路径（§6.12.1 矩阵 + SNIP-12 rev1
+      AuthorizeZChainKey 实测可验签）
+- [x] 原生钱包插件（浏览器扩展）和独立钱包应用的最小可用版本（Extension 0.1：
+      MV3 + wallet-core WASM + 真实浏览器 E2E；CLI 钱包 `poker-wallet`）
+- [x] 钱包连接协议：优先实现 Wallet Standard 风格能力发现；外部连接分别适配
       WalletConnect v2 / EIP-1193 / Starknet 钱包接口，不把这些协议伪装成原生共识账户
-- [ ] 交易签名预览：显示网络、资产、金额、桌、输出 owner、rake、request id、
+      （getCapabilities 能力发现；`extension/adapters/`：EIP-1193 只读白名单+
+      `zchain_*` 透传、WC v2 namespace 映射+能力∩白名单授予+重放/过期拒（生产
+      SignClient 注入点就绪）、Starknet SNIP-12 授权委托（无 note spend 路由）；
+      79 用例钉住红线；真机矩阵归 WALLET-ACC-1）
+- [x] 交易签名预览：显示网络、资产、金额、桌、输出 owner、rake、request id、
       hand binding 和 proof 状态；拒绝无法结构化解析的签名请求
 
 **验收测试**：

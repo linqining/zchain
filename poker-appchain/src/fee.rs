@@ -7,6 +7,18 @@
 //!
 //! 对齐既有资产：`canonical_rake_opening` 的 `rake_mode`（NONE=0 /
 //! PERCENTAGE=1）与本模块语义一致，ABI 层保持相同判别值。
+//!
+//! ## rake 计费基数（ABI v1.2.2，BLOCKERS B9 口径统一）
+//!
+//! `rake_of` 的输入语义是 **rake 基数**（rake base），不是结算记录的全额
+//! gross pot：结算关系（M2）以 `policy.rake_of(plan.rake_base())` 校验
+//! 抽取，其中 `plan.rake_base()` = plan 内 **contested 层**（eligible ≥ 2
+//! 座）的 gross 之和。uncalled 返还层（uncontested）不计费——`plan.validate`
+//! 强制其 rake == 0，因此 `plan.rake` 只能来自 contested 层。这与 poker_l1
+//! canonical 的 contested-only 计费（`derive_settlement_plan` 对 contested
+//! gross 取费）**唯一同口径**：无 uncalled 层的手二者数值恒等（rake_base ==
+//! gross_pot）；含 uncalled 层的手按 contested 基数计费（v1.2.1 前误按全额
+//! gross 计费导致此类手被 fail-closed 误拒，已修正）。
 
 use std::collections::BTreeMap;
 
@@ -64,15 +76,18 @@ impl FeePolicy {
         }
     }
 
-    /// 计算抽取额：`min(pot * rate_bps / 10000, cap)`，向下取整。
+    /// 计算抽取额：`min(base * rate_bps / 10000, cap)`，向下取整。
     ///
-    /// 零费策略恒 0；Zero 桌上 pot 任意大抽取仍为 0（M5-ACC-1）。
+    /// 零费策略恒 0；Zero 桌上基数任意大抽取仍为 0（M5-ACC-1）。
+    /// `base` 语义见模块文档"rake 计费基数"：结算路径传入
+    /// `plan.rake_base()`（contested 层 gross 之和，uncalled 返还不计费），
+    /// 单层 contested plan 退化为 `rake_of(gross_pot)`。
     #[must_use]
-    pub fn rake_of(&self, pot: u64) -> u64 {
+    pub fn rake_of(&self, base: u64) -> u64 {
         match self {
             Self::Zero => 0,
             Self::FixedRake { rate_bps, cap, .. } => {
-                let raw = (u128::from(pot) * u128::from(*rate_bps)) / 10_000;
+                let raw = (u128::from(base) * u128::from(*rate_bps)) / 10_000;
                 let capped = if *cap == 0 {
                     raw
                 } else {

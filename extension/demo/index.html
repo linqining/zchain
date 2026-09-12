@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>ZChain dapp demo（Extension 0.1 验证页）</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 12px; }
+    button { margin: 4px 8px 4px 0; padding: 6px 12px; }
+    pre { background: #f4f6f8; padding: 12px; border-radius: 8px; overflow: auto; max-height: 320px; }
+    .bad { color: #b00; }
+    code { background: #eef; padding: 0 4px; }
+  </style>
+</head>
+<body>
+  <h1>ZChain dapp demo <small>(window.zchain, Extension 0.1 / devnet / PLAY)</small></h1>
+  <p>本页用于手动验证插件：<code>python3 -m http.server -d extension/demo 8080</code> 后访问
+    <code>http://localhost:8080/</code>。签名需先在插件弹窗创建/解锁钱包并用 devnet 水龙头铸造 PLAY。</p>
+  <p>
+    <button id="connect">zchain_requestAccounts</button>
+    <button id="net">zchain_getNetwork</button>
+    <button id="caps">zchain_getCapabilities</button>
+    <button id="accounts">zchain_getAccounts</button>
+    <button id="notes">zchain_getNotes</button>
+    <button id="sign">signOperation(transfer)</button>
+    <button id="signWrong">signOperation(坏 previewHash)</button>
+    <button id="switch">zchain_switchNetwork（应 0.1 拒绝）</button>
+    <button id="session">zchain_authorizeSessionKey（应 0.1 拒绝）</button>
+  </p>
+  <pre id="out">（输出区）</pre>
+  <script src="demo.js"></script>
+</body>
+</html>

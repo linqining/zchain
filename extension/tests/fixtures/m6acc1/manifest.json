@@ -1,0 +1,25 @@
+{
+  "abi": "SettlementRecord ABI v1.2（含 SettlementPlan）；FeePolicy FixedRake 5%/cap 0/split 20% treasury",
+  "asset_class": "PLAY",
+  "files": [
+    "hand_01.json",
+    "hand_02.json",
+    "hand_03.json",
+    "hand_04.json",
+    "hand_05.json",
+    "hand_06.json",
+    "hand_07.json",
+    "hand_08.json",
+    "hand_09.json",
+    "hand_10.json"
+  ],
+  "generated_by": "extension/tests/perf/fixture_gen（一次性 Rust 工具，公开 API 构造，含生成期自检）",
+  "self_checks_at_generation": [
+    "validate_settlement(positive) == Ok（全部 10 份正例记录）",
+    "validate_settlement(negative twin) == Err（手 10 翻转 inputs[1].spend.sig 末字节后）",
+    "soft_confirm::verify_chain(frames, sequencer_public) == Ok（每手两帧链）",
+    "pipeline::batch_root(bindings) == claimed_root（每手单绑定批次根）"
+  ],
+  "sequencer_public": "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61",
+  "what": "M6-ACC-1 浏览器验证吞吐夹具（10 手 = 9 正例 + 1 伪造负例）"
+}

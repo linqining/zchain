@@ -991,3 +991,214 @@ fn full_hand_real_stark_to_settlement_to_withdrawal() {
         let _ = std::fs::remove_file(&wal_path);
     }
 }
+
+// ===== B9（ABI v1.2.2）：含 uncalled 返还层的手 =====
+
+/// 含 uncalled 返还层的结算回归（BLOCKERS B9 / ABI v1.2.2）。
+///
+/// 牌局叙事（对照主测试的等额全下，此处**不等额**）：3 人 REAL 桌——
+/// UTG（座0）全下加注 200、SB（座1）覆盖全下 500、BB（座2）弃牌 50 死钱。
+/// plan 分层 = [450 contested（含死钱）, 300 uncalled 返还座1]：
+/// - rake 计费基数 = `plan.rake_base()` = **450**（5% → 22 = treasury 4 +
+///   operator 18）——与 poker_l1 canonical 的 contested-only 计费同口径；
+/// - 旧口径（v1.2.1 前）按全额 gross pot 750 计 37，与计划 rake 22 必然
+///   FeeMismatch——这正是 B9 修复前此类合法手被 fail-closed 拒绝的原因。
+///
+/// STARK 出证路径由主测试覆盖；本手走 sequencer 软确认结算
+/// （`hand_proof = None` 与 REAL 结算的 sequencer 准入语义一致——
+/// REAL 出证门在 pipeline/引擎层，不在纯函数校验/账本层）。
+#[test]
+fn uncalled_return_layer_hand_settles_end_to_end() {
+    use poker_appchain::settlement::{RakeSplitRecord, SettleInput, SettlementRecord, SpendAuth};
+
+    // ===== 1. plan 派生（poker-settlement-core，与 poker_l1 canonical 同码）=====
+    let total_bets = [200u64, 500, 50];
+    let inactive = [false, false, true];
+    let all_in = [true, true, false];
+    let hole_utg: &[u8] = &[0, 1]; // ♠2 ♠3
+    let hole_sb: &[u8] = &[12, 11]; // ♠A ♠K
+    let hole_bb: &[u8] = &[]; // 弃牌无手牌
+    let hole_cards: [&[u8]; 3] = [hole_utg, hole_sb, hole_bb];
+    let snapshot = TableSnapshot {
+        seat_count: 3,
+        button: 0,
+        total_bets: &total_bets,
+        inactive: &inactive,
+        all_in: &all_in,
+        hole_cards: &hole_cards,
+        rake_mode: poker_settlement_core::RAKE_MODE_PERCENTAGE,
+        rake_bps: 500,
+        rake_cap: 1_000,
+    };
+    // 单板：♠Q ♠J ♠10 ♥2 ♦2 → 座1 皇家同花顺独大（对照主测试同板）。
+    let boards = SettlementBoards::single(vec![10, 9, 8, 13, 26]);
+    let plan = derive_settlement_plan(&snapshot, &boards).expect("settlement plan");
+    assert_eq!(plan.gross_pot, 750, "200 + 500 + 50（死钱入主层）");
+    assert_eq!(plan.pots.len(), 2);
+    assert!(plan.pots[0].is_contested());
+    assert_eq!(plan.pots[0].gross_amount, 450);
+    assert!(!plan.pots[1].is_contested(), "uncalled 返还层");
+    assert_eq!(plan.pots[1].gross_amount, 300);
+    assert_eq!(plan.pots[1].rake, 0, "uncalled 层零 rake（plan.validate 强制）");
+    assert_eq!(plan.rake_base(), 450, "rake 基数 = contested 层 gross 之和");
+    assert_eq!(plan.rake, 22, "5% × 450（contested-only）");
+    assert_eq!(plan.pots[0].runouts[0].awards[1], 428, "contested 层净额归座1");
+    assert_eq!(plan.pots[1].runouts[0].awards[1], 300, "uncalled 300 全额返还座1");
+    assert_eq!(plan.total_awards, 728);
+    plan.validate(3).expect("plan internal conservation");
+
+    // ===== 2. 账本流：REAL 存入 → 买入 → 结算 =====
+    let dir = std::env::temp_dir().join("poker-appchain-texasair-e2e");
+    std::fs::create_dir_all(&dir).unwrap();
+    let wal_path = dir.join(format!("e2e-uncalled-{}.wal", std::process::id()));
+    let _ = std::fs::remove_file(&wal_path);
+    let seq_key = SequencerKey::from_seed(&[78u8; 32]);
+    let mut seq = Sequencer::new(
+        seq_key.clone(),
+        SequencerConfig::default(),
+        Arc::new(MetricsRegistry::new()),
+    );
+    seq.attach_wal(&wal_path).expect("WAL attach");
+
+    let utg = Player::new(21); // 座0：全下 200，输
+    let sb = Player::new(22); // 座1：全下 500，赢家（含 uncalled 返还）
+    let bb = Player::new(23); // 座2：弃牌，死钱 50
+    let treasury = Player::new(24);
+    let operator = Player::new(25);
+    let policy = FeePolicy::FixedRake {
+        rate_bps: 500,
+        cap: 0,
+        split: FeeSplit {
+            treasury_bps: 2_000,
+            treasury: treasury.pk(),
+            operator: operator.pk(),
+        },
+    };
+    seq.submit(
+        Operation::OpenTable {
+            table_id: TABLE_ID,
+            policy,
+        },
+        1_000,
+    )
+    .expect("open REAL table");
+    deposit(&mut seq, &utg, 200, 1);
+    deposit(&mut seq, &sb, 500, 2);
+    deposit(&mut seq, &bb, 50, 3);
+    seq.mark_proven_through(seq.state().seq - 1);
+    let dep_utg = find_note(&seq, &utg.pk(), 200, None);
+    let dep_sb = find_note(&seq, &sb.pk(), 500, None);
+    let dep_bb = find_note(&seq, &bb.pk(), 50, None);
+    buy_in(&mut seq, &utg, &dep_utg, 1_100);
+    buy_in(&mut seq, &sb, &dep_sb, 1_200);
+    buy_in(&mut seq, &bb, &dep_bb, 1_300);
+    let seat_utg = find_note(&seq, &utg.pk(), 200, Some(TABLE_ID));
+    let seat_sb = find_note(&seq, &sb.pk(), 500, Some(TABLE_ID));
+    let seat_bb = find_note(&seq, &bb.pk(), 50, Some(TABLE_ID));
+    assert_eq!(seq.state().tables.get(&TABLE_ID).unwrap().seats, 3);
+
+    let mk_payout = |amount: u64, pot_index: u8| NoteSpec {
+        asset_class: AssetClass::Real,
+        amount,
+        owner: sb.pk(),
+        table_id: None,
+        pot_index,
+        runout_index: 0,
+    };
+    let mk_rake = |amount: u64, owner: [u8; 33]| NoteSpec {
+        asset_class: AssetClass::Real,
+        amount,
+        owner,
+        table_id: None,
+        pot_index: 0,
+        runout_index: 0,
+    };
+    let mut record = SettlementRecord {
+        table_id: TABLE_ID,
+        hand_binding: [0xC9; 32],
+        policy_commitment: policy.commitment_bytes(),
+        pot: 750,
+        inputs: vec![
+            SettleInput {
+                note: seat_utg.clone(),
+                spend: SpendAuth {
+                    commitment: seat_utg.commitment_bytes(),
+                    nullifier: [0; 32],
+                    sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                },
+            },
+            SettleInput {
+                note: seat_sb.clone(),
+                spend: SpendAuth {
+                    commitment: seat_sb.commitment_bytes(),
+                    nullifier: [0; 32],
+                    sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                },
+            },
+            SettleInput {
+                note: seat_bb.clone(),
+                spend: SpendAuth {
+                    commitment: seat_bb.commitment_bytes(),
+                    nullifier: [0; 32],
+                    sig: poker_appchain::keys::EcdsaSig { bytes: [0; 64] },
+                },
+            },
+        ],
+        // plan 投影：(pot 0, runout 0, 座1, 428) + (pot 1, runout 0, 座1, 300)
+        payouts: vec![mk_payout(428, 0), mk_payout(300, 1)],
+        rake: RakeSplitRecord {
+            total: 22,
+            treasury_out: Some(mk_rake(4, treasury.pk())),
+            operator_out: Some(mk_rake(18, operator.pk())),
+        },
+        plan: plan.clone(),
+        hand_proof: None,
+    };
+    record.inputs[0].spend = utg.settle_auth(&seat_utg, &record);
+    record.inputs[1].spend = sb.settle_auth(&seat_sb, &record);
+    record.inputs[2].spend = bb.settle_auth(&seat_bb, &record);
+
+    // B9 核心断言：纯函数校验放行（v1.2.1 前同记录因
+    // plan.rake(22) != policy.rake_of(750)(37) 被 fail-closed 误拒）
+    assert_eq!(policy.rake_of(plan.rake_base()), 22);
+    assert_eq!(policy.rake_of(record.pot), 37, "旧口径基数（对照）");
+    assert_ne!(record.rake.total, policy.rake_of(record.pot));
+    validate_settlement(&record, &policy).expect("uncalled-layer hand must settle (B9)");
+    seq.submit(Operation::Settle(Box::new(record)), 1_400)
+        .expect("previously rejected hand now settles at soft-confirm");
+
+    // ===== 3. 资金断言：守恒 + uncalled 返还 + rake 分账 =====
+    assert_eq!(seq.state().balances_of(&utg.pk()), (0, 0));
+    assert_eq!(
+        seq.state().balances_of(&sb.pk()),
+        (728, 0),
+        "428（contested 赢额）+ 300（uncalled 返还）"
+    );
+    assert_eq!(seq.state().balances_of(&bb.pk()), (0, 0));
+    assert_eq!(seq.state().balances_of(&treasury.pk()), (4, 0));
+    assert_eq!(seq.state().balances_of(&operator.pk()), (18, 0));
+    let total_real: u128 = [&utg, &sb, &bb, &treasury, &operator]
+        .iter()
+        .map(|p| seq.state().balances_of(&p.pk()).0)
+        .sum();
+    assert_eq!(
+        u64::try_from(total_real).unwrap(),
+        750,
+        "Σoutputs == gross pot == Σdeposits（资金守恒）"
+    );
+    assert_eq!(seq.state().tables.get(&TABLE_ID).unwrap().seats, 0);
+
+    // ===== 4. WAL 重放：结算被持久化且重放一致 =====
+    {
+        let replayed = Sequencer::replay(
+            &wal_path,
+            seq_key.public,
+            SequencerConfig::default(),
+            Arc::new(MetricsRegistry::new()),
+        )
+        .expect("WAL replay");
+        assert_eq!(replayed.state().balances_of(&sb.pk()), (728, 0));
+        assert_eq!(replayed.state().balances_of(&treasury.pk()), (4, 0));
+        let _ = std::fs::remove_file(&wal_path);
+    }
+}

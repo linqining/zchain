@@ -598,6 +598,11 @@ mod tests {
         assert_eq!(plan.pots[1].runouts[0].awards[1], 50);
         assert_eq!(plan.pots[1].runouts[1], RunoutPotPlan::inactive());
         assert_eq!(plan.rake, 10);
+        // B9 口径锚点（canonical contested-only）：rake 基数 = contested 层
+        // gross 之和（本例仅 100 层 contested），uncalled 返还层（50）不计费；
+        // 10% 费率恰好作用在该基数上。
+        assert_eq!(plan.rake_base(), 100);
+        assert_eq!(plan.rake, plan.rake_base() / 10);
         assert_eq!(plan.total_awards, 140);
         plan.validate(table.seats.len()).unwrap();
     }
@@ -641,6 +646,8 @@ mod tests {
         assert_eq!(plan.gross_pot, 606);
         // The final 101-chip layer is uncontested, so only 505 chips are rakeable.
         assert_eq!(plan.rake, 25);
+        assert_eq!(plan.rake_base(), 505);
+        assert_eq!(plan.rake, plan.rake_base() * 500 / 10_000);
         assert_eq!(plan.total_awards, 581);
         assert_eq!(plan.pots.len(), 3);
         assert!(plan.pots[0].is_contested());

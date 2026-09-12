@@ -1,0 +1,81 @@
+/* ZChain Wallet popup（Extension 0.1）：最小样式，无任何远程资源。 */
+:root {
+  color-scheme: light dark;
+  --bg: #10141a;
+  --card: #1a2029;
+  --line: #2a3340;
+  --fg: #e8edf2;
+  --dim: #93a1b3;
+  --accent: #4da3ff;
+  --ok: #2ecc71;
+  --warn: #e67e22;
+  --bad: #e74c3c;
+}
+* { box-sizing: border-box; }
+body {
+  width: 360px;
+  margin: 0;
+  font: 13px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+}
+header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 12px; border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 8px; }
+.logo {
+  width: 22px; height: 22px; border-radius: 6px;
+  background: var(--accent); color: #06101c; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.title { font-weight: 600; }
+.badge {
+  font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line);
+}
+.badge-devnet { color: var(--accent); border-color: var(--accent); }
+.badge-play   { color: var(--ok);   border-color: var(--ok); }
+.badge-real   { color: var(--bad);  border-color: var(--bad); }
+.badge-real::after { content: " ⚠ 托管风险"; }
+
+main { padding: 12px; }
+.card {
+  background: var(--card); border: 1px solid var(--line);
+  border-radius: 10px; padding: 12px; margin-bottom: 12px;
+}
+h2 { margin: 0 0 8px; font-size: 13px; color: var(--dim); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+.row { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; }
+.row .k { color: var(--dim); flex-shrink: 0; }
+.row .v { word-break: break-all; text-align: right; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.dim { color: var(--dim); }
+.warn-box {
+  border: 1px solid var(--warn); color: var(--warn);
+  border-radius: 8px; padding: 8px 10px; margin-bottom: 12px; font-size: 12px;
+}
+input[type="password"], input[type="number"] {
+  width: 100%; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  margin: 4px 0 8px;
+}
+button {
+  width: 100%; padding: 9px 12px; border-radius: 8px; border: none;
+  background: var(--accent); color: #06101c; font-weight: 600;
+  cursor: pointer; margin-top: 4px;
+}
+button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+button.approve { background: var(--ok); }
+button.reject { background: transparent; color: var(--bad); border: 1px solid var(--bad); margin-left: 8px; }
+button:disabled { opacity: .5; cursor: default; }
+.btn-row { display: flex; }
+.btn-row button { flex: 1; }
+.err { color: var(--bad); font-size: 12px; margin: 6px 0; min-height: 14px; }
+.origin { font-size: 12px; color: var(--warn); word-break: break-all; }
+.empty { color: var(--dim); text-align: center; padding: 16px 0; }
+footer {
+  padding: 8px 12px; border-top: 1px solid var(--line);
+  color: var(--dim); font-size: 11px;
+}
+ul.notes { list-style: none; margin: 0; padding: 0; }
+ul.notes li { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px dashed var(--line); }
+.proof { font-size: 11px; color: var(--dim); }

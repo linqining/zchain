@@ -154,13 +154,13 @@ pub fn deposit_and_find(
     find_note(seq, user, amount)
 }
 
-/// 按 owner+amount 查找账本 note。
+/// 按 owner+amount 查找账本 note（B5：走 owner 二级索引，与原全量扫描语义一致）。
 #[must_use]
 pub fn find_note(seq: &Sequencer, user: &TestUser, amount: u64) -> Note {
     seq.state()
-        .notes
-        .values()
-        .find(|e| e.note.owner == user.pk() && e.note.amount == amount)
+        .note_entries_of(&user.pk())
+        .into_iter()
+        .find(|e| e.note.amount == amount)
         .unwrap()
         .note
         .clone()

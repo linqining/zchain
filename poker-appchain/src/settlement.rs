@@ -38,12 +38,11 @@
 //!    投影不符）、owner↔seat 一一对应，且按 owner 聚合 == `plan.awards`
 //! 7. P 层签名：owner 对（scope + 结算效果摘要）签名；效果摘要含
 //!    `payout_root` → 篡改赔付结构必然签名失败
-//! 8. `record.rake.total == plan.rake == policy.rake_of(record.pot)`；
+//! 8. `record.rake.total == plan.rake == policy.rake_of(plan.rake_base())`
+//!    （v1.2.2/B9：rake 计费基数 = **contested 层 gross 之和**——eligible ≥ 2
+//!    座的层；uncalled 返还层不计费，`plan.validate` 已强制其 rake == 0。
+//!    与 poker_l1 canonical 的 contested-only 计费同口径）；
 //!    `policy_commitment == policy.commitment_bytes()`
-//!    （语义注记：二者同时成立要求计划的抽水与 appchain 策略在
-//!    **全额 gross pot** 上一致——即计划内不含零费未征层；poker_l1 的
-//!    contested-only rake 语义下，含 uncalled 返还层的计划会被拒绝，
-//!    已知语义缺口记录于 ABI.md §4）
 //! 9. 守恒：`Σinputs == Σoutputs`
 //! 10. 分账：treasury/operator 数额与收款人 == `policy.split_of(rake.total)`
 //! 11. 手牌证明绑定（可选，scope 级 fail-closed）：归档 scope（canonical
@@ -612,14 +611,20 @@ pub fn validate_settlement(
         verify_ecsdsa(&input.note.owner, &d, &input.spend.sig)?;
     }
 
-    // 7. 费率 + 策略承诺绑定：rake.total == plan.rake == policy.rake_of(pot)
+    // 7. 费率 + 策略承诺绑定：rake.total == plan.rake == policy.rake_of(rake_base)
+    //    （v1.2.2/B9：计费基数 = plan.rake_base()——contested 层 gross 之和，
+    //    uncalled 返还层不计费；plan.validate 已强制 uncontested 层 rake == 0，
+    //    因此 plan.rake 只能来自 contested 层，与 poker_l1 canonical 的
+    //    contested-only 计费唯一对齐。gross_pot 层面守恒不受影响：第 2/3/4/
+    //    9 条仍强制 gross_pot == pot == Σinputs == Σoutputs + rake。）
     let rake_total = u128::from(record.rake.total);
     if u128::from(record.plan.rake) != rake_total {
         return Err(AppchainError::AdmissionRejected(
             "plan rake does not match record rake",
         ));
     }
-    let expected = policy.rake_of(record.pot);
+    let rake_base = record.plan.rake_base();
+    let expected = policy.rake_of(rake_base);
     if u128::from(expected) != rake_total {
         return Err(AppchainError::FeeMismatch {
             expected: u128::from(expected),
@@ -712,9 +717,10 @@ pub fn validate_settlement(
         // 归档含 rake opening（raked terminal 批）时：费率配置必须精确重导出
         // record.rake.total（与 poker_texas_air canonical_settlement_rake 同式：
         // mode 0 → 0；mode 1 → min(floor(pot·bps/10⁴), cap, pot)）。
-        // 已知边界：该批级 opening 与 contested-only rake 的计划模型在
-        // "sole-survivor 有抽水"的终局上语义不一致——此类组合 fail-closed
-        // 拒绝（记录于 ABI.md §4 与本任务报告，不做放宽）。
+        // 该批级 opening 的计费基数是终态全池 pot；与 contested-only 的
+        // plan.rake（v1.2.2/B9 基数 = rake_base）在终局**无 uncalled 层**时
+        // 数值恒等（pot == rake_base），含 uncalled 返还层的 raked 终局仍
+        // fail-closed 拒绝（不放宽；记录于 ABI.md §4）。
         if let Some(rake) = &scope.rake_opening {
             match rake.rake_mode {
                 0 => {
@@ -784,7 +790,8 @@ pub fn rake_outputs(
 /// 单层 pot：`eligible_mask == seats_mask`（`seats_mask.count_ones() >= 2`
 /// 时为 contested 层，runout 槽位数随 `Single` 调度取 1）；净额 =
 /// `gross_pot - Σawards` 全部记为该层 rake（调用方保证非负且与费率策略
-/// 一致——`validate_settlement` 第 8 条会独立强制）。
+/// 一致——`validate_settlement` 第 8 条会独立强制；contested 单层的
+/// `rake_base() == gross_pot`，费率关系退化为 `rake_of(gross_pot)`）。
 #[must_use]
 pub fn flat_settlement_plan(
     gross_pot: u64,

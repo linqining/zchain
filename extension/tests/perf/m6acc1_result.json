@@ -1,0 +1,6477 @@
+{
+  "acceptance": "M6-ACC-1 浏览器验证吞吐：连续 10 手证明验证，全部通过且无内存泄漏（长会话）",
+  "verdict": "PASS",
+  "meta": {
+    "date": "2026-09-12T01:11:00.159Z",
+    "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/153.0.0.0 Safari/537.36",
+    "rounds": 50,
+    "hands_per_round": 10,
+    "hands_total": 500,
+    "wallet_core": {
+      "abi_version": 1,
+      "crate_version": "0.1.0",
+      "default_chain_id": "zchain-devnet-1",
+      "domain": "zchain",
+      "preview_domain": "7a636861696e2e77616c6c65742e6f702e7631"
+    },
+    "harness": "extension/tests/perf/m6acc1.html + m6acc1_page.js（wallet-core wasm vendor 产物与扩展同源）",
+    "setup_ms": 30.9,
+    "heap_api": "performance.memory.usedJSHeapSize (--enable-precise-memory-info)",
+    "forced_gc": "window.gc available (--js-flags=--expose-gc)；每轮采样 GC 后留存堆",
+    "heap_criteria": "泄漏判据 = 每轮强制 GC 后的留存堆序列：末3轮均值 vs 首3轮均值增幅 < 20% 且 最后10轮无持续增长（连续递增≥5轮且极差超噪声带 max(32KB, 首3均值×2%) 才算）；wasm 线性内存同判据",
+    "collection_mode": "cdp-collect",
+    "scope_boundary": [
+      "浏览器循环面 = wallet-core wasm 的 wallet_preview + wallet_sign(settle)，后者内部执行 validate_settlement 全量校验（守恒/费率/分账/P层ECDSA签名覆盖/手牌绑定）",
+      "软确认链 verify_chain / 批次根复算 / attestation 结构校验：wallet-core native verifier 同一实现有测试覆盖；0.1 wasm JSON 面未暴露（0.2 sync 缝），不在浏览器循环内",
+      "完整 STARK 验证 wasm 化（stwo-wasm）不在 v1"
+    ]
+  },
+  "stats": {
+    "correct": 500,
+    "hands_total": 500,
+    "all_correct": true,
+    "median_ms": 2.4,
+    "mean_ms": 2.413,
+    "p95_ms": 3.7,
+    "max_ms": 7.4,
+    "p95_under_500ms": true,
+    "total_wall_ms": 5168.6
+  },
+  "heap": {
+    "first3_avg_bytes": 788146,
+    "last3_avg_bytes": 826348,
+    "growth_pct": 4.85,
+    "tail10_max_consecutive_increase": 9,
+    "tail10_range_bytes": 5700,
+    "tail_noise_band_bytes": 32768,
+    "max_bytes": 827384,
+    "pass": true,
+    "criteria": "末3轮均值 vs 首3轮均值增幅 < 20% 且 最后10轮无持续增长（连续递增≥5轮且极差超噪声带 max(32KB, 首3均值×2%) 才算）"
+  },
+  "heap_raw_informational": {
+    "first3_avg_bytes": 975693,
+    "last3_avg_bytes": 951136,
+    "growth_pct": -2.52,
+    "tail10_max_consecutive_increase": 3,
+    "tail10_range_bytes": 5836,
+    "tail_noise_band_bytes": 32768,
+    "max_bytes": 1086944,
+    "pass": true,
+    "criteria": "末3轮均值 vs 首3轮均值增幅 < 20% 且 最后10轮无持续增长（连续递增≥5轮且极差超噪声带 max(32KB, 首3均值×2%) 才算）"
+  },
+  "wasm_linear_memory": {
+    "first3_avg_bytes": 2424832,
+    "last3_avg_bytes": 2424832,
+    "growth_pct": 0,
+    "tail10_max_consecutive_increase": 0,
+    "tail10_range_bytes": 0,
+    "tail_noise_band_bytes": 48497,
+    "max_bytes": 2424832,
+    "pass": true,
+    "criteria": "末3轮均值 vs 首3轮均值增幅 < 20% 且 最后10轮无持续增长（连续递增≥5轮且极差超噪声带 max(32KB, 首3均值×2%) 才算）"
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 3.7,
+          "sign_ms": 3.7,
+          "total_ms": 7.4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 1.7,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.6,
+          "total_ms": 2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.5,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.6,
+          "total_ms": 2
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 2.2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 31.3,
+      "heap_after_gc_bytes": 782879,
+      "heap_raw_bytes_before_gc": 1086944,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 2,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 17.7,
+      "heap_after_gc_bytes": 790492,
+      "heap_raw_bytes_before_gc": 924336,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 3,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.1,
+          "total_ms": 1.5
+        }
+      ],
+      "round_ms": 19.2,
+      "heap_after_gc_bytes": 791068,
+      "heap_raw_bytes_before_gc": 915800,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 4,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.2,
+          "total_ms": 3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.9,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        }
+      ],
+      "round_ms": 25.3,
+      "heap_after_gc_bytes": 792492,
+      "heap_raw_bytes_before_gc": 919968,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 5,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.6,
+          "total_ms": 3.5
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.6,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.3,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 27.3,
+      "heap_after_gc_bytes": 793324,
+      "heap_raw_bytes_before_gc": 918152,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 6,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1,
+          "total_ms": 1.5
+        }
+      ],
+      "round_ms": 18.2,
+      "heap_after_gc_bytes": 793872,
+      "heap_raw_bytes_before_gc": 918447,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 7,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.2,
+          "total_ms": 1.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.1,
+          "total_ms": 1.5
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.1,
+          "total_ms": 1.5
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.1,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 0.9,
+          "total_ms": 1.3
+        }
+      ],
+      "round_ms": 16.5,
+      "heap_after_gc_bytes": 794416,
+      "heap_raw_bytes_before_gc": 919511,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 8,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.5,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 20.5,
+      "heap_after_gc_bytes": 794912,
+      "heap_raw_bytes_before_gc": 919887,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 9,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.5,
+          "total_ms": 3.4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.2,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.6,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 26.5,
+      "heap_after_gc_bytes": 796004,
+      "heap_raw_bytes_before_gc": 921515,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 10,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.2,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.6,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.6,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 25.5,
+      "heap_after_gc_bytes": 796572,
+      "heap_raw_bytes_before_gc": 921559,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 11,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.3,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 26.5,
+      "heap_after_gc_bytes": 797092,
+      "heap_raw_bytes_before_gc": 922003,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 12,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.2,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.7,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 26.1,
+      "heap_after_gc_bytes": 797624,
+      "heap_raw_bytes_before_gc": 922279,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 13,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.5,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1,
+          "total_ms": 1.5
+        }
+      ],
+      "round_ms": 20.5,
+      "heap_after_gc_bytes": 798168,
+      "heap_raw_bytes_before_gc": 922847,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 14,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.7,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.3,
+          "total_ms": 3
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.2,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 27.5,
+      "heap_after_gc_bytes": 798700,
+      "heap_raw_bytes_before_gc": 923767,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 15,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.1,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.8,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        }
+      ],
+      "round_ms": 18.6,
+      "heap_after_gc_bytes": 799928,
+      "heap_raw_bytes_before_gc": 925767,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 16,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 3.1,
+          "total_ms": 4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.3,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.3,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.3,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.2,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        }
+      ],
+      "round_ms": 30.6,
+      "heap_after_gc_bytes": 800460,
+      "heap_raw_bytes_before_gc": 925543,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 17,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2.1,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 3,
+          "total_ms": 3.9
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.4,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 28.9,
+      "heap_after_gc_bytes": 800980,
+      "heap_raw_bytes_before_gc": 925643,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 18,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 3,
+          "total_ms": 4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.7,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.1,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 29.6,
+      "heap_after_gc_bytes": 801524,
+      "heap_raw_bytes_before_gc": 926163,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 19,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 24.7,
+      "heap_after_gc_bytes": 803084,
+      "heap_raw_bytes_before_gc": 927759,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 20,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.4,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.7,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 27.5,
+      "heap_after_gc_bytes": 803652,
+      "heap_raw_bytes_before_gc": 928491,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 21,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.8,
+          "total_ms": 3.8
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.5,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.3,
+          "total_ms": 3
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.3,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 28,
+      "heap_after_gc_bytes": 804968,
+      "heap_raw_bytes_before_gc": 929647,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 22,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 3,
+          "total_ms": 4.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.7,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.3,
+          "total_ms": 3
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.2,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 29.9,
+      "heap_after_gc_bytes": 805512,
+      "heap_raw_bytes_before_gc": 930395,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 23,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.2,
+          "total_ms": 3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.1,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.7,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        }
+      ],
+      "round_ms": 24.8,
+      "heap_after_gc_bytes": 807092,
+      "heap_raw_bytes_before_gc": 933615,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 24,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.5,
+          "total_ms": 3.5
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.2,
+          "total_ms": 3
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 29.1,
+      "heap_after_gc_bytes": 807624,
+      "heap_raw_bytes_before_gc": 932291,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 25,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.4,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.1,
+          "total_ms": 1.5
+        }
+      ],
+      "round_ms": 18.8,
+      "heap_after_gc_bytes": 808144,
+      "heap_raw_bytes_before_gc": 932803,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 26,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 2.8,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.7,
+          "total_ms": 2
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 0.9,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 19.9,
+      "heap_after_gc_bytes": 810964,
+      "heap_raw_bytes_before_gc": 936119,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 27,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.2,
+          "sign_ms": 4,
+          "total_ms": 5.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.5,
+          "total_ms": 3.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2.9,
+          "total_ms": 4
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.4,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.6,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.3,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 31,
+      "heap_after_gc_bytes": 811496,
+      "heap_raw_bytes_before_gc": 936399,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 28,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 3.3,
+          "total_ms": 4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 1.9,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.1,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.7,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 27.8,
+      "heap_after_gc_bytes": 812040,
+      "heap_raw_bytes_before_gc": 936451,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 29,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.3,
+          "sign_ms": 3.1,
+          "total_ms": 4.4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.9,
+          "total_ms": 3.8
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 31.1,
+      "heap_after_gc_bytes": 812572,
+      "heap_raw_bytes_before_gc": 937475,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 30,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 3,
+          "total_ms": 4.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.6,
+          "total_ms": 3.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.3,
+          "total_ms": 3
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 29.8,
+      "heap_after_gc_bytes": 813092,
+      "heap_raw_bytes_before_gc": 937731,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 31,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2.5,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.5,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.1,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 28.1,
+      "heap_after_gc_bytes": 813600,
+      "heap_raw_bytes_before_gc": 938075,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 32,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 1.8,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.6,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.6,
+          "total_ms": 2
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.4,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 21.2,
+      "heap_after_gc_bytes": 815232,
+      "heap_raw_bytes_before_gc": 940607,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 33,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.5,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 18.4,
+      "heap_after_gc_bytes": 815860,
+      "heap_raw_bytes_before_gc": 940883,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 34,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.4,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 0.9,
+          "total_ms": 1.3
+        }
+      ],
+      "round_ms": 18.2,
+      "heap_after_gc_bytes": 816368,
+      "heap_raw_bytes_before_gc": 941499,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 35,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 3.2,
+          "total_ms": 4.3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.2,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.5,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1,
+          "total_ms": 1.3
+        }
+      ],
+      "round_ms": 22.2,
+      "heap_after_gc_bytes": 816924,
+      "heap_raw_bytes_before_gc": 942579,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 36,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.2,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 19.1,
+      "heap_after_gc_bytes": 819024,
+      "heap_raw_bytes_before_gc": 946783,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 37,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.5,
+          "sign_ms": 3.7,
+          "total_ms": 5.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 3,
+          "total_ms": 4
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2.7,
+          "total_ms": 3.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.6,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 33,
+      "heap_after_gc_bytes": 819544,
+      "heap_raw_bytes_before_gc": 944587,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 38,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 3.2,
+          "total_ms": 4.3
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.8,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.4,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.2,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        }
+      ],
+      "round_ms": 31,
+      "heap_after_gc_bytes": 820076,
+      "heap_raw_bytes_before_gc": 945155,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 39,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 3.1,
+          "total_ms": 3.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.8,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.2,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.1,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 30,
+      "heap_after_gc_bytes": 820608,
+      "heap_raw_bytes_before_gc": 945231,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 40,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.9,
+          "total_ms": 3.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.5,
+          "total_ms": 3.4
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.1,
+          "total_ms": 2.9
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.9,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 29.2,
+      "heap_after_gc_bytes": 821152,
+      "heap_raw_bytes_before_gc": 945763,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 41,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 2.8,
+          "total_ms": 3.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.7,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.3,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.4,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 30.1,
+      "heap_after_gc_bytes": 821684,
+      "heap_raw_bytes_before_gc": 946939,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 42,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 1.8,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.6,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.7,
+          "total_ms": 2.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.5,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        }
+      ],
+      "round_ms": 21.9,
+      "heap_after_gc_bytes": 822204,
+      "heap_raw_bytes_before_gc": 946851,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 43,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.3,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.7,
+          "total_ms": 2.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        }
+      ],
+      "round_ms": 26,
+      "heap_after_gc_bytes": 822736,
+      "heap_raw_bytes_before_gc": 947631,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 44,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.3,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.3,
+          "total_ms": 1.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.2,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.4,
+          "total_ms": 1.8
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.3,
+          "total_ms": 1.6
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.3,
+          "sign_ms": 1.1,
+          "total_ms": 1.4
+        }
+      ],
+      "round_ms": 18.7,
+      "heap_after_gc_bytes": 823268,
+      "heap_raw_bytes_before_gc": 948539,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 45,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 3,
+          "total_ms": 3.6
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2.2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 2.1,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2,
+          "total_ms": 2.6
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 28,
+      "heap_after_gc_bytes": 823956,
+      "heap_raw_bytes_before_gc": 949167,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 46,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.1,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 1.6,
+          "total_ms": 2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.4,
+          "sign_ms": 2.6,
+          "total_ms": 3
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 1.9,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 2,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.3,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 26.6,
+      "heap_after_gc_bytes": 824488,
+      "heap_raw_bytes_before_gc": 949115,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 47,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1.1,
+          "sign_ms": 3.1,
+          "total_ms": 4.2
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.8,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.5,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.5,
+          "total_ms": 2
+        }
+      ],
+      "round_ms": 30.9,
+      "heap_after_gc_bytes": 824996,
+      "heap_raw_bytes_before_gc": 950235,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 48,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.9,
+          "total_ms": 3.8
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.8,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.9,
+          "total_ms": 3.7
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.5,
+          "total_ms": 3.3
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.4,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.1,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.9,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.5,
+          "total_ms": 2.1
+        }
+      ],
+      "round_ms": 31.8,
+      "heap_after_gc_bytes": 825564,
+      "heap_raw_bytes_before_gc": 950191,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 49,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 3,
+          "total_ms": 4
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.7,
+          "total_ms": 3.5
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.8,
+          "sign_ms": 2.2,
+          "total_ms": 3
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.8,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 1.8,
+          "total_ms": 2.5
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.7,
+          "total_ms": 2.3
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 29.2,
+      "heap_after_gc_bytes": 826096,
+      "heap_raw_bytes_before_gc": 950531,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 50,
+      "all_ok": true,
+      "hands": [
+        {
+          "hand": 1,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 1,
+          "sign_ms": 2.9,
+          "total_ms": 3.9
+        },
+        {
+          "hand": 2,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.9,
+          "sign_ms": 2.5,
+          "total_ms": 3.4
+        },
+        {
+          "hand": 3,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.5,
+          "total_ms": 3.2
+        },
+        {
+          "hand": 4,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.7,
+          "sign_ms": 2.4,
+          "total_ms": 3.1
+        },
+        {
+          "hand": 5,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.1,
+          "total_ms": 2.7
+        },
+        {
+          "hand": 6,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 2.2,
+          "total_ms": 2.8
+        },
+        {
+          "hand": 7,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.9,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 8,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 1.8,
+          "total_ms": 2.4
+        },
+        {
+          "hand": 9,
+          "variant": "positive",
+          "expected": "pass",
+          "preview_ok": true,
+          "sign_error": null,
+          "ok": true,
+          "preview_ms": 0.6,
+          "sign_ms": 4.6,
+          "total_ms": 5.2
+        },
+        {
+          "hand": 10,
+          "variant": "negative_forged_sig",
+          "expected": "reject",
+          "preview_ok": true,
+          "sign_error": "VerifierRejected",
+          "ok": true,
+          "preview_ms": 0.5,
+          "sign_ms": 1.4,
+          "total_ms": 1.9
+        }
+      ],
+      "round_ms": 32.2,
+      "heap_after_gc_bytes": 827384,
+      "heap_raw_bytes_before_gc": 952687,
+      "wasm_mem_bytes": 2424832
+    }
+  ],
+  "round_summaries": [
+    {
+      "round": 1,
+      "all_ok": true,
+      "round_ms": 31.3,
+      "heap_after_gc_bytes": 782879,
+      "heap_raw_bytes_before_gc": 1086944,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 2,
+      "all_ok": true,
+      "round_ms": 17.7,
+      "heap_after_gc_bytes": 790492,
+      "heap_raw_bytes_before_gc": 924336,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 3,
+      "all_ok": true,
+      "round_ms": 19.2,
+      "heap_after_gc_bytes": 791068,
+      "heap_raw_bytes_before_gc": 915800,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 4,
+      "all_ok": true,
+      "round_ms": 25.3,
+      "heap_after_gc_bytes": 792492,
+      "heap_raw_bytes_before_gc": 919968,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 5,
+      "all_ok": true,
+      "round_ms": 27.3,
+      "heap_after_gc_bytes": 793324,
+      "heap_raw_bytes_before_gc": 918152,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 6,
+      "all_ok": true,
+      "round_ms": 18.2,
+      "heap_after_gc_bytes": 793872,
+      "heap_raw_bytes_before_gc": 918447,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 7,
+      "all_ok": true,
+      "round_ms": 16.5,
+      "heap_after_gc_bytes": 794416,
+      "heap_raw_bytes_before_gc": 919511,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 8,
+      "all_ok": true,
+      "round_ms": 20.5,
+      "heap_after_gc_bytes": 794912,
+      "heap_raw_bytes_before_gc": 919887,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 9,
+      "all_ok": true,
+      "round_ms": 26.5,
+      "heap_after_gc_bytes": 796004,
+      "heap_raw_bytes_before_gc": 921515,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 10,
+      "all_ok": true,
+      "round_ms": 25.5,
+      "heap_after_gc_bytes": 796572,
+      "heap_raw_bytes_before_gc": 921559,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 11,
+      "all_ok": true,
+      "round_ms": 26.5,
+      "heap_after_gc_bytes": 797092,
+      "heap_raw_bytes_before_gc": 922003,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 12,
+      "all_ok": true,
+      "round_ms": 26.1,
+      "heap_after_gc_bytes": 797624,
+      "heap_raw_bytes_before_gc": 922279,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 13,
+      "all_ok": true,
+      "round_ms": 20.5,
+      "heap_after_gc_bytes": 798168,
+      "heap_raw_bytes_before_gc": 922847,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 14,
+      "all_ok": true,
+      "round_ms": 27.5,
+      "heap_after_gc_bytes": 798700,
+      "heap_raw_bytes_before_gc": 923767,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 15,
+      "all_ok": true,
+      "round_ms": 18.6,
+      "heap_after_gc_bytes": 799928,
+      "heap_raw_bytes_before_gc": 925767,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 16,
+      "all_ok": true,
+      "round_ms": 30.6,
+      "heap_after_gc_bytes": 800460,
+      "heap_raw_bytes_before_gc": 925543,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 17,
+      "all_ok": true,
+      "round_ms": 28.9,
+      "heap_after_gc_bytes": 800980,
+      "heap_raw_bytes_before_gc": 925643,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 18,
+      "all_ok": true,
+      "round_ms": 29.6,
+      "heap_after_gc_bytes": 801524,
+      "heap_raw_bytes_before_gc": 926163,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 19,
+      "all_ok": true,
+      "round_ms": 24.7,
+      "heap_after_gc_bytes": 803084,
+      "heap_raw_bytes_before_gc": 927759,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 20,
+      "all_ok": true,
+      "round_ms": 27.5,
+      "heap_after_gc_bytes": 803652,
+      "heap_raw_bytes_before_gc": 928491,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 21,
+      "all_ok": true,
+      "round_ms": 28,
+      "heap_after_gc_bytes": 804968,
+      "heap_raw_bytes_before_gc": 929647,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 22,
+      "all_ok": true,
+      "round_ms": 29.9,
+      "heap_after_gc_bytes": 805512,
+      "heap_raw_bytes_before_gc": 930395,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 23,
+      "all_ok": true,
+      "round_ms": 24.8,
+      "heap_after_gc_bytes": 807092,
+      "heap_raw_bytes_before_gc": 933615,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 24,
+      "all_ok": true,
+      "round_ms": 29.1,
+      "heap_after_gc_bytes": 807624,
+      "heap_raw_bytes_before_gc": 932291,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 25,
+      "all_ok": true,
+      "round_ms": 18.8,
+      "heap_after_gc_bytes": 808144,
+      "heap_raw_bytes_before_gc": 932803,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 26,
+      "all_ok": true,
+      "round_ms": 19.9,
+      "heap_after_gc_bytes": 810964,
+      "heap_raw_bytes_before_gc": 936119,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 27,
+      "all_ok": true,
+      "round_ms": 31,
+      "heap_after_gc_bytes": 811496,
+      "heap_raw_bytes_before_gc": 936399,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 28,
+      "all_ok": true,
+      "round_ms": 27.8,
+      "heap_after_gc_bytes": 812040,
+      "heap_raw_bytes_before_gc": 936451,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 29,
+      "all_ok": true,
+      "round_ms": 31.1,
+      "heap_after_gc_bytes": 812572,
+      "heap_raw_bytes_before_gc": 937475,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 30,
+      "all_ok": true,
+      "round_ms": 29.8,
+      "heap_after_gc_bytes": 813092,
+      "heap_raw_bytes_before_gc": 937731,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 31,
+      "all_ok": true,
+      "round_ms": 28.1,
+      "heap_after_gc_bytes": 813600,
+      "heap_raw_bytes_before_gc": 938075,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 32,
+      "all_ok": true,
+      "round_ms": 21.2,
+      "heap_after_gc_bytes": 815232,
+      "heap_raw_bytes_before_gc": 940607,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 33,
+      "all_ok": true,
+      "round_ms": 18.4,
+      "heap_after_gc_bytes": 815860,
+      "heap_raw_bytes_before_gc": 940883,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 34,
+      "all_ok": true,
+      "round_ms": 18.2,
+      "heap_after_gc_bytes": 816368,
+      "heap_raw_bytes_before_gc": 941499,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 35,
+      "all_ok": true,
+      "round_ms": 22.2,
+      "heap_after_gc_bytes": 816924,
+      "heap_raw_bytes_before_gc": 942579,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 36,
+      "all_ok": true,
+      "round_ms": 19.1,
+      "heap_after_gc_bytes": 819024,
+      "heap_raw_bytes_before_gc": 946783,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 37,
+      "all_ok": true,
+      "round_ms": 33,
+      "heap_after_gc_bytes": 819544,
+      "heap_raw_bytes_before_gc": 944587,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 38,
+      "all_ok": true,
+      "round_ms": 31,
+      "heap_after_gc_bytes": 820076,
+      "heap_raw_bytes_before_gc": 945155,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 39,
+      "all_ok": true,
+      "round_ms": 30,
+      "heap_after_gc_bytes": 820608,
+      "heap_raw_bytes_before_gc": 945231,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 40,
+      "all_ok": true,
+      "round_ms": 29.2,
+      "heap_after_gc_bytes": 821152,
+      "heap_raw_bytes_before_gc": 945763,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 41,
+      "all_ok": true,
+      "round_ms": 30.1,
+      "heap_after_gc_bytes": 821684,
+      "heap_raw_bytes_before_gc": 946939,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 42,
+      "all_ok": true,
+      "round_ms": 21.9,
+      "heap_after_gc_bytes": 822204,
+      "heap_raw_bytes_before_gc": 946851,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 43,
+      "all_ok": true,
+      "round_ms": 26,
+      "heap_after_gc_bytes": 822736,
+      "heap_raw_bytes_before_gc": 947631,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 44,
+      "all_ok": true,
+      "round_ms": 18.7,
+      "heap_after_gc_bytes": 823268,
+      "heap_raw_bytes_before_gc": 948539,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 45,
+      "all_ok": true,
+      "round_ms": 28,
+      "heap_after_gc_bytes": 823956,
+      "heap_raw_bytes_before_gc": 949167,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 46,
+      "all_ok": true,
+      "round_ms": 26.6,
+      "heap_after_gc_bytes": 824488,
+      "heap_raw_bytes_before_gc": 949115,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 47,
+      "all_ok": true,
+      "round_ms": 30.9,
+      "heap_after_gc_bytes": 824996,
+      "heap_raw_bytes_before_gc": 950235,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 48,
+      "all_ok": true,
+      "round_ms": 31.8,
+      "heap_after_gc_bytes": 825564,
+      "heap_raw_bytes_before_gc": 950191,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 49,
+      "all_ok": true,
+      "round_ms": 29.2,
+      "heap_after_gc_bytes": 826096,
+      "heap_raw_bytes_before_gc": 950531,
+      "wasm_mem_bytes": 2424832
+    },
+    {
+      "round": 50,
+      "all_ok": true,
+      "round_ms": 32.2,
+      "heap_after_gc_bytes": 827384,
+      "heap_raw_bytes_before_gc": 952687,
+      "wasm_mem_bytes": 2424832
+    }
+  ]
+}

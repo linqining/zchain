@@ -1,0 +1,22 @@
+[package]
+name = "m6acc1_fixture_gen"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "M6-ACC-1 一次性夹具生成器：产出 10 份真实结算/软确认链 JSON 到 extension/tests/fixtures/m6acc1/"
+
+# 一次性生成器（独立 workspace，避免被 zchain 根 workspace 吸收；不进
+# workspace.members/exclude——repo 根 rust-toolchain.toml 对本目录同样生效）。
+# 构建与运行：
+#   CARGO_TARGET_DIR=/tmp/m6acc1_fg_target cargo run --release \
+#     --manifest-path extension/tests/perf/fixture_gen/Cargo.toml
+# 产物覆写 extension/tests/fixtures/m6acc1/。
+
+[workspace]
+
+[dependencies]
+poker-appchain = { path = "../../../../poker-appchain" }
+borsh = { version = "1.7", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4.3"

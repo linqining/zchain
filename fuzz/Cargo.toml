@@ -1,0 +1,40 @@
+[package]
+name = "poker-appchain-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+# cargo-fuzz 标配结构化输入派生
+arbitrary = { version = "1", features = ["derive"] }
+borsh = { version = "1.7", features = ["derive"] }
+poker-appchain = { path = "../poker-appchain" }
+
+# 防止并入父 workspace（cargo-fuzz 传统布局：fuzz/ 是独立 workspace 根）
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "soft_confirm_api"
+path = "fuzz_targets/soft_confirm_api.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "note_abi"
+path = "fuzz_targets/note_abi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "settlement_witness"
+path = "fuzz_targets/settlement_witness.rs"
+test = false
+doc = false
+bench = false

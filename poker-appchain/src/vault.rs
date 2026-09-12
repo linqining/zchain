@@ -316,6 +316,17 @@ impl CustodyLedger {
             .filter(|e| e.status == WithdrawalStatus::Queued)
             .count()
     }
+
+    /// 排队中提现请求的快照（打款执行侧轮询用；B7 事件桥——
+    /// 托管打款执行器据此逐笔 `pay_withdrawal` → `mark_paid`）。
+    #[must_use]
+    pub fn queued_requests(&self) -> Vec<WithdrawalRequest> {
+        self.withdrawals
+            .values()
+            .filter(|e| e.status == WithdrawalStatus::Queued)
+            .map(|e| e.request.clone())
+            .collect()
+    }
 }
 
 #[cfg(test)]
