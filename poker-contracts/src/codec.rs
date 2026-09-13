@@ -44,7 +44,8 @@ pub fn short_string(s: &str) -> ContractsResult<Felt> {
 }
 
 /// 入参解析（与 snops `parse_args_mixed` 同形）：逗号分隔，`@str:` 前缀走
-/// Cairo [`encode_byte_array`]，其余按 [`parse_felt`]。
+/// Cairo [`encode_byte_array`]，`-` 开头的十进制按有符号 i128 编码（结算
+/// deltas），其余按 [`parse_felt`]。
 ///
 /// # Errors
 /// 任一段解析失败 → [`ContractsError::Codec`]。
@@ -57,6 +58,13 @@ pub fn parse_calldata(s: &str) -> ContractsResult<Vec<Felt>> {
     for part in t.split(',') {
         if let Some(rest) = part.strip_prefix("@str:") {
             out.extend(encode_byte_array(rest));
+        } else if let Some(rest) = part.strip_prefix('-') {
+            // 有符号：结算 deltas 用（负数域上取负）
+            let v: i128 = rest
+                .trim()
+                .parse()
+                .map_err(|e| ContractsError::Codec(format!("i128 `{part}`: {e}")))?;
+            out.push(i128_to_felt(-v));
         } else {
             out.push(parse_felt(part)?);
         }
@@ -131,6 +139,17 @@ pub fn selector(name: &str) -> Felt {
     starknet_keccak(name.as_bytes())
 }
 
+/// i128 → felt（负数域上取负，与 texas `submit.rs::i128_to_felt` 及合约侧
+/// `from_felt_signed_i128` 语义一致——结算 deltas 的 calldata 编码）。
+#[must_use]
+pub fn i128_to_felt(value: i128) -> Felt {
+    if value >= 0 {
+        Felt::from(value.unsigned_abs())
+    } else {
+        -Felt::from(value.unsigned_abs())
+    }
+}
+
 /// Starknet `Uint256`（low/high 各 128 位）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Uint256 {
@@ -156,6 +175,22 @@ impl Uint256 {
         } else {
             self.low
         }
+    }
+}
+
+impl std::ops::Add for Uint256 {
+    type Output = Self;
+    fn add(self, rhs: Self) -> Self {
+        let (low, carry) = self.low.overflowing_add(rhs.low);
+        Self { low, high: self.high + rhs.high + u128::from(carry) }
+    }
+}
+
+impl std::ops::Sub for Uint256 {
+    type Output = Self;
+    fn sub(self, rhs: Self) -> Self {
+        let (low, borrow) = self.low.overflowing_sub(rhs.low);
+        Self { low, high: self.high - rhs.high - u128::from(borrow) }
     }
 }
 
@@ -243,6 +278,10 @@ mod tests {
         assert_eq!(felt_to_u128(Felt::from(u128::MAX)).unwrap(), u128::MAX);
         // 饱和读（与 texas 服务端同语义）
         assert_eq!(v.saturating_u128(), u128::MAX);
+        // 进位/借位（余额增量断言用）
+        let one = Uint256::from_u128(1);
+        assert_eq!(v + one, Uint256 { low: 0, high: 6 });
+        assert_eq!(v + one - one, v);
     }
 
     #[test]
@@ -263,5 +302,15 @@ mod tests {
         assert_eq!(cd.len(), 2 + 3); // 0x10, 300 + ByteArray("hi")
         assert_eq!(cd[0], Felt::from(0x10_u32));
         assert_eq!(cd[1], Felt::from(300_u64));
+    }
+
+    #[test]
+    fn negative_deltas_use_field_negation() {
+        // 与 texas submit.rs::i128_to_felt 同语义：负数域上取负
+        assert_eq!(i128_to_felt(300), Felt::from(300_u64));
+        assert_eq!(i128_to_felt(-300), -Felt::from(300_u64));
+        let cd = parse_calldata("300,-300").unwrap();
+        assert_eq!(cd, vec![Felt::from(300_u64), -Felt::from(300_u64)]);
+        assert!(parse_calldata("-zz").is_err());
     }
 }

@@ -3138,6 +3138,7 @@ version = "0.1.0"
 dependencies = [
  "blstrs",
  "borsh",
+ "crypto-bigint",
  "curve25519-dalek",
  "ff",
  "group",
@@ -3152,6 +3153,9 @@ dependencies = [
  "serde_json",
  "sha2",
  "sha3",
+ "starknet-crypto 0.8.1",
+ "starknet-curve 0.6.0",
+ "starknet-types-core",
  "tracing",
 ]
 

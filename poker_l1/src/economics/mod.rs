@@ -1109,7 +1109,7 @@ mod tests {
         if addon_pool > 0 {
             table.seats[0].fixture_set_player([0x55; 20]);
             table.seats[0].set_status(SeatStatus::Waiting);
-            table.seats[0].fixture_set_pk(ECPoint(G1Projective::generator()));
+            table.seats[0].fixture_set_pk(poker_protocol::crypto::types::StarkECPoint(poker_protocol::crypto::stark_curve::StarkPoint::generator()));
             table.seats[0].set_pending_addon(addon_pool).unwrap();
         }
         table_storage_objects(&table).unwrap().into_iter().collect()

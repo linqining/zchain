@@ -168,6 +168,7 @@ impl DeployedAddresses {
 /// | `ADDRESS` + `PRIVATE_KEY` | 部署者/操作员（部署脚本惯例） | 必填（连接/部署时） |
 /// | `STARKNET_OPERATOR_ADDRESS` + `STARKNET_OPERATOR_PRIVATE_KEY` | 同上（server .env 惯例，回退） | — |
 /// | `POKER_CONTRACTS_ARTIFACTS_DIR` | scarb 产物目录 | `<repo>/../poker_texas_air/poker_contracts/target/dev` |
+/// | `POKER_CONTRACTS_UDC` | UDC 地址（devnet 0.9.x 预部署 0x2cee…） | 主网 legacy UDC |
 /// | `STARKNET_STRK_ADDRESS` | 筹码代币 | 规范 STRK |
 /// | `STARKNET_VAULT_ADDRESS` 等 | 已部署地址（接入） | 空 |
 /// | `POKER_CONTRACTS_PROGRAM_HASH` / `POKER_CONTRACTS_HAND_VERIFY_PROGRAM_HASH` | 电路 hash | 版本默认 |
@@ -277,6 +278,10 @@ impl ContractsConfig {
         }
         if let Some(d) = get("POKER_CONTRACTS_ARTIFACTS_DIR") {
             cfg.artifacts_dir = PathBuf::from(d);
+        }
+        // starknet-devnet 0.9.x 预部署 UDC 为 0x2cee…（非主网 legacy 地址）
+        if let Some(u) = get("POKER_CONTRACTS_UDC") {
+            cfg.udc = parse_felt(&u)?;
         }
         if let Some(s) = get("STARKNET_STRK_ADDRESS") {
             cfg.strk = parse_felt(&s)?;

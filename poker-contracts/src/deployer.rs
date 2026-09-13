@@ -158,6 +158,14 @@ impl<'a> ContractDeployer<'a> {
     /// 声明被拒（非 mismatch / 非 already-declared）→ [`ContractsError::Deploy`]。
     pub async fn declare(&self) -> ContractsResult<DeclareOutcome> {
         let flattened = Arc::new(self.artifact.flattened()?);
+        let already = || {
+            Ok(DeclareOutcome {
+                class_hash: self.artifact.class_hash,
+                compiled_class_hash: self.artifact.compiled_class_hash,
+                tx_hash: None,
+                already_declared: true,
+            })
+        };
         match self.send_declare(flattened.clone(), self.artifact.compiled_class_hash).await {
             Ok(r) => Ok(DeclareOutcome {
                 class_hash: r.class_hash,
@@ -165,6 +173,8 @@ impl<'a> ContractDeployer<'a> {
                 tx_hash: Some(r.transaction_hash),
                 already_declared: false,
             }),
+            // 类已在链上（重复部署 / 类复用 / devnet 先落库再报 mismatch）
+            Err(text) if text.contains("already declared") => already(),
             Err(text) if text.contains("Mismatch compiled class hash") => {
                 // 节点（devnet/公共节点）casm 方案与本地 starknet-core 有
                 // 版本差：取节点 "Expected: 0x…" 重试一次（snops 同策略）
@@ -177,24 +187,21 @@ impl<'a> ContractDeployer<'a> {
                     "[poker-contracts] {} compiled-hash mismatch → retry {actual:#x}",
                     self.artifact.name.label()
                 );
-                let r = self.send_declare(flattened, actual).await.map_err(|t| {
-                    ContractsError::Deploy(format!("declare {} (retry): {t}", self.artifact.name.label()))
-                })?;
-                Ok(DeclareOutcome {
-                    class_hash: r.class_hash,
-                    compiled_class_hash: actual,
-                    tx_hash: Some(r.transaction_hash),
-                    already_declared: false,
-                })
-            }
-            Err(text) if text.contains("already declared") => {
-                // 幂等声明：类已在链上（重复部署 / 类复用场景）
-                Ok(DeclareOutcome {
-                    class_hash: self.artifact.class_hash,
-                    compiled_class_hash: self.artifact.compiled_class_hash,
-                    tx_hash: None,
-                    already_declared: true,
-                })
+                match self.send_declare(flattened, actual).await {
+                    Ok(r) => Ok(DeclareOutcome {
+                        class_hash: r.class_hash,
+                        compiled_class_hash: actual,
+                        tx_hash: Some(r.transaction_hash),
+                        already_declared: false,
+                    }),
+                    // devnet 首次尝试可能已把类落库：重试报 already declared
+                    // 时同样按幂等成功处理
+                    Err(t2) if t2.contains("already declared") => already(),
+                    Err(t2) => Err(ContractsError::Deploy(format!(
+                        "declare {} (retry): {t2}",
+                        self.artifact.name.label()
+                    ))),
+                }
             }
             Err(text) => Err(ContractsError::Deploy(format!(
                 "declare {}: {text}",

@@ -24,13 +24,11 @@
 //! - 外部命令序号仅由 dispatch 原子提交边界递增 `call_seq`
 //! - 错误用 `PokerL1Error::Serialization` 包裹（带上下文 message）
 
-use blstrs::G1Projective;
-use group::Group;
+use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use poker_protocol::zk_shuffle::dleq_proof::LeaveKind;
 
-use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
-use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use super::types::{ShuffleProof, RevealTokenProof};
+use poker_protocol::crypto::types::{StarkECPoint as ECPoint, StarkElGamalCiphertext as ElGamalCiphertext};
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 // V3 reconstruction 家族为 vendored 模块（zgame 版 poker_protocol 从未提供 V3 API）。
 use super::reconstruction_v3::{
@@ -55,7 +53,7 @@ use super::types::{
     seat_mask_contains, seat_mask_count, seat_mask_first, seat_mask_remove, seat_mask_to_indices,
 };
 // 适配层（保留原 crypto/ 的自由函数 API：g1_add/g1_equal/verify_or_skip/...）。
-// typed 化后字段已是 G1Projective / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
+// typed 化后字段已是 StarkPoint / ElGamalCiphertext，parse_g1/serialize_g1 仅在 RPC 边界使用。
 use super::utils::{
     self, g1_equal, g1_generator, g1_is_identity, g1_sub, generate_plaintext_cards, hash_to_scalar,
 };
@@ -149,7 +147,7 @@ pub enum FundTiming {
 
 // ========== 工具：bytes↔G1 转换（typed 化后大部分不再需要） ==========
 
-// 注：types.rs 字段已 typed 化为 G1Projective / ElGamalCiphertext，
+// 注：types.rs 字段已 typed 化为 StarkPoint / ElGamalCiphertext，
 // 原 `bytes_ct_to_g1` / `g1_ct_to_bytes` / `pk_to_g1` 已删除。
 // 残余 RPC 边界转换直接使用 `utils::parse_g1` / `utils::serialize_g1`。
 
@@ -251,7 +249,7 @@ pub fn is_in_mask(mask: SeatMask, value: u8) -> bool {
 
 /// 是否已注册 pk（occupied 且 pk 匹配）。
 #[must_use]
-pub fn is_pk_registered(seats: &[Seat], pk: &G1Projective) -> bool {
+pub fn is_pk_registered(seats: &[Seat], pk: &StarkPoint) -> bool {
     seats
         .iter()
         .any(|s| s.pk().is_some_and(|registered| &registered.0 == pk))
@@ -380,9 +378,9 @@ fn no_further_betting_possible(table: &TexasPokerTable) -> bool {
 
 /// 将 pk 加入聚合 pk：None + pk = Some(pk)；Some(old) + pk = Some(old + pk)。
 ///
-/// typed 化后 `aggregated_pk: Option<G1Projective>`，不再使用字节表示。
+/// typed 化后 `aggregated_pk: Option<StarkPoint>`，不再使用字节表示。
 #[cfg(test)]
-fn add_pk_to_aggregated(old: Option<&G1Projective>, new_pk: &G1Projective) -> Option<G1Projective> {
+fn add_pk_to_aggregated(old: Option<&StarkPoint>, new_pk: &StarkPoint) -> Option<StarkPoint> {
     match old {
         None => Some(*new_pk),
         Some(old_pt) => Some(g1_add(old_pt, new_pk)),
@@ -394,9 +392,9 @@ fn add_pk_to_aggregated(old: Option<&G1Projective>, new_pk: &G1Projective) -> Op
 /// 若结果为单位元，返回 None（与 Move 端"空 Vec"语义一致）。
 #[cfg(test)]
 fn remove_pk_from_aggregated(
-    old: Option<&G1Projective>,
-    pk: &G1Projective,
-) -> Option<G1Projective> {
+    old: Option<&StarkPoint>,
+    pk: &StarkPoint,
+) -> Option<StarkPoint> {
     let old_pt = old?;
     let diff = g1_sub(old_pt, pk);
     if g1_is_identity(&diff) {
@@ -1189,8 +1187,8 @@ fn check_reveal_phase_complete(
 
 /// Match a decrypted plaintext point against the protocol's canonical 52-card domain.
 fn card_from_plaintext(
-    plaintext: &G1Projective,
-    canonical_cards: &[G1Projective],
+    plaintext: &StarkPoint,
+    canonical_cards: &[StarkPoint],
 ) -> PokerL1Result<(u8, Card)> {
     let card_id = canonical_cards
         .iter()
@@ -1266,8 +1264,8 @@ fn validate_run_it_twice_progress(table: &TexasPokerTable) -> PokerL1Result<()> 
 
 /// 部分解密 c2：`result = c2 - Σ token_point`。
 ///
-/// typed 化后直接接收/返回 G1Projective，无需 bytes 转换。
-fn partial_decrypt_c2(c2: &G1Projective, tokens: &[G1Projective]) -> G1Projective {
+/// typed 化后直接接收/返回 StarkPoint，无需 bytes 转换。
+fn partial_decrypt_c2(c2: &StarkPoint, tokens: &[StarkPoint]) -> StarkPoint {
     let mut result = *c2;
     for t in tokens {
         result = g1_sub(&result, t);
@@ -1277,7 +1275,7 @@ fn partial_decrypt_c2(c2: &G1Projective, tokens: &[G1Projective]) -> G1Projectiv
 
 /// 根据 encrypted_card_index 反查明文 G1 点。
 #[allow(dead_code)] // 保留供 future RPC / 测试使用。
-fn plaintext_point_by_index(_table: &TexasPokerTable, idx: u8) -> PokerL1Result<G1Projective> {
+fn plaintext_point_by_index(_table: &TexasPokerTable, idx: u8) -> PokerL1Result<StarkPoint> {
     let plaintext = generate_plaintext_cards();
     if (idx as usize) >= plaintext.len() {
         return Err(PokerL1Error::Serialization(format!(
@@ -1456,10 +1454,10 @@ pub fn apply_submit_shuffle_v2(
     // input_cts = 当前 deck（已是 Vec<ElGamalCiphertext>）
     let input_cts: Vec<ElGamalCiphertext> = table.deck_state.encrypted.to_vec();
 
-    let agg_pk_pt: G1Projective = table
+    let agg_pk_pt: StarkPoint = table
         .derived_aggregated_pk()?
         .map(|point| point.0)
-        .unwrap_or(G1Projective::identity());
+        .unwrap_or(StarkPoint::identity());
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_shuffle_transcript();
         shuffle_proof
@@ -1469,8 +1467,8 @@ pub fn apply_submit_shuffle_v2(
     })?;
 
     // 链上注入：new_cts[i] = add_pk_to_c2(output_cts[i], player_pk)
-    // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
-    let player_pk: G1Projective = (*table.seats[seat_index as usize]
+    // ECPoint → StarkPoint（Seat.pk 字段为 ECPoint）
+    let player_pk: StarkPoint = (*table.seats[seat_index as usize]
         .pk()
         .ok_or_else(|| PokerL1Error::Serialization("shuffle seat has no live key".into()))?)
     .into();
@@ -1504,8 +1502,8 @@ pub fn apply_submit_shuffle_v2(
 pub fn apply_submit_player_reveal_tokens(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    reveal_tokens: Vec<G1Projective>,
-    proofs: Vec<RevealTokenProof<DefaultCurve>>,
+    reveal_tokens: Vec<StarkPoint>,
+    proofs: Vec<poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<StarkCurve>>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reveal_token_state().is_none() {
@@ -1543,8 +1541,8 @@ pub fn apply_submit_player_reveal_tokens(
             reveal_tokens.len()
         )));
     }
-    // ECPoint → G1Projective（Seat.pk 字段为 ECPoint）
-    let expected_pk: G1Projective = (*table.seats[seat_index as usize]
+    // ECPoint → StarkPoint（Seat.pk 字段为 ECPoint）
+    let expected_pk: StarkPoint = (*table.seats[seat_index as usize]
         .pk()
         .ok_or_else(|| PokerL1Error::Serialization("reveal seat has no live key".into()))?)
     .into();
@@ -1669,7 +1667,7 @@ pub fn apply_submit_player_reveal_tokens(
     Ok(())
 }
 
-fn completed_reveal_tokens(assignment: &RevealAssignment) -> PokerL1Result<Vec<G1Projective>> {
+fn completed_reveal_tokens(assignment: &RevealAssignment) -> PokerL1Result<Vec<StarkPoint>> {
     if assignment.pending_mask != 0 {
         return Err(PokerL1Error::Serialization(
             "reveal assignment is not a freshly completed collection".into(),
@@ -1962,8 +1960,8 @@ fn materialize_completed_showdown_assignments(
 pub fn apply_submit_reconstruct_deck(
     table: &mut TexasPokerTable,
     seat_index: u8,
-    statement: ReconstructionV3Statement<DefaultCurve>,
-    proof: ReconstructProofV3<DefaultCurve>,
+    statement: ReconstructionV3Statement<StarkCurve>,
+    proof: ReconstructProofV3<StarkCurve>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     if table.reconstruct_phase() != RECONSTRUCT_PHASE_COLLECTING {
@@ -2020,12 +2018,12 @@ pub fn apply_submit_reconstruct_deck(
     let prior_accumulator = if let Some(deck) = &table.reconstruct_state().accumulated_deck {
         deck.clone()
     } else {
-        canonical_base_deck::<DefaultCurve>(&expected_cards, &aggregate_pk.0).map_err(|error| {
+        canonical_base_deck::<StarkCurve>(&expected_cards, &aggregate_pk.0).map_err(|error| {
             PokerL1Error::Serialization(format!("reconstruction V3 base deck: {error}"))
         })?
     };
     let accumulated_deck =
-        apply_reconstruction_contributions::<DefaultCurve>(&prior_accumulator, &contributions)
+        apply_reconstruction_contributions::<StarkCurve>(&prior_accumulator, &contributions)
             .map_err(|error| {
                 PokerL1Error::Serialization(format!(
                     "reconstruction V3 contribution for seat {seat_index}: {error}"
@@ -2080,7 +2078,7 @@ pub fn apply_fold_with_proof(
     table: &mut TexasPokerTable,
     seat_index: u8,
     output_cards: Vec<ElGamalCiphertext>,
-    fold_proof: DLEqProof<DefaultCurve, LeaveKind>,
+    fold_proof: poker_protocol::zk_shuffle::dleq_proof::DLEqProof<StarkCurve, LeaveKind>,
     events: &mut Vec<TexasPokerEvent>,
 ) -> PokerL1Result<()> {
     // 1. Guards（对齐 apply_fold_internal）
@@ -2122,7 +2120,7 @@ pub fn apply_fold_with_proof(
         .ok_or_else(|| PokerL1Error::Serialization("fold seat has no live key".into()))?;
     let _ = utils::verify_or_skip(utils::test_only_crypto_skip(), || {
         let mut t = utils::new_leave_transcript();
-        let ok = DLEqProof::<DefaultCurve, LeaveKind>::verify(
+        let ok = poker_protocol::zk_shuffle::dleq_proof::DLEqProof::<StarkCurve, LeaveKind>::verify(
             &fold_proof,
             &input_cts,
             &output_cts,
@@ -4209,7 +4207,7 @@ mod tests {
 
         let preserved_readable_cards = table.deck_state.owner_readable_hole_cards.clone();
         let mut expected_deck =
-            canonical_base_deck::<DefaultCurve>(&canonical_cards, &aggregate_pk)
+            canonical_base_deck::<StarkCurve>(&canonical_cards, &aggregate_pk)
                 .expect("canonical aggregate-key base deck");
         let mut events = vec![];
 
@@ -4235,7 +4233,7 @@ mod tests {
             )
             .expect("honest reconstruction V3 proof");
 
-            expected_deck = apply_reconstruction_contributions::<DefaultCurve>(
+            expected_deck = apply_reconstruction_contributions::<StarkCurve>(
                 &expected_deck,
                 &statement.contributions,
             )
@@ -4397,8 +4395,8 @@ mod tests {
         let pk1 = g * scalar_from_u64(111);
         let pk2 = g * scalar_from_u64(222);
 
-        // typed 化后 add/remove_pk_to/from_aggregated 接受 Option<&G1Projective>，
-        // 返回 Option<G1Projective>（None = 空/单位元）。
+        // typed 化后 add/remove_pk_to/from_aggregated 接受 Option<&StarkPoint>，
+        // 返回 Option<StarkPoint>（None = 空/单位元）。
         let agg1 = add_pk_to_aggregated(None, &pk1);
         assert_eq!(agg1, Some(pk1));
 
@@ -4949,7 +4947,7 @@ mod tests {
         let ct = ElGamalCiphertext::encrypt(&plaintext, &pk, &r);
         let token = ct.gen_reveal_token(&sk);
 
-        // typed 化后 partial_decrypt_c2 直接接受 G1Projective，返回 G1Projective。
+        // typed 化后 partial_decrypt_c2 直接接受 StarkPoint，返回 StarkPoint。
         let result = partial_decrypt_c2(&ct.c2, &[token]);
         assert!(g1_equal(&result, &plaintext));
     }

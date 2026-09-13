@@ -25,13 +25,12 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use blstrs::{G1Projective, Scalar as BlsScalar};
+use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use poker_protocol::zk_shuffle::dleq_proof::LeaveKind;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use poker_protocol::crypto::types::{DefaultCurve, ECPoint, ElGamalCiphertext};
-use poker_protocol::zk_shuffle::ShuffleProof;
-use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
-use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
+use super::types::{ShuffleProof, RevealTokenProof};
+use poker_protocol::crypto::types::{StarkECPoint as ECPoint, StarkElGamalCiphertext as ElGamalCiphertext};
 // V3 reconstruction 家族为 vendored 模块（zgame 版 poker_protocol 从未提供 V3 API）。
 use super::reconstruction_v3::{ReconstructProofV3, ReconstructionV3Statement};
 
@@ -463,7 +462,7 @@ pub struct FoldWithProofArgs {
     /// fold 时的牌组输出（typed ElGamalCiphertext 列表，剥离玩家加密层后的新牌组）。
     pub output_cards: Vec<ElGamalCiphertext>,
     /// fold proof（typed DLEqProof<LeaveKind>，与 leave proof 同型）。
-    pub fold_proof: DLEqProof<DefaultCurve, LeaveKind>,
+    pub fold_proof: poker_protocol::zk_shuffle::dleq_proof::DLEqProof<StarkCurve, LeaveKind>,
 }
 
 /// `join_table` 参数。
@@ -484,8 +483,8 @@ impl JoinTableArgs {
     pub fn with_key(
         player: Address,
         buy_in: u64,
-        secret_key: BlsScalar,
-        nonce: BlsScalar,
+        secret_key: StarkScalar,
+        nonce: StarkScalar,
     ) -> PokerL1Result<Self> {
         let pk = super::utils::g1_generator() * secret_key;
         Ok(Self {
@@ -540,7 +539,7 @@ pub struct SubmitRevealTokensArgs {
     /// seat 的全部 pending assignment 的 canonical 顺序排列；调用方不再重复提交索引。
     pub reveal_tokens: Vec<ECPoint>,
     /// 揭牌 proof 列表（typed RevealTokenProof，与 reveal_tokens 一一对应）。
-    pub proofs: Vec<RevealTokenProof<DefaultCurve>>,
+    pub proofs: Vec<poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<StarkCurve>>,
 }
 
 /// `submit_reconstruct_deck` 参数。
@@ -550,9 +549,9 @@ pub struct SubmitReconstructDeckArgs {
     pub seat_index: u8,
     /// Complete V3 public statement. The hidden readable-to-canonical mapping
     /// is not serialized in this value.
-    pub statement: ReconstructionV3Statement<DefaultCurve>,
+    pub statement: ReconstructionV3Statement<StarkCurve>,
     /// Reconstruction V3 proof for the exact statement above.
-    pub proof: ReconstructProofV3<DefaultCurve>,
+    pub proof: ReconstructProofV3<StarkCurve>,
 }
 
 /// `raise` 参数。
@@ -613,7 +612,7 @@ struct CanonicalSetLeaveAfterHandArgs {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct CanonicalFoldWithProofArgs {
     output_cards: Vec<ElGamalCiphertext>,
-    fold_proof: DLEqProof<DefaultCurve, LeaveKind>,
+    fold_proof: poker_protocol::zk_shuffle::dleq_proof::DLEqProof<StarkCurve, LeaveKind>,
 }
 
 /// Canonical actor-less payload for `submit_shuffle_v2`.
@@ -627,14 +626,14 @@ struct CanonicalSubmitShuffleV2Args {
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct CanonicalSubmitRevealTokensArgs {
     reveal_tokens: Vec<ECPoint>,
-    proofs: Vec<RevealTokenProof<DefaultCurve>>,
+    proofs: Vec<poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<StarkCurve>>,
 }
 
 /// Canonical actor-less payload for `submit_reconstruct_deck`.
 #[derive(Debug, Clone, BorshSerialize, BorshDeserialize)]
 struct CanonicalSubmitReconstructDeckArgs {
-    statement: ReconstructionV3Statement<DefaultCurve>,
-    proof: ReconstructProofV3<DefaultCurve>,
+    statement: ReconstructionV3Statement<StarkCurve>,
+    proof: ReconstructProofV3<StarkCurve>,
 }
 
 /// Canonical actor-less payload for `raise`.
@@ -1686,8 +1685,8 @@ fn dispatch_join_table(
             "not in WAITING state, cannot join_table".into(),
         ));
     }
-    // ECPoint → G1Projective（state_machine::is_pk_registered / Seat.pk 使用裸 G1Projective）
-    let pk: G1Projective = input.pk.into();
+    // ECPoint → StarkPoint（state_machine::is_pk_registered / Seat.pk 使用裸 StarkPoint）
+    let pk: StarkPoint = input.pk.into();
     if super::utils::g1_is_identity(&pk) {
         return Err(PokerL1Error::Serialization(
             "join_table public key cannot be identity".into(),
@@ -1900,8 +1899,8 @@ fn dispatch_submit_player_reveal_tokens(
         input.seat_index,
         "submit_player_reveal_tokens",
     )?;
-    // ECPoint → G1Projective（state_machine 接口使用裸 G1Projective）
-    let reveal_tokens: Vec<G1Projective> =
+    // ECPoint → StarkPoint（state_machine 接口使用裸 StarkPoint）
+    let reveal_tokens: Vec<StarkPoint> =
         input.reveal_tokens.into_iter().map(Into::into).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
@@ -2329,7 +2328,7 @@ mod tests {
         let identity_args = JoinTableArgs {
             player,
             buy_in: 1_000,
-            pk: ECPoint(G1Projective::identity()),
+            pk: ECPoint(StarkPoint::identity()),
             pk_ownership_proof: vec![0; 80],
         };
         let identity_error = dispatch(
@@ -3216,7 +3215,7 @@ mod tests {
             .unwrap();
 
         // 3 名玩家，pk 都用 generator；lineage 是 canonical fact，aggregate 由其派生。
-        let g = G1Projective::generator();
+        let g = StarkPoint::generator();
         for i in 0..3u8 {
             table.seats[i as usize].fixture_set_player([0x11 + i; 20]);
             table.seats[i as usize].set_stack(1000).unwrap();
@@ -3241,24 +3240,24 @@ mod tests {
     }
 
     /// 辅助：构造一个空的 DLEqProof<LeaveKind>（skip_remask=true 时不会真正验证）。
-    fn empty_fold_proof() -> DLEqProof<DefaultCurve, LeaveKind> {
+    fn empty_fold_proof() -> poker_protocol::zk_shuffle::dleq_proof::DLEqProof<StarkCurve, LeaveKind> {
         // _kind 字段私有，必须用 from_parts 构造（DLEqProof 不 derive Default）。
         // skip_remask=true（默认 dev config）时 verify 不执行，字段值不影响测试。
         // 零标量复用 utils::scalar_zero()（封装了 ff::Field trait 的 ZERO 常量）。
         let zero = super::super::utils::scalar_zero();
-        DLEqProof::from_parts(
+        poker_protocol::zk_shuffle::dleq_proof::DLEqProof::<StarkCurve, LeaveKind>::from_parts(
             vec![],                   // per_card_commitments
-            G1Projective::identity(), // commitment_pk（C::Point）
-            zero,                     // response（C::Scalar = BlsScalar）
-            zero,                     // nonce（C::Scalar = BlsScalar）
+            StarkPoint::identity(), // commitment_pk（C::Point）
+            zero,                     // response（C::Scalar = StarkScalar）
+            zero,                     // nonce（C::Scalar = StarkScalar）
         )
     }
 
     fn empty_schnorr_proof()
-    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<DefaultCurve>
+    -> poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof<StarkCurve>
     {
         poker_protocol::zk_shuffle::generalized_schnorr_proof::GeneralizedSchnorrProof {
-            commitment: G1Projective::identity(),
+            commitment: StarkPoint::identity(),
             responses: vec![],
         }
     }
@@ -3266,8 +3265,8 @@ mod tests {
     fn empty_shuffle_proof() -> ShuffleProof {
         let schnorr = empty_schnorr_proof();
         let legacy = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof {
-            sum_c1_commit: G1Projective::identity(),
-            sum_c2_commit: G1Projective::identity(),
+            sum_c1_commit: StarkPoint::identity(),
+            sum_c2_commit: StarkPoint::identity(),
             combined_schnorr_proof: schnorr.clone(),
             sum_c1_schnorr_proof: schnorr.clone(),
             sum_c2_schnorr_proof: schnorr,
@@ -3280,8 +3279,8 @@ mod tests {
     }
 
     fn empty_reconstruct_v3() -> (
-        ReconstructionV3Statement<DefaultCurve>,
-        ReconstructProofV3<DefaultCurve>,
+        ReconstructionV3Statement<StarkCurve>,
+        ReconstructProofV3<StarkCurve>,
     ) {
         use super::super::reconstruction_v3::{
             BayerGrothShuffleProof, CrossKeyNegationProof, MultiExponentiationArgument,
@@ -3289,7 +3288,7 @@ mod tests {
         };
 
         let zero = super::super::utils::scalar_zero();
-        let identity = G1Projective::identity();
+        let identity = StarkPoint::identity();
         let generator = super::super::utils::g1_generator();
         let aggregate_pk = generator * super::super::utils::scalar_from_u64(17);
         let owner_pk = generator * super::super::utils::scalar_from_u64(19);
@@ -3590,7 +3589,7 @@ mod tests {
             seat_index: u8,
             assignment_indices: Vec<u8>,
             reveal_tokens: Vec<ECPoint>,
-            proofs: Vec<RevealTokenProof<DefaultCurve>>,
+            proofs: Vec<poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<StarkCurve>>,
         }
 
         let current = borsh::to_vec(&SubmitRevealTokensArgs {
@@ -3635,7 +3634,7 @@ mod tests {
 
         let ctx_p1 = make_context_as([0x11; 20]);
         // output_cards 用一个新的占位牌组（与 deck_before 不同，验证替换生效）
-        let g = G1Projective::generator();
+        let g = StarkPoint::generator();
         let output_cards: Vec<ElGamalCiphertext> = (0..52)
             .map(|_| ElGamalCiphertext {
                 c1: g,
@@ -3673,7 +3672,7 @@ mod tests {
         assert_eq!(table.seats[0].stack(), 1000, "stack 应保留");
         assert_eq!(
             table.seats[0].pk().copied(),
-            Some(ECPoint(G1Projective::generator())),
+            Some(ECPoint(StarkPoint::generator())),
             "seat.pk 应保留（不置 identity）"
         );
         assert!(!table.seats[0].has_left_hand(), "left_during_hand 不应设置");
@@ -3830,15 +3829,15 @@ mod tests {
         table.seats[0].set_status(SeatStatus::Active);
         table.seats[0].set_stack(1000).unwrap();
         table.seats[0].fixture_set_total_bet(100);
-        table.seats[0].fixture_set_pk(ECPoint(G1Projective::generator()));
+        table.seats[0].fixture_set_pk(ECPoint(StarkPoint::generator()));
         table.seats[1].fixture_set_player([0x22; 20]);
         table.seats[1].set_status(SeatStatus::Active);
         table.seats[1].set_stack(1000).unwrap();
         table.seats[1].fixture_set_total_bet(100);
-        table.seats[1].fixture_set_pk(ECPoint(G1Projective::generator()));
+        table.seats[1].fixture_set_pk(ECPoint(StarkPoint::generator()));
         table.deck_state.contributor_mask = 0b11;
         table.derived_aggregated_pk().unwrap();
-        let g = G1Projective::generator();
+        let g = StarkPoint::generator();
         table.deck_state.encrypted = (0..52)
             .map(|_| ElGamalCiphertext { c1: g, c2: g })
             .collect::<Vec<_>>()

@@ -1,5 +1,7 @@
 //! Texas Poker 模块单元测试 — 覆盖核心游戏逻辑。
 
+use poker_protocol::crypto::stark_curve::{StarkPoint, StarkScalar};
+use poker_protocol::crypto::types::StarkECPoint as ECPoint;
 use poker_l1::Address;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::texas_poker::{
@@ -1333,14 +1335,12 @@ fn test_calculate_side_pots_all_in_folded_only() {
 // 7. state_machine.rs — 状态机与游戏逻辑
 // ===========================================================================
 
-use blstrs::G1Projective;
-use group::Group;
+
 use poker_l1::vm::contracts::texas_poker::{
     events::{KickCause, TexasPokerEvent},
     state_machine,
     types::TexasPokerTable,
 };
-use poker_protocol::crypto::types::ECPoint;
 
 fn dummy_table(name: &str, max_players: u8) -> TexasPokerTable {
     let id = poker_l1::object_model::ObjectID::new([0xFF; 20], 0);
@@ -1353,7 +1353,7 @@ fn occupy_seat(table: &mut TexasPokerTable, seat_idx: u8, player: [u8; 20], stac
     let mut seat = Seat::occupied(
         player,
         stack,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -1857,8 +1857,8 @@ fn test_find_next_participating_seat_includes_folded_and_all_in() {
 #[test]
 fn test_is_pk_registered() {
     let mut table = dummy_table("test", 4);
-    let pk1 = G1Projective::generator();
-    let pk2 = G1Projective::identity();
+    let pk1 = StarkPoint::generator();
+    let pk2 = StarkPoint::identity();
 
     occupy_seat(&mut table, 0, [0x01; 20], 1000);
     table.seats[0].occupied_mut().unwrap().pk = ECPoint(pk1);
@@ -3088,7 +3088,7 @@ fn test_seat_status_active() {
     let seat = Seat::occupied(
         [0x01; 20],
         1000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -3102,7 +3102,7 @@ fn test_seat_status_folded() {
     let mut seat = Seat::occupied(
         [0x01; 20],
         1000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -3115,7 +3115,7 @@ fn test_seat_status_all_in() {
     let mut seat = Seat::occupied(
         [0x01; 20],
         0,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -3128,7 +3128,7 @@ fn test_seat_status_waiting() {
     let seat = Seat::occupied(
         [0x01; 20],
         1000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Waiting,
     )
     .unwrap();
@@ -3142,7 +3142,7 @@ fn test_seat_status_left_during_hand() {
     let mut seat = Seat::occupied(
         [0x01; 20],
         1000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -3158,7 +3158,7 @@ fn test_seat_status_is_mutually_exclusive() {
     let mut seat = Seat::occupied(
         [0x01; 20],
         1000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();
@@ -3174,7 +3174,7 @@ fn test_seat_borsh_roundtrip() {
     let mut seat = Seat::occupied(
         [0xAB; 20],
         5000,
-        ECPoint(G1Projective::generator()),
+        ECPoint(StarkPoint::generator()),
         SeatStatus::Active,
     )
     .unwrap();

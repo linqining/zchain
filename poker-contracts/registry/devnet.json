@@ -1,0 +1,55 @@
+{
+  "network": "devnet",
+  "updated_at": "2026-09-13T13:01:29Z",
+  "contracts": {
+    "PokerDualSettlement": {
+      "address": "0x670dc62d8aaa8f8806e87d119b37a39471cc002e272642791a65cc62fd4da3c",
+      "class_hash": "0x47e91d54d171401a314a591ab1b67d3259e09b9f90c0036675829f533884cf8",
+      "compiled_class_hash": "0x5e41ed189b80af15ad23d6939df2c1b1b37061cbb8272ea0af8194b0e9fe47c",
+      "deploy_tx": "0x36dfb5ebbdb7a8d9bab8a7f459680ac46286282855df8fe7c16d88c767dd97b",
+      "wiring": {
+        "dual.set_circuit_program_hash": "0x5904a5d6f52330889b2f5647a33cc1b1c57bb59b813278a2b5bae099dbd6793",
+        "dual.set_claim_helper": "0x898c71ccf20a76314ba32aa6d598ce0da49a461afd83b6627b194189eb0424",
+        "dual.set_hand_verify_program_hash": "0x3737963dda3ecfbef3996812873ce1cd083906b867f5a36e0554d8435c10462"
+      }
+    },
+    "PokerSettlement": {
+      "address": "0x718c4db0042fc90b503070ba7918de28d16001c188a32c5a03433345cab6d56",
+      "class_hash": "0x6f2e01a61b9fa6d73f1730b87ae39fbe1e9d553327a864b3acb755792a10440",
+      "compiled_class_hash": "0x6bd142f7bf66594fe53b403ddffbaaa57e1304a2f167244983ec15afb79dd0d",
+      "deploy_tx": "0x201d833f447930bd657c8ebe9b67fa7e910825f254be1f78d83d972e78ff508"
+    },
+    "PokerTableRegistry": {
+      "address": "0x6fe2f5c59eeaf1770c9dd0b6ab28ba8baac5c9531f620ebea29b41d1ff25b68",
+      "class_hash": "0x7cc910b5cf79132f02479b264a4a792d90f97508b8c76253557b752d405c0bb",
+      "compiled_class_hash": "0x769b35edea3a38235e8e1334557f03277668899ce698cca206db2dc6f0d332f",
+      "deploy_tx": "0x54d5e82f948874a0c783d53311f97fafe0c8e55c4e40af43a2f912410470f05"
+    },
+    "PokerVault": {
+      "address": "0xef5841a75a1f3fd30cf1a8de4a9c12c15c6f42c1658b9b12ce2100afd7175c",
+      "class_hash": "0x6de64f9a3388e8224b17b21094f7a4e1435e6026868c8298146bbda17f0c60b",
+      "compiled_class_hash": "0xe9fd2d621a1b7f7746fc80acdb2d55ebd0bb192bf66633f2ccb712fbb675a3",
+      "deploy_tx": "0x6aae049d131e18ad0b942b100a8d879bdf5909821bb1b0ffb5958dd5199760e",
+      "wiring": {
+        "vault.set_settlement_contract": "0x5bae5a2c1ffd43f4f3324e4184c3e582e11b5986100938a5b2d46896843ffb0",
+        "vault.set_unshield_helper": "0x23af5d3fe852aa3714e03f53693cad1fe10525d2b37cb6512c64cf80b2f4cf4"
+      }
+    },
+    "PokerVaultAnonymizer": {
+      "address": "0x13a4003ac9b6a86f734d23054123b4a18903bb39aed0585bc5881f22f1e9fa0",
+      "class_hash": "0x6dbb1f827f488beef4d18f2d5535c170d04babed6087776ca7d611a2c750966",
+      "compiled_class_hash": "0x3010a6dd1ee262e4f8178e67ff903a4c252dc0f90063cffd947e83f484514fd",
+      "deploy_tx": "0xc1dbc7ed65c5b145cdcfad35a8313a869ed3ef081c39ab416147446f3a99e7"
+    },
+    "SettlementPayoutAnonymizer": {
+      "address": "0x637a4502c985609af9cbadf7cc915d747acad6f64370adcad3235d0b66f8f2c",
+      "class_hash": "0x7c11073c06be83e2a4990554b9318e2d43ff04552f24892477b374eac006a79",
+      "compiled_class_hash": "0x701fab5a2e763e3b42490586b508af76d95e13ca426ebbd06b1bd43414931eb",
+      "deploy_tx": "0x2c447cfb603b6db8e299d107b5d001eafb0b11ec65b525229089d35293c888"
+    }
+  },
+  "constants": {
+    "pool": "0x254a6b2997ef52e9f830ce1f543f6b29768295e8d17e2267d672c552cfe0d91",
+    "strk": "0x4718f5a0fc34cc1af16a1cdee98ffb20c31f5cd61d6ab07201858f4287c938d"
+  }
+}

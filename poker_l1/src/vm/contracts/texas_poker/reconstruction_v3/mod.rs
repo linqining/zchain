@@ -71,3 +71,5 @@ pub const RECONSTRUCTION_PROOF_LABEL: &[u8] = b"zk_reconstruct_proof_v2";
 
 /// Legacy (V2) reconstruction proof version byte.
 pub const RECONSTRUCTION_PROOF_VERSION: u8 = 2;
+
+pub mod borsh_impl_stark;

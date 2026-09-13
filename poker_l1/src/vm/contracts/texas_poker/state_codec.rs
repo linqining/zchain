@@ -9,7 +9,7 @@ use std::io::{self, Read, Write};
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::{BorshDeserialize, BorshSerialize};
-use poker_protocol::crypto::types::ECPoint;
+use super::types::ECPoint;
 
 use super::card::BoardCards;
 use super::types::{

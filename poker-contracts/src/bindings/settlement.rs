@@ -10,6 +10,30 @@ use crate::error::{ContractsError, ContractsResult};
 
 use super::vault::felt_scalar;
 
+/// 结算承诺根（与合约 `settle_hand` 内 `poseidon_hash_span` 同公式）：
+/// `poseidon([hand_id, (player, sign, |delta|)*, action_log_digest])`，
+/// sign：1=正 / 0=负。`register_aggregate` 的 `settlement_roots` 逐手提交
+/// 此值，`settle_hand` 链上重算比对——本函数为部署/运维侧的离线同式计算。
+#[must_use]
+pub fn settlement_root(
+    hand_id: u64,
+    participants: &[(Felt, i128)],
+    action_log_digest: Felt,
+) -> Felt {
+    let mut elements = vec![Felt::from(hand_id)];
+    for (player, delta) in participants {
+        elements.push(*player);
+        if *delta >= 0 {
+            elements.push(Felt::ONE);
+        } else {
+            elements.push(Felt::ZERO);
+        }
+        elements.push(Felt::from(delta.unsigned_abs()));
+    }
+    elements.push(action_log_digest);
+    starknet_crypto::poseidon_hash_many(&elements)
+}
+
 /// PokerSettlement 句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Settlement {

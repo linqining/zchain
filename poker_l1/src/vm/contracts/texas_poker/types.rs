@@ -12,24 +12,32 @@
 //! plaintext）已从 `Vec<u8>` 改为 typed `poker_protocol` 类型（`ECPoint` / `ECScalar` /
 //! `ElGamalCiphertext`），消除 state_machine.rs 中的 bytes↔G1 转换样板代码。
 //! `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
-//! （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`）。
+//! （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: StarkPoint`）。
 //!
 //! # Borsh orphan rule 处理
 //!
-//! `G1Projective` / `BlsScalar` 是外部 blstrs 类型，无法在 poker_l1 直接 impl
+//! `StarkPoint` / `StarkScalar` 是外部 blstrs 类型，无法在 poker_l1 直接 impl
 //! `BorshSerialize`/`BorshDeserialize`（orphan rule）。所有 struct 字段使用本地 newtype
-//! `ECPoint(pub G1Projective)` / `ECScalar(pub BlsScalar)` 包装，borsh impl 在
+//! `ECPoint(pub StarkPoint)` / `ECScalar(pub StarkScalar)` 包装，borsh impl 在
 //! `poker_protocol::borsh_impls` 中实现（48B G1 compressed / 32B scalar big-endian）。
 
 use std::borrow::Cow;
 use std::ops::{Deref, DerefMut, Index, IndexMut};
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use group::Group;
 
+// ===== 牌局主曲线（2026-09 起：STARK curve，Cairo 原生 felt252 域）=====
+// 选型理由（2026-09-14 定案）：
+// 1. poker_texas_air 生产已在用 StarkCurve（同协议栈，证明可跨链复用）；
+// 2. Stark 系开发先用同曲线最稳妥，后续按 `Curve` trait 扩展其他后端；
+// 3. BLS 配对仅 SNARK 需要，STARK 证明栈用不到。
+// 切换面 = 本文件的类型别名/重导出；验证逻辑全部走 `Curve` trait 泛型。
+pub type TableCurve = poker_protocol::crypto::stark_curve::StarkCurve;
+pub type TablePoint = poker_protocol::crypto::stark_curve::StarkPoint;
+pub type TableScalar = poker_protocol::crypto::stark_curve::StarkScalar;
+pub use poker_protocol::crypto::types::StarkECPoint as ECPoint;
 #[cfg(test)]
-use blstrs::G1Projective;
-use poker_protocol::crypto::types::ECPoint;
+use poker_protocol::crypto::stark_curve::{StarkPoint, StarkScalar};
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
 use crate::Address;
@@ -153,10 +161,20 @@ pub const fn seat_mask_is_canonical(mask: SeatMask, max_players: u8) -> bool {
 // ========== ElGamal 密文 ==========
 
 // `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
-// （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: G1Projective`，
+// （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: StarkPoint`，
 //   已在 `poker_protocol::borsh_impls` impl BorshSerialize/BorshDeserialize）。
 // 重导出供外部模块使用。
-pub use poker_protocol::crypto::types::ElGamalCiphertext;
+pub use poker_protocol::crypto::types::StarkElGamalCiphertext as ElGamalCiphertext;
+/// 洗牌证明（StarkCurve 实例化；Args wire 格式见 poker_protocol::borsh_impls_stark）
+pub type ShuffleProof = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof<TableCurve>;
+/// 揭牌令牌证明（StarkCurve 实例化）
+pub type RevealTokenProof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<TableCurve>;
+/// 弃牌/离场 DLEq 证明（StarkCurve 实例化）
+pub type LeaveDLEqProofCrate = poker_protocol::zk_shuffle::dleq_proof::DLEqProof<TableCurve, poker_protocol::zk_shuffle::dleq_proof::LeaveKind>;
+// 兼容别名：合约代码按 `DLEqProof<StarkCurve, LeaveKind>` 泛型形状使用
+pub use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind};
+/// 重构 V3 证明（StarkCurve 实例化）
+pub type ReconstructProofV3C = poker_protocol::zk_shuffle::reconstruction::ReconstructProof<TableCurve>;
 
 // ========== 座位 ==========
 
@@ -722,7 +740,7 @@ impl Seat {
                         occupied: OccupiedSeat {
                             player,
                             stack: 0,
-                            pk: ECPoint(G1Projective::generator()),
+                            pk: ECPoint(StarkPoint::generator()),
                             pending_addon: 0,
                             time_bank_ms,
                         },
@@ -3134,8 +3152,8 @@ mod tests {
         PartialHoleCard::new(
             deck_index,
             ElGamalCiphertext {
-                c1: G1Projective::generator(),
-                c2: G1Projective::generator(),
+                c1: StarkPoint::generator(),
+                c2: StarkPoint::generator(),
             },
         )
     }
@@ -3485,7 +3503,7 @@ mod tests {
     #[test]
     fn seat_variant_mutations_preserve_tagged_payload_invariants() {
         let player = [0xAB; 20];
-        let pk = ECPoint(G1Projective::generator());
+        let pk = ECPoint(StarkPoint::generator());
         let mut seat = Seat::occupied(player, 1_000, pk, SeatStatus::Active).unwrap();
         assert!(seat.validate_canonical().is_ok());
 
@@ -3656,7 +3674,7 @@ mod tests {
         let mut seat = Seat::occupied(
             [0xCD; 20],
             5_000,
-            ECPoint(G1Projective::generator()),
+            ECPoint(StarkPoint::generator()),
             SeatStatus::Active,
         )
         .unwrap();
