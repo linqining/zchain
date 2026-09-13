@@ -1,0 +1,31 @@
+[package]
+name = "poker-contracts"
+version = "0.1.0"
+edition = "2024"
+description = "合约模块：poker_texas_air/poker_contracts（Starknet Cairo）的部署流水线与接入绑定"
+license = "BUSL-1.1"
+
+[dependencies]
+# ===== Starknet 全栈（与 poker_texas_air texas crate 同版本 0.17，ABI/编码一致）=====
+# Felt = starknet-types-core Felt；starknet-crypto 0.8 的 Felt 与其同源
+# （zchain workspace 既有 starknet-crypto 0.6 / starknet-ff 0.3 是 Stwo 兼容
+# 钉扎，多主版本在 cargo 下可共存互不影响）。
+starknet = "0.17"
+starknet-crypto = "0.8"
+url = "2"
+# ===== 共享（workspace 集中管理）=====
+tokio = { workspace = true, features = ["time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+# CLI（与 poker_texas_air snops 同为 clap derive 风格）
+clap = { version = "4", features = ["derive"] }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "poker-contracts"
+path = "src/bin/poker-contracts.rs"

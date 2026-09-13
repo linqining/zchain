@@ -68,6 +68,7 @@ graph TD
 | `poker_zkvm` | 通用 Stwo Circle-STARK zkVM（CPU/memory/Poseidon/SHA256/range-check AIR + recursive） | `vm-common`, `stwo` |
 | `vm-common` | 跨 crate 共享层（gas / syscall_id / precompile / prove_task / catalog） | `stwo` |
 | `proving_service` | 离线证明 HTTP 服务（axum，消费 poker_texas_air Orchestrator） | `poker_l1`, `poker_texas_air`, `vm-common`, `axum` |
+| `poker-contracts` | 合约模块：poker_texas_air/poker_contracts（Starknet Cairo）的部署流水线与接入绑定（架构对标 Aztec：artifact/instance/deployer/bindings/registry） | `starknet`, `tokio`, `clap` |
 | `poker_protocol` | 协议类型库（外部仓库，非 workspace 成员） | `blstrs`, `sha2` |
 
 **ZK 依赖方向**（注意：与"链验证证明"直觉相反）：`poker_texas_air → poker_l1`（air 依赖 l1 以复用类型），`proving_service → poker_texas_air`。poker_l1 **不依赖** poker_texas_air——链上 `zk_verify` 当前 dormant，证明生成/验证走 `proving_service` 离线 host-verify。
