@@ -12,7 +12,7 @@
 //   `eth_sendRawTransaction` 一律拒绝（EvmSigningForbidden），无开关、无
 //   降级路径；文档（adapters/README.md）写明未来 EVM bridge 的前置条件。
 // - 白名单外 eth_* 一律 unsupportedMethod（4200）。
-// - zchain_* 透传仍走 common/validation.js 的 METHODS_01 白名单（WALLET-ACC-3
+// - zchain_* 透传仍走 common/validation.js 的 METHODS_AVAILABLE 白名单（WALLET-ACC-3
 //   的同一拒绝面），签名类最终仍过后台 origin/nonce/expiry/session 校验与
 //   popup 显式确认——适配器只是信封，不新增任何绕过路径。
 //
@@ -27,7 +27,7 @@ import {
   netVersionFor,
   toEip1193ChainId,
 } from './shared.js';
-import { METHODS_01, validateRequest } from '../common/validation.js';
+import { METHODS_AVAILABLE, validateRequest } from '../common/validation.js';
 
 /** EIP-1193 风格错误（数字 code + 稳定 token 在 data.zchainCode）。 */
 export class Eip1193Error extends Error {
@@ -141,12 +141,12 @@ export function createEip1193Provider({ zchain, eventSource = null, networkId = 
   }
 
   /**
-   * zchain_* 透传：与 inpage 相同的方法面，仍按 validation.js 的 METHODS_01
+   * zchain_* 透传：与 inpage 相同的方法面，仍按 validation.js 的 METHODS_AVAILABLE
    * 白名单 + 结构校验把关（UnknownMethod/NotSupportedIn01/MissingParam/…）。
    */
   async function routeZchain(method, params) {
     const networkIdNow = await resolveNetworkId();
-    if (!METHODS_01.has(method)) {
+    if (!METHODS_AVAILABLE.has(method)) {
       // 与后台 validateRequest 的两个拒绝面一致（未知 vs 0.1 未交付）。
       const vr = validateRequest(method, {}, { network: { chainId: networkIdNow } });
       throw new Eip1193Error(
@@ -177,10 +177,21 @@ export function createEip1193Provider({ zchain, eventSource = null, networkId = 
         return zchain.signSettlement(params.settlement, params.previewHash);
       case 'zchain_getNotes':
         return zchain.getNotes(params.filter);
+      case 'zchain_switchNetwork': {
+        // 0.2：换网透传（弹窗二次确认在后台/validation 层；此处只做
+        // 成功后的本地网络缓存更新 + chainChanged 映射事件）。
+        const res = await zchain.switchNetwork(params.chainId);
+        if (res?.chainId) {
+          currentNetworkId = res.chainId;
+          const hex = toEip1193ChainId(currentNetworkId);
+          if (hex) bus.emit('chainChanged', hex);
+        }
+        return res;
+      }
       case 'zchain_lock':
         return zchain.lock();
       default:
-        throw unsupported(method, 'MethodNotAllowed', 'no route in 0.1');
+        throw unsupported(method, 'MethodNotAllowed', 'no route in this version');
     }
   }
 

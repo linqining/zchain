@@ -1,4 +1,13 @@
-# poker-appchain ABI 规范 v1.2.2（M0 冻结稿 + v1.1/v1.2 追加字段 + v1.2.2 语义修正）
+# poker-appchain ABI 规范 v1.3（M0 冻结稿 + v1.1/v1.2 追加字段 + v1.2.2 语义修正 + v1.2.3 追加章节 + v1.2.4 v2-alpha 附录 + v1.3 洗牌/发牌证明链消费面）
+
+> **评审记录（M0-ACC-2，2026-09-13 归档）**：本规范 v1.3（含 v1.2.4
+> additive 附录 §14 v2-alpha）经实现-规范一致性核对评审通过——评审范围
+> 覆盖 Note / FeePolicy / 软确认帧三节字段与版本号、判别值冻结表、
+> §5.2-2 结算语义引用；核对证据 = 判别值冻结测试
+> `fee.rs::borsh_discriminants_are_frozen`、batch/aggregate/crypto-statement
+> 三处 golden 向量、additive 附录零变更声明（§14）。后续版本变更须按本
+> 文 changelog 追加并重走一致性核对。
+
 
 > 状态：2026-09-05 冻结（v1）；v1.1 追加 `hand_proof`；**v1.2（2026-09-12，
 > plan-appchain §5.2 P0-1/P0-2/P0-7）追加 `SettlementRecord.plan`、
@@ -8,7 +17,23 @@
 > §5.2-3/P0-3）、§9 提现 finality 门槛（§5.4 配套）**；
 > **v1.2.2（2026-09-12，BLOCKERS B9）修正 rake 计费口径为 contested-only
 > （`rake.total == plan.rake == policy.rake_of(plan.rake_base())`）——纯
-> 语义修正，wire format 不变**（变更记录见文末 changelog）。
+> 语义修正，wire format 不变**；
+> **v1.2.3（2026-09-12，M4 outer aggregate + explorer E2 闭环）追加
+> §11 聚合根（aggregate root：域标签 + 折叠算法 + `AggregateRecord`）、
+> §12 proof 归档注册表 JSONL 契约、§13 explorer 网关端点表——全部为
+> additive 追加，无任何既有字段/域标签/语义变更**；
+> **v1.2.4（2026-09-12，plan-appchain §6.12.1b "完整路径"第一步）新增
+> §14 ABI v2 alpha 附录（OwnerRef / SignatureEnvelope / MigrateNote、
+> 三 scheme 判别值与域标签、MigrateNote 校验关系）——纯 additive：
+> v2-alpha 类型仅定义 + 校验，未接 v1 Operation 准入，v1 Note ABI
+> 零变更**；
+> **v1.3（2026-09-13，设计文档 `docs/shuffle-deal-proof-design.md`
+> §5-C2/C3 + 上游 stage0 实测收口）新增 §15 洗牌/发牌证明链消费面：
+> 状态镜像承诺偏移（90/122/154/186）、hand_binding v2 升域与三态
+> 迁移、deck 链摘要冻结算法（上游 poseidon 折叠同源裁决）、全链
+> fail-closed 强制（含 REAL×协议行 11b-f）、crypto receipt 门与上游
+> `engine_receipt_digest` 语义对齐、`SequencerConfig` 两个默认关的
+> enforcement 开关**（变更记录见文末 changelog）。
 > 所有跨边界结构走 borsh；本文档是 wire format 的唯一事实源。任何变更必须
 > 升版本号（`.v2` 域标签 / 新枚举变体）；v1.2 均为 borsh 尾缀字段追加，
 > 未部署前无兼容包袱。
@@ -21,7 +46,7 @@
 | 32B → 域输入 | **hi/lo 拆分**：`(bytes[0..16], bytes[16..32])` 两个 felt（无损） |
 | felt → 32B | 裸 `to_bytes_be`（域元素 < p < 2^252，可逆）；反向只接受 < p 的字节（fail-closed） |
 | 域分隔标签 | `poseidon(hi, lo)`，hi/lo = blake2s32(domain_utf8) 拆分 |
-| 域标签常量 | 见 `felt.rs`：`note.commitment.v1` / `note.nullifier.v1` / `settlement.binding.v1` / `fee.policy.v1` / `spend.digest.v1` / `vault.digest.v1` / `batch_root.v1`；结算结构根（v1.2，见 §4.1）：`zchain.settlement.payout_root.v1` / `zchain.settlement.side_pot_root.v1` / `zchain.texas_poker.settlement_plan.v2`（poker-settlement-core） |
+| 域标签常量 | 见 `felt.rs`：`note.commitment.v1` / `note.nullifier.v1` / `settlement.binding.v1` / `fee.policy.v1` / `spend.digest.v1` / `vault.digest.v1` / `batch_root.v1` / `aggregate_root.v1`（v1.2.3，§11）；结算结构根（v1.2，见 §4.1）：`zchain.settlement.payout_root.v1` / `zchain.settlement.side_pot_root.v1` / `zchain.texas_poker.settlement_plan.v2`（poker-settlement-core）；v2-alpha（v1.2.4，`owner_v2.rs`，§14）：`zchain.owner_v2.owner_ref.v1` / `zchain.owner_v2.spend.v1` / `zchain.owner_v2.migrate.v1` / `zchain.owner_v2.binding.v1` |
 
 > ⚠️ 历史教训（已修复）：不得用 `byte0 & 0x03` 掩码编码——starknet 域元素
 > 可达 2^251（byte0 ∈ {0x04..0x07}），掩码丢位导致承诺不可逆。
@@ -78,7 +103,8 @@ commitment    = poseidon(DOMAIN_FEE_POLICY, mode, rate, cap, t_bps, t_x*, t_y*, 
 ```
 SettlementRecord {
   table_id: u64
-  hand_binding: [u8;32]      // 非零；防重放键
+  hand_binding: [u8;32]      // 非零；防重放键（v1.3 起三态分类与 v2 升域
+                             // 见 §15.2：v2 = deck 链绑定，v1 = batch_digest）
   policy_commitment: [u8;32] // 必须等于桌绑定策略承诺
   pot: u64                   // 本手下注额；v1.2 起必须 == plan.gross_pot
   inputs:  Vec<SettleInput>  // SettleInput { note: Note, spend: SpendAuth }
@@ -333,14 +359,437 @@ fail-closed 默认：`StarkRequired` + `verifier_key = None` → **REAL 结算�
 - `withdrawal_requires_finality = false`（`CustodyLedger::without_finality_gate`）
   为**显式 opt-out，仅限测试/开发，非生产配置**。
 
+### 9.1 提现费（M7，v1 托管侧定价——非 wire format）
+
+`WithdrawalFeeConfig { flat_fee: u64 }`（`vault.rs`）为**托管账侧**配置，
+默认 `flat_fee = 0`（免费，完全向后兼容）。语义：
+
+- 受理时费用**从被提现余额内扣**：`fee = flat_fee`、打款净额
+  `payout_amount = amount − fee`；链上销毁面额（`WithdrawRequest.note.amount`）
+  与操作编码**不变**——本节不引入任何新字段/域标签/操作；
+- **负例 fail-closed**：`flat_fee > amount` → 拒绝（`OutOfRange`），计
+  `withdrawal_fee_rejected_total`，条目不入账；
+- 对账恒等式保持：`delta = reserved − issued` 与零费时完全一致；排队额
+  浮存侧分解 `pending_withdrawal_total == pending_payout_total +
+  pending_fee_float`（对外应付净额 + 留存费用浮存）；
+- SLA 计时（M7-ACC-2/M9）：提现条目记录受理时刻 `requested_at_ms`（注入
+  时钟，生产默认 `SystemTime`）；`sla_report(now_ms, threshold_ms)` 输出
+  排队数/越限数/等待 p95，越限首次发生计 `withdrawal_sla_breach_total`
+  （同一请求不重复计数）。
+
 ## 10. 指标增量（M9 惯例）
 
 | 名称 | 类型 | 语义 |
 |---|---|---|
 | `real_settlement_rejected_total` | counter | REAL 结算出证在引擎/提交/批次层被拒 |
 | `withdrawal_finality_rejected_total` | counter | REAL note 提现未达 finality 门 |
+| `proof_registry_write_failed_total` | counter（v1.2.3） | proof 归档注册表 sidecar 写失败（完成项不吞，仅告警） |
+| `aggregate_log_write_failed_total` | counter（v1.2.3） | aggregate-log sidecar 写失败（本实例挂起聚合记录） |
+| `withdrawal_fee_rejected_total` | counter（§9.1） | 提现费超过请求金额被拒（fail-closed 负例） |
+| `withdrawal_sla_breach_total` | counter（§9.1） | 排队提现等待超阈值（首次越限计数，不重复） |
+| `table_ops_total{table_id}` 等 per-table 族 | counter/gauge（§9.1 配套 M9） | 每桌操作/结算计数（`table_settlements_total`）与瞬时 gauge；桌数上限 4096，超限新桌拒绝并计 `table_metrics_overflow_total` |
 
-## 11. 变更记录（changelog）
+## 11. 聚合根 aggregate root（M4 outer aggregate，v1.2.3 追加）
+
+批次根序列（§7 的 `BatchRoot` 按产出序）的**定期二级聚合**承诺值
+（`aggregate.rs::aggregate_roots`）。与 batch_root 同构的确定性 Poseidon
+折叠（hi/lo 无损拆分），仅域标签不同：
+
+```
+fold_0 = 0
+fold_i = poseidon_hash_many([fold_{i-1}, hi_i, lo_i])
+                                             // batch_root 32B 按 §1 纪律 hi/lo 拆分
+aggregate_root = felt_to_bytes32(poseidon_hash_many([D, fold_n]))
+D = poseidon(hi, lo)，hi/lo = blake2s32("poker-appchain.aggregate_root.v1") 拆分
+```
+
+- 域标签：`poker-appchain.aggregate_root.v1`（`felt::DOMAIN_AGGREGATE_ROOT`，
+  v1.2.3 冻结）。
+- **空输入 → Err**（空窗口不产生聚合根，fail-closed）；单根 →
+  `fold(0, root)` 仍在独立域下产生与 batch_root 不同的聚合值（域分隔生效）；
+  n ≥ 2 时 fold 严格依赖根序（交换两根得到不同聚合根）。
+- 触发语义（`ProofPipeline::aggregate_due(now_ms, interval_ms)`）：自上次
+  聚合以来已产出的批次根非空**且** `now ≥ 上次 + interval` 时折叠窗口内
+  全部批次根并原子推进内部游标（同一 root 不重复聚合；空窗口/时间窗未到
+  → `Ok(None)`）。
+- 聚合记录（`AggregateRecord`，sidecar/watcher/网关共同数据形状）：
+
+```
+AggregateRecord { index: u64, through_op: u64, root: [u8;32], ts_ms: u64, batch_count: u64 }
+// index：从 0 起连续递增；through_op：窗口内最后一个批次的 through_op（严格递增）
+// batch_count：本窗口折叠的批次根数量
+```
+
+- 持久化：`aggregate.log` sidecar（JSONL 契约见 §12.3）；watcher 从
+  proven log 取窗口内批次根独立重算比对（不符 → `aggregate_mismatch`，
+  exit 1）。
+- golden vector：`aggregate.rs` 测试 `aggregate_roots_golden_vector`——
+  roots = `[0xAA;32], [0xBB;32]` 时
+  `aggregate_root = 02e0fb4c5fd664605e11765c6ad2928346d4f87fc68971c229354576c069a1bd`。
+- ABI 版本：**v1**（域标签后缀 `.v1`）。
+
+## 12. proof 归档注册表（E2 闭环，v1.2.3 追加）
+
+### 12.1 JSONL 契约（冻结）
+
+`proof_registry.jsonl`（`proof_registry.rs`），每行一个紧凑 JSON 对象 +
+换行；字段名/顺序/编码不得变更：
+
+```text
+{"binding_hex":"<64hex>","op_index":<u64>,"engine":"<str>","attestor_public":"<64hex>","payload_b64":"<base64 of archive bytes>"}
+```
+
+- `payload_b64` = **标准 base64（RFC 4648，含 `=` 填充、规范尾位）**；
+  workspace 无 base64 crate，编解码由 `proof_registry::b64_encode/b64_decode`
+  唯一实现（RFC 4648 测试向量钉住）。
+- `engine` 不得含 `"` / `\` / 控制字符（单行 JSON 契约形状保证）。
+- `binding_hex` 重复追加**允许**（幂等去重由读取方负责）。
+
+### 12.2 写入/读取纪律（与 proven log 同口径）
+
+- 写入：逐行完整追加；默认只 flush 不 fsync（`with_fsync(bool)` 可开真落
+  盘）；写失败计 `proof_registry_write_failed_total` 且**不吞完成项**——
+  归档是旁路优化，证明水位承诺点仍是 WAL fsync + 批次回调。
+- 读取：空文件合法；撕裂尾行忽略 + 告警；中间行坏 JSON/坏 hex/坏 base64
+  → Err（fail-closed）。
+
+### 12.3 aggregate log 契约（冻结）
+
+```text
+{"index":<u64>,"through_op":<u64>,"root":"<64hex>","ts_ms":<u64>,"batch_count":<u64>}
+```
+
+写入方 `sequencer.rs::AggregateLogWriter`；`index` 从 0 起连续递增、
+`through_op` 严格递增；容错语义与 §12.2 一致（写失败挂起本实例聚合记录，
+计 `aggregate_log_write_failed_total`；恢复走
+`Sequencer::replay_restoring_proven_and_aggregates`，既有
+`replay_restoring_proven` 签名与语义不变）。
+
+## 13. explorer 网关端点（只读，v1.2.3 整理）
+
+网关为只读 GET 白名单路由（未知路径 404 / 非 GET 405 / 坏参数 400 /
+格式合法不存在 404）；全部响应带 `X-Zchain-Gateway: replay-v1`。
+
+| 端点 | 语义 | v1.2.3 状态 |
+|---|---|---|
+| `/api/v1/status` | 链头/水位/批次根摘要 + `latest_aggregate_root` / `latest_aggregate_through_op`（无则 null） | 追加两字段 |
+| `/api/v1/frames` | 软确认帧摘要分页（limit ≤ 200） | v1.2.2 前既有 |
+| `/api/v1/settlements` | 结算摘要分页 + `table_id` 过滤 | v1.2.2 前既有 |
+| `/api/v1/settlement/{hand_binding}` | 单笔结算全量明细；**追加 `payout_root`**（`payout_root_bytes`，§4.1）与 **`proof` 链接** `{"href":"/api/v1/proof/<binding>","engine":<str>\|null}`（注册表命中时填引擎，否则 null） | 追加两字段 |
+| `/api/v1/batch_roots` | proven log 批次根列表 | v1.2.2 前既有 |
+| `/api/v1/proofs?offset=&limit=` | proof 归档**元数据**分页（binding/op_index/engine/payload 字节数；不内联 payload；limit ≤ 200） | v1.2.3 新增 |
+| `/api/v1/proof/{binding_hex}` | proof 归档**下载**：`{"binding_hex","op_index","engine","attestor_public","payload_b64","payload_len"}`；响应头 `X-Zchain-Engine: <engine>`；坏 hex → 400、未命中 → 404（JSON） | v1.2.3 新增 |
+| `/api/v1/aggregates` | M4 outer aggregate 聚合记录列表（index/through_op/root/ts_ms/batch_count） | v1.2.3 新增 |
+| `/api/v1/metrics` | 注册表文本导出（replay 静态快照） | v1.2.2 前既有 |
+| `/api/v1/l1/{metrics,block,tx}` | L1 JSON-RPC 只读代理（未配置 → 404） | v1.2.2 前既有 |
+
+网关新增启动参数：`--proof-registry <path>`（§12.1）、
+`--aggregate-log <path>`（§12.3）；`--gen-fixture` 同步增产
+`proof_registry.jsonl`（真实管道出证落档）与 `aggregate.log`。
+
+## 14. ABI v2 alpha：OwnerRef / SignatureEnvelope / MigrateNote（v1.2.4 追加，plan-appchain §6.12.1b "完整路径"第一步）
+
+> **边界声明（先读）**：v2-alpha 类型**仅定义 + 校验**（`owner_v2` 模块），
+> **未接 v1 Operation 准入**；**v1 Note ABI（§2-§7）零变更**——
+> `Note.owner` 仍为 33B 压缩公钥，v1 承诺/nullifier/spend digest 的域标签
+> 与编码不变。本节只构成 v2 正式版的 ABI 前瞻与 AIR witness 形状基线；
+> 迁移进 proof/BFT checkpoint、v1 Operation 适配与统一
+> SettlementPlanDigest 结算集成均属 v2 正式版范围。
+
+### 14.1 类型（borsh 稳定 ABI，判别值冻结）
+
+```
+SignatureScheme        // use_discriminant=true，单字节编码
+  LegacySecp256k1 = 0 | StarkCurve = 1 | StarknetAccountBinding = 2
+                       // 冻结；新增方案只允许追加新判别值，未定义数值 fail-closed 拒绝
+
+OwnerRef {
+  scheme: SignatureScheme
+  account_id: [u8;32]        // 语义按 scheme，见下
+  key_version: u32           // 参与全部摘要；同公钥换版本即换身份
+  binding_id: Option<[u8;32]>  // 仅 StarknetAccountBinding 允许 Some
+}
+
+SignatureEnvelope {
+  scheme: SignatureScheme          // 必须 == signer_ref.scheme
+  signer_ref: OwnerRef
+  typed_data_digest: [u8;32]       // 被签摘要；迁移路径下 == migrate_digest
+  signature: [u8;64]               // 按 scheme：secp 64B r‖s compact /
+                                   // Stark (r,s) 各 32B canonical felt /
+                                   // 会话密钥 secp 64B compact
+  nonce: u64                       // 单调：严格大于 signer 已见最大值
+  expiry: u64                      // unix 秒；now >= expiry 即过期
+}
+
+MigrateNoteRecord {
+  old_commitment: [u8;32]          // 非零
+  old_owner_sig: SignatureEnvelope // 旧 owner 授权
+  new_owner_ref: OwnerRef          // 铸出的 v2 note owner
+  amount: u64                      // > 0，与旧 note 同额
+  asset_class: u8                  // 1=REAL / 2=PLAY（与旧 note 同类）
+  migration_nonce: [u8;32]         // 非零；防迁移重放
+  network_id: [u8;32]              // 目标 ZChain network id（防跨网重放）
+  abi_version: u32                 // 目标 ABI 版本（alpha 恒 2）
+}
+```
+
+`account_id` 语义按 scheme：
+
+| scheme | `account_id` | `binding_id` |
+|---|---|---|
+| `LegacySecp256k1`（0） | `blake2s32(压缩公钥 33B)`（32B key-id；验签呈递完整公钥并复核哈希） | 必须 None |
+| `StarkCurve`（1） | 规范化 felt252 公钥（非零、< p） | 必须 None |
+| `StarknetAccountBinding`（2） | Starknet 账户地址（canonical felt） | 必须 Some（非零，指向 `AuthorizeZChainKey` 授权记录） |
+
+### 14.2 域标签与摘要（全部 Poseidon + hi/lo 无损拆分，输出恒 canonical felt）
+
+| 域标签（冻结） | 用途 |
+|---|---|
+| `zchain.owner_v2.owner_ref.v1` | `owner_commitment(OwnerRef)`：scheme + key_version + account_id + binding_id 全参与——**同 account_id 跨 scheme/版本承诺必不同** |
+| `zchain.owner_v2.spend.v1` | `v2_spend_digest`：owner 承诺 +（note 承诺, nullifier, scope〔blake2s32 后拆分〕, effect）；对应 v1 `poker-appchain.spend.digest.v1` 的 v2 形态 |
+| `zchain.owner_v2.migrate.v1` | `migrate_digest(MigrateNoteRecord)`：绑定全部语义字段；**sighash 规则**：`old_owner_sig.typed_data_digest`（必须等于本摘要）与签名字节本身不参与（否则自指循环） |
+| `zchain.owner_v2.binding.v1` | `binding_authorization_digest`：(账户地址, binding_id, SNIP-12 授权摘要, 会话密钥公钥, 授权终点) |
+
+### 14.3 三 scheme 验签（alpha 形态）
+
+- **LegacySecp256k1**：呈递压缩公钥 → `blake2s32(pk) == account_id` 复核 →
+  ECDSA compact 验证（复用 v1 §2/§4 签名原语）。
+- **StarkCurve**：`starknet_crypto::verify(account_id_felt, digest_felt, r, s)`；
+  (r, s) 各 32B canonical felt 且非零。
+- **StarknetAccountBinding（alpha 降级声明）**：验 SNIP-12 授权摘要格式
+  （canonical 非零 felt）+ 重算 binding 摘要 + 会话密钥（SNIP-12 delegated
+  key，secp256k1）ECDSA。**完整账户 verifier（SNIP-12 typed-data keccak
+  重算以复核授权内 delegated key ↔ account 绑定、链上 account contract
+  的多签/Passkey 语义）属 v2 正式版**；alpha 阶段授权真实性与 `binding_id`
+  锚定关系由 registry 侧保证。互操作由冻结向量钉住：poker-wallet
+  `account_binding`（SNIP-12 rev1）对同一输入的 `AuthorizeZChainKey`
+  message hash 与本附录测试向量逐字节一致（见
+  `tests/owner_v2.rs::snip12_interop_vector_binding_verification`）。
+
+### 14.4 MigrateNote 语义与校验关系（纯函数，AIR witness 形状就绪）
+
+旧 owner 授权消费旧 note → **同额同资产类**铸 v2 note；迁移必须绑定
+`old_commitment`、`new_owner_ref`、`migration_nonce` 与目标
+`network_id`/`abi_version`。校验顺序（`validate_migrate_note`，全部
+fail-closed）：
+
+1. `old_commitment` 非零；
+2. `migration_nonce` 非零；
+3. `amount > 0`；
+4. `new_owner_ref` 结构合法（account_id 非零 / StarkCurve 规范化 / binding_id 关系）；
+5. 信封一致（`scheme == signer_ref.scheme` + signer 合法）；
+6. 摘要一致：`old_owner_sig.typed_data_digest == migrate_digest(record)`；
+7. 新鲜度：`now < expiry` 且 nonce 严格单调（过期 / 重放拒）；
+8. 旧签名按 scheme 分派验签通过（§14.3）。
+
+SNIP-12 互操作 golden vector：域 `Snip12Domain::zchain("zchain-devnet-1")`、
+`account_address` = felt `2`、`binding_id` = felt `1`、
+`delegated_public_key = 0256b328b30c8bf5839e24058747879408bdb36241dc9c2e7c619faa12b2920967`
+（= secp256k1 seed `[9;32]` 压缩公钥）、nonce `3`、单笔/日限额 `50/100`、
+桌白名单 `[1]`、有效期 `[1000, 2000]` 时，`AuthorizeZChainKey` message hash
+= `0108780ad34e8ed9b8cfb3ffefef7a1c0e6134a385200ce93a8820da6bb70436`
+（与 poker-wallet acceptance 测试同源复算冻结）。
+
+- ABI 版本：**v2-alpha**（全部域标签后缀 `.v1`；判别值冻结）。任何字段/
+  编码/域标签变更必须升版并同步本节。
+
+## 15. 洗牌/发牌证明链消费面（v1.3 追加，设计文档 `docs/shuffle-deal-proof-design.md` §5-C2/C3）
+
+> 上游（poker_texas_air）stage0 实测报告见本目录 `SHUFFLE_STAGE0.md`；
+> 消费侧语义与排队清单见 `SHUFFLE_CONSUME.md`。本节冻结跨边界判定面。
+
+### 15.1 状态镜像承诺偏移（`CanonicalStateImage` v5 定宽 borsh，1,680 字节）
+
+| 字段 | 偏移 | 消费侧强制 |
+|---|---|---|
+| `chip_pool: u64` (LE) | 66 | custody 恒等式（AIR 逐行约束） |
+| `pot: u64` (LE) | 74 | **既有 v1.2 锚**：结算记录 pot 逐字节绑定（§4） |
+| `board_cards_commitment: [u8;32]` | 90 | 存在性消费（暂无强制） |
+| `deck_commitment: [u8;32]` | 122 | **牌序（加密形态）进入镜像的唯一入口**（S1 锚）：pre/post 非零 + v2 绑定覆盖 |
+| `reveal_commitment: [u8;32]` | 154 | v2 全链批终态非零（11b-e）；协议行判定输入 |
+| `reconstruction_commitment: [u8;32]` | 186 | 存在性消费（重构为可选协议路径） |
+
+偏移推导与镜像一致性：v1.3 起有**双重钉扎**——(a) 消费侧独立手写编码器
+（`tests/shuffle_chain_consume.rs::state_image_commitment_offsets_match_documented_layout`）；
+(b) **上游真实归档**逐字段钉扎（`poker-appchain-texasair/tests/
+shuffle_stage0_consume.rs` 导出 + `poker-appchain/tests/
+shuffle_chain_real_archive.rs` 消费，夹具 `tests/fixtures/stage0_full_chain.*`）。
+
+### 15.2 hand_binding v2（升域）与三态迁移
+
+```text
+hand_binding_v2 = felt32(poseidon_hash_many(
+    domain_felt(b"zchain.settlement.binding.v2"),
+    hi/lo(scope.batch_digest),
+    hi/lo(deck_chain_digest),          // §15.3 冻结算法
+    hi/lo(post.reveal_commitment),
+))
+```
+
+- 三个数据输入全部重导自归档 scope 公开字段（无生产者信任输入）；
+  与上游 `hand_binding.rs`（`poker_dual_hand_binding_v1` 全量布局）为
+  **子集对齐**（全量对齐属设计文档 §6-Q3 开放决策）。
+- 三态分类（11a）：`HandBindingV2`（= 上式重导）/ `LegacyBatchDigest`
+  （= `scope.batch_digest`，v1 e2e 形态）/ `Unbound`（皆非）。
+  v2 → 追加 11b 全链强制（§15.4）；Legacy/Unbound → 迁移期接受并计数。
+- **迁移窗（默认开）与 receipt 门（默认关）的运营面开关**（additive，
+  默认均为 `false` = 现状行为）：
+  `SequencerConfig { full_chain_enforcement, crypto_receipt_enforcement }`
+  （TE-M2/3/6 同款 additive 字段纪律，逐行注明见 `sequencer.rs`），
+  经 `SequencerConfig::apply_settlement_gates()` 在进程启动路径刻入
+  settlement 层进程级原子量；**replay/build_index/watcher 重放面禁止
+  调用**（`validate_settlement` 在重放 apply 路径上执行，判定必须与帧
+  提交时刻一致——WAL 重放确定性，P0-4）。
+
+### 15.3 deck 承诺链摘要（**冻结算法：上游 poseidon 折叠，与生产者同源**）
+
+阶段 0 裁决（2026-09-13，SHUFFLE_CONSUME.md §1.2）：上游 stage0 的真实
+洗牌链是权威数据源，消费侧算法必须对上游产出**重导一致**——早期消费侧
+blake2b-256 提案（域 `zchain.settlement.deck_chain.v1`）删除，冻结为
+上游 `canonical_shuffle_chain` receipt 的逐字节复制：
+
+```text
+preimage = b"zchain.texas.canonical-shuffle-chain.v1"  // 上游 SHUFFLE_CHAIN_STAGE0_DOMAIN
+         ‖ b"deck-chain"                               // 上游 fold_chain 标签
+         ‖ anchor[0] ‖ … ‖ anchor[len-1]               // 链锚 32B 顺次
+digest   = poseidon_bytes_digest(preimage)             // u64 长度前缀 felt
+                                                       // + 31B 大端分块
+                                                       // + poseidon_hash_many
+```
+
+- 实现落点：`poker-settlement-core/src/deck_chain.rs`（`deck_chain_digest`；
+  空链 / `len > 10` → `None` fail-closed，上限对齐上游
+  `MAX_DECK_COMMITMENTS = 10`）；
+- **两侧对照证据**：上游真实 `ShuffleChainBuilder`（BG V2 生产域）产出
+  的链 → 上游 `ShuffleChainReceipt.deck_chain_digest` vs 消费侧重导
+  **逐位一致**（`poker-appchain-texasair/tests/shuffle_stage0_consume.rs`，
+  golden `073c5e280d7d548111384f60c97f1b492af20b5d1ef4c242497b55605265e66a`，
+  确定性种子可重现）；
+- 结算消费面的链 = scope 端点去重 `[pre.deck, post.deck]`（批内逐环链由
+  AIR 行内约束 + STARK 验证负责）；上游 receipt 的链锚序列可长于端点链，
+  算法同源、输入不同层——两者经同一函数复现。
+
+### 15.4 v2 全链 fail-closed 强制（11b）与 REAL×协议行 fail-closed（11b-f）
+
+对 `HandBindingV2` 记录，在 §4 既有 11 条之上追加（拒绝消息即清单）：
+
+| # | 校验 | 拒绝消息 |
+|---|---|---|
+| a | 首 kind ∈ {JoinTable(1), StartHand(3), SubmitShuffle(7)} | `full-chain archive first transition kind is not a chain-entry kind` |
+| b | 末 kind ∈ {AdvanceRound(19), EndWithoutShowdown(21), RevealTimeoutAward(27), RevealTimeoutRakedAward(28)} | `full-chain archive last transition kind is not settlement-terminal` |
+| c | `blind_opening` 存在、ante_mode ≤ 2、非全零 | `full-chain archive is missing the blind opening` / `blind opening has unsupported ante mode` / `blind opening is vacuous (all-zero blinds and ante)` |
+| d | pre/post 镜像 deck 承诺非零 | `archive pre-state deck commitment is zero (S1 anchor missing)` / `archive post-state deck commitment is zero` |
+| e | 终态 reveal 承诺非零 | `archive terminal reveal commitment is zero (deal not covered)` |
+| f | **REAL 类 × 含协议行归档 → 拒绝**（无开关） | `REAL settlement archive contains protocol rows; route A native shuffle-chain verification is required (fail-closed)` |
+
+11b-f 依据（上游 stage0 实测负面发现，SHUFFLE_STAGE0.md §3.4-2）：
+canonical AIR 对**非末段** shuffle 行 deck 承诺篡改不可见（AIR 只冻结锚、
+不重算密文哈希，篡改批照样出证）——含协议行的 REAL 结算必须经路线 A
+原生校验（引擎侧 BG/DLEq 逐行验证 + sidecar 承诺链重导），该结果在结算
+纯函数层不可自证 ⇒ 直接拒绝该批（宁可停、不可假）。协议行判定
+（`archive_has_protocol_rows`，fail-closed 过近似）：首/末 kind ∈ {7,8,9}
+或 deck/reveal/reconstruction 承诺在批内轮转。引擎 receipt 归责接线后
+本分支升级为"要求回执集验证"。
+
+### 15.5 路线 B：crypto receipt（语句面 + 覆盖记账 + 门）
+
+- 语句面（消费侧冻结）：`crypto_statement_digest(kind, inputs) =
+  blake2b-256(b"zchain.settlement.crypto_statement.v1" ‖ kind ‖ inputs)`，
+  kind ∈ {`bg.shuffle.v2`, `dleq.reveal.v1`}；`expected_crypto_statements`
+  给出 scope 级粗粒度期望集（每批每类一条）；`verify_receipt_set` 做覆盖
+  记账（恰一回执 / 无未知 / 无重复 / 非零）。**不是密码学验证**——方程
+  验证在引擎侧（上游 Plan D 分工）。
+- 回执 `receipt_digest` 语义（上游 stage0 已冻结）：
+  = `ShuffleChainReceipt.engine_receipt_digest` =
+  `poseidon_bytes_digest(DOMAIN ‖ b"receipt" ‖ batch_digest ‖
+  deck/reveal/reconstruct 三链摘要 ‖ 逐行 statement_digest)`，域同
+  §15.3；逐行 statement digest =
+  `poseidon_bytes_digest(DOMAIN ‖ kind ‖ seat ‖ pre ‖ post)`（kind ∈
+  {`shuffle`,`reveal`,`reconstruct`}）。消费侧逐行对账需归档携带协议行
+  明细（sidecar vs 扩归档 = 设计文档 §6-Q2，未决）——冻结前 receipt 门
+  开启即显式拒绝（`crypto receipt enforcement is enabled but engine
+  receipt integration is pending upstream stage0`），不许假验证。
+
+## 16. 变更记录（changelog）
+
+### v1.3（2026-09-13）— 洗牌/发牌证明链消费面（设计文档 §5-C2/C3 + 上游 stage0 收口）
+
+- **新增 §15**：状态镜像承诺偏移表（90/122/154/186，与 66/74 并列，
+  真实归档双重钉扎）；hand_binding v2 升域（域
+  `zchain.settlement.binding.v2`，可重导子集折叠）与三态迁移；deck 链
+  摘要冻结算法（**上游 poseidon 折叠同源裁决**，域
+  `zchain.texas.canonical-shuffle-chain.v1`，早期 blake2b 提案删除；
+  两侧逐位一致对照测试 + golden 钉扎）；全链 fail-closed 强制 11b
+  a–e 与 **REAL×协议行 11b-f**（stage0 负面发现的链侧执行，无开关）；
+  crypto receipt 门与上游 `engine_receipt_digest` 语义对齐。
+- **`SequencerConfig` additive 运营开关**：`full_chain_enforcement` /
+  `crypto_receipt_enforcement`（**默认均 false = 现状行为**，逐行注明；
+  经 `apply_settlement_gates` 启动面接线，重放面禁用——重放确定性）。
+- **TE-M5 缺口收口**：archive_index 补齐全部 v2 op kind 的索引行解析
+  （`MigrateNote|SettleV2|DepositV2|WithdrawRequestV2|RegisterGameToken|
+  IssueGameToken|BurnGameToken|FaucetMint|BuyGasCredits|BindGasPolicy`
+  + `v2` 等价键/金额摘要子对象；格式标签保持 `.v1` 的裁决见
+  `archive_index.rs` 模块文档——纯加法、既有文件零影响，v2 WAL 此前
+  `--write-index` 直接失败、从未产出过索引文件）。
+- **additive 声明**：v1 Note ABI（§2-§7）与既有域标签零变更；scope
+  前缀消费零改动；全部新校验只收紧不放宽（REAL×协议行条目对既有
+  v1/v2 流量零影响——既有归档均无协议行）；既有测试零回退
+  （poker-appchain 364 基线 + 新增用例全绿）。
+
+### v1.2.4（2026-09-12）— ABI v2 alpha 附录（plan-appchain §6.12.1b "完整路径"第一步，纯 additive）
+
+### v1.2.4（2026-09-12）— ABI v2 alpha 附录（plan-appchain §6.12.1b "完整路径"第一步，纯 additive）
+
+- **新增 §14 v2-alpha 附录**：`OwnerRef`（scheme/account_id/key_version/
+  binding_id）、`SignatureEnvelope`（scheme 自描述签名信封）、
+  `MigrateNoteRecord`（旧 note 授权消费 → 同额同资产类铸 v2 note）三类
+  borsh 稳定类型；`SignatureScheme` 判别值冻结（LegacySecp256k1=0 /
+  StarkCurve=1 / StarknetAccountBinding=2）。
+- **新增域标签（冻结）**：`zchain.owner_v2.owner_ref.v1` /
+  `zchain.owner_v2.spend.v1` / `zchain.owner_v2.migrate.v1` /
+  `zchain.owner_v2.binding.v1`——全部 Poseidon + hi/lo 无损拆分；
+  owner_commitment / spend digest / migrate digest 均显式携带 scheme +
+  key_version（防同公钥跨验证器同承诺）。
+- **三 scheme 验签 alpha 形态**：Legacy secp256k1（呈递公钥哈希复核 +
+  ECDSA）、StarkCurve（starknet-crypto 直接验证）、StarknetAccountBinding
+  （验 SNIP-12 授权摘要格式 + 会话密钥签名；完整账户 verifier 属 v2
+  正式版——降级点已在 §14.3 明示）。SNIP-12 rev1 `AuthorizeZChainKey`
+  互操作 golden vector 与 poker-wallet `account_binding` 同源冻结一致。
+- **MigrateNote 校验关系**：旧承诺/迁移 nonce 非零、amount>0、expiry
+  未过、nonce 单调、`typed_data_digest == migrate_digest`、旧签名按
+  scheme 验签通过、new_owner_ref 合法（纯函数，AIR witness 形状就绪）。
+- **边界（不放松任何 v1 防线）**：v2-alpha 类型仅定义 + 校验，未接 v1
+  Operation 准入；v1 Note ABI（§2-§7）零变更——无既有字段增删、无既有
+  域标签变更、既有 checkpoint 格式不变；全部变更为新增模块
+  （`owner_v2`）+ 新增测试（`tests/owner_v2.rs`，12 用例）。
+- **测试**：三 scheme 正例 + 篡改负例（换 scheme 字节 / 换 version /
+  过期 / nonce 重放）、owner_commitment 跨 scheme 分离、migrate 每字段
+  篡改拒、SNIP-12 互操作冻结向量、borsh 判别值与 roundtrip。
+
+### v1.2.3（2026-09-12）— M4 outer aggregate + explorer E2 闭环（纯 additive）
+
+- **新增 §11 聚合根**：域标签 `poker-appchain.aggregate_root.v1`（冻结）+
+  与 batch_root 同构的 Poseidon 折叠 + `AggregateRecord` 数据形状 +
+  `ProofPipeline::aggregate_due` 定期触发语义；持久化由
+  `sequencer::attach_aggregate_log` sidecar 承担，恢复走新增
+  `replay_restoring_proven_and_aggregates`（既有恢复函数签名不变）；watcher
+  新增 `--aggregate-log` 独立重算校验（`aggregate_mismatch` /
+  `aggregate_range` findings，exit 1）。
+- **新增 §12 proof 归档注册表**：`ProofBundle` 的 JSONL 归档契约（标准
+  base64 载荷，RFC 4648 向量钉死）+ `ProofPipeline::attach_proof_registry`
+  挂账（drain 路径旁路归档，写失败不吞完成项）。
+- **新增 §13 网关端点**：`/api/v1/proofs`、`/api/v1/proof/{binding_hex}`
+  （`X-Zchain-Engine` 响应头）、`/api/v1/aggregates`；`/api/v1/status` 追加
+  `latest_aggregate_root` / `latest_aggregate_through_op`；
+  `/api/v1/settlement/{binding}` 追加 `payout_root` 与 `proof` 链接。
+- **additive 声明**：无既有字段增删/语义变更、无既有域标签变更、既有
+  `checkpoint`（`zchain.appchain.checkpoint.v1`）格式不变；全部变更为新增
+  模块（`aggregate` / `proof_registry`）、新增 sidecar 契约与新增只读端点。
+- **测试**：aggregate golden/空输入/序敏感；pipeline 聚合触发（时间窗、
+  空窗口、不重复聚合）与归档挂账；sequencer aggregate-log 契约/恢复等价/
+  撕裂与损坏负例；watcher aggregate 正例 + 换根/跳 index/缺 proven log
+  负例（exit 1）；网关 proofs/aggregates 端点与 E2 闭环（fixture →
+  settlements → payout_root → 归档下载 → 404/400）。
 
 ### v1.2.2（2026-09-12）— rake 计费口径统一（BLOCKERS B9 关闭）
 
@@ -361,3 +810,26 @@ fail-closed 默认：`StarkRequired` + `verifier_key = None` → **REAL 结算�
   （canonical uncalled 层测试钉住 contested-only 基数）、appchain
   （uncalled 层结算正例 + 负例矩阵回归）、texasair e2e（含 uncalled 层的
   REAL 结算流）。
+
+### 未升版补充（2026-09-12）— M7 提现费 / 提现 SLA / M9 per-table 指标 / E2 archive 索引（全部非 wire format）
+
+以下为**文档级补充**，不升 ABI 版本号：全部为托管账侧配置、库内指标或
+只读工具面，未新增/变更任何 borsh 结构、操作集、域标签或链上编码
+（wire format 与 v1.2.4 完全一致；§13 端点表新增可选启动参数见下）。
+
+- **§9.1 提现费**（新增小节）：`WithdrawalFeeConfig { flat_fee }`（托管
+  账侧定价，默认 0 = 免费；费从被提现余额内扣，打款净额 = amount − fee；
+  费 > 金额 fail-closed 拒绝）；对账恒等式不变 + 排队额浮存侧分解；
+  提现 SLA 计时（`requested_at_ms` 注入时钟 + `sla_report` +
+  `withdrawal_sla_breach_total`）。
+- **§10 指标表追加**：`withdrawal_fee_rejected_total` /
+  `withdrawal_sla_breach_total` / per-table 指标族
+  （`table_ops_total{table_id}` 等，上限 4096 桌，超限计
+  `table_metrics_overflow_total`）。
+- **E2 archive 索引**（实现契约冻结于 `poker-appchain/src/archive_index.rs`
+  模块文档，非 ABI 对象）：`zchain.appchain.archive_index.v1` JSONL 契约
+  （头部行 chain_head/counts/digest + 每帧一行
+  `{kind,index,ts_ms,state_root,hash,offset}`（Settle 附摘要）+ Proof 行；
+  digest = blake2s-256(头部行之后全部原始字节)）；网关新增 `--index-file`
+  （免 replay 直连查询，status 链头取自索引头部行）与 `--write-index`
+  （回放构建落盘）启动参数——只读查询面参数，不涉及链编码。

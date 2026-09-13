@@ -3094,6 +3094,10 @@ fn apply_settlement_plan(
 }
 
 /// 计算 rake 金额（不修改状态），供 settle_hand 在分层后使用。
+///
+/// TE-M4：`RAKE_MODE_FIXED_RAKE_BURN` (2) 与 PERCENTAGE **计价同式**
+/// （`min(floor(pot·bps/10⁴), cap, pot)`，canonical AIR opening 同式）；
+/// 处置差异（分账 vs 销毁）见 `settlement::rake_disposal`，不在数量计算内。
 fn compute_rake_amount(table: &TexasPokerTable, pot: u64) -> PokerL1Result<u64> {
     if table.rake_mode == super::constants::RAKE_MODE_NONE {
         return Ok(0);
@@ -3841,15 +3845,21 @@ pub fn collect_ante(
 /// `collect_rake` — 在 `settle_hand` 中按 `rake_mode` 抽水。
 ///
 /// 此函数由 `settle_hand` / `end_without_showdown` 内部调用。
-/// 抽水规则：
+/// 抽水规则（TE-M4：mode 2 计价同式）：
 /// - `RAKE_MODE_NONE`：不抽水
 /// - `RAKE_MODE_PERCENTAGE`：`rake = min(pot * rake_bps / 10000, rake_cap)`
+/// - `RAKE_MODE_FIXED_RAKE_BURN`：与 PERCENTAGE 同式；处置不同（见下）
 ///
 /// 抽水后：
 /// - `table.pot -= rake`（从奖池中扣除）
-/// - `table.chip_pool -= rake`（资金已离开桌台，预编译将创建 Treasury Coin 输出）
+/// - `table.chip_pool -= rake`（资金已离开桌台）
+///   - PERCENTAGE：预编译将创建 Treasury Coin 输出（分账路径）；
+///   - FIXED_RAKE_BURN：**不产生任何现金输出**（不铸 Treasury/operator
+///     note）——TableVault 借记即净销毁，TreasuryCap 计数器由经济层
+///     `burn_escrowed_native` 在 precompile 装配点推进（TE-M4 定稿）。
 ///
-/// 返回实际抽水金额（调用方用于 emit RakeCollected 事件）。
+/// 返回实际抽水金额（调用方用于 emit RakeCollected 事件，事件携带
+/// `rake_mode` 使下游处置判定无需回读桌配置）。
 pub fn collect_rake(table: &mut TexasPokerTable) -> PokerL1Result<u64> {
     if table.rake_mode == super::constants::RAKE_MODE_NONE {
         return Ok(0);
@@ -5424,6 +5434,33 @@ mod tests {
         let rake = collect_rake(&mut table).unwrap();
         assert_eq!(rake, 0);
         assert_eq!(table.pot, 1000);
+    }
+
+    /// TE-M4：FIXED_RAKE_BURN 桌的抽水**数量**与 PERCENTAGE 同式（同为
+    /// `min(pot·bps/10⁴, cap)`）；资金处置差异（无 Treasury 输出）在
+    /// precompile escrow / prove_task 视图层，不在本函数。
+    #[test]
+    fn test_collect_rake_fixed_rake_burn_matches_percentage_quantity() {
+        let mut table = make_table();
+        table.rake_mode = super::super::constants::RAKE_MODE_FIXED_RAKE_BURN;
+        table.rake_bps = 500;
+        table.rake_cap = 100;
+        table.pot = 1000;
+        table.chip_pool = 1000;
+
+        let rake = collect_rake(&mut table).unwrap();
+        assert_eq!(rake, 50, "mode 2 计价同式：1000 × 5% = 50");
+        assert_eq!(table.pot, 950);
+        assert_eq!(table.chip_pool, 950, "TableVault 借记同式（借记即净销毁）");
+
+        // 与 PERCENTAGE 同参对照：数量逐位相等
+        let mut percentage = make_table();
+        percentage.rake_mode = RAKE_MODE_PERCENTAGE;
+        percentage.rake_bps = 500;
+        percentage.rake_cap = 100;
+        percentage.pot = 1000;
+        percentage.chip_pool = 1000;
+        assert_eq!(rake, collect_rake(&mut percentage).unwrap());
     }
 
     // ========== Run It Twice 测试 ==========

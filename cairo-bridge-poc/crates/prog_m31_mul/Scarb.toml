@@ -1,0 +1,13 @@
+[package]
+name = "prog_m31_mul"
+version = "0.1.0"
+edition = "2024_07"
+
+[lib]
+
+[dependencies]
+base = { path = "../base" }
+cairo_execute = "2.11.4"
+
+[[target.executable]]
+name = "prog_m31_mul"

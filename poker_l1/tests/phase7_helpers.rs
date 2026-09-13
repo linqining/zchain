@@ -135,6 +135,7 @@ pub fn make_vertex(epoch: Epoch, round: u64, author: TaggedPubkey) -> DagVertex 
         tx_list: vec![],
         parent_hashes: vec![],
         author_sig: vec![0u8; 65],
+        forced_tx_hashes: vec![],
     }
 }
 

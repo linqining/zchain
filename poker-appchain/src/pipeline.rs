@@ -23,6 +23,7 @@
 //! - 积压降级：inflight 超高水位 → degraded（告警 + 建议稀疏批次档）
 
 use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -30,10 +31,12 @@ use std::time::Duration;
 
 use starknet_crypto::{poseidon_hash_many, FieldElement};
 
+use crate::aggregate::{aggregate_roots, AggregateRecord};
 use crate::error::{AppchainError, AppchainResult};
 use crate::fee::FeePolicy;
 use crate::felt::{bytes32_to_felts, domain_felt, felt_to_bytes32, DOMAIN_BATCH_ROOT};
 use crate::metrics::{evaluate_alerts, Alert, HealthInputs, MetricsRegistry};
+use crate::proof_registry::{ProofRegistryEntry, ProofRegistryWriter};
 use crate::real_policy::{is_real_settlement, RealMode, RealSettlementPolicy, STARK_ENGINE_PREFIX};
 use crate::settlement::SettlementRecord;
 
@@ -260,11 +263,26 @@ const PROVE_RETRY_BACKOFF_MS: u64 = 5;
 struct PendingJob {
     job: ProofJob,
     attempts: u32,
+    /// 入队时刻（M9-ACC-4 `proof_ready_ms` 起点：结算任务提交进管道 →
+    /// 证明完成；重试路径原样携带，保证延迟覆盖含重试的全程）。
+    enqueued_at: std::time::Instant,
 }
 
 /// 批次验证通过回调类型（参数 = 批次 through_op；见
 /// [`ProofPipeline::set_on_batch_proven`]）。
 pub type ProvenCallback = Arc<dyn Fn(u64) + Send + Sync>;
+
+/// 聚合游标（[`ProofPipeline::aggregate_due`] 的推进水位）：
+/// 已折叠进聚合的批次数量、下一个聚合序号、上次聚合时刻。
+#[derive(Debug, Default, Clone, Copy)]
+struct AggregateCursor {
+    /// 已消费（折叠过）的产出批次数量。
+    consumed: usize,
+    /// 下一个 AggregateRecord 的 index。
+    next_index: u64,
+    /// 上次聚合触发的 now_ms（首次聚合基准 = 0，now ≥ interval 即触发）。
+    last_ms: u64,
+}
 
 /// 证明管道（v1 串行提交 + rayon 并行 prove + 完成通道收集）。
 pub struct ProofPipeline {
@@ -286,6 +304,13 @@ pub struct ProofPipeline {
     real_policy: RealSettlementPolicy,
     /// 已准入的 REAL 结算 op（批次/水位门的判定集合）。
     real_ops: Arc<Mutex<HashSet<u64>>>,
+    /// 已产出批次根日志（产出序；M4 outer aggregate [`Self::aggregate_due`]
+    /// 的折叠窗口来源）。
+    produced_batches: Mutex<Vec<BatchRoot>>,
+    /// 聚合游标（同一 root 不重复聚合的推进依据）。
+    aggregate_cursor: Mutex<AggregateCursor>,
+    /// proof 归档注册表写端（None = 未挂载，纯内存语义不变；E2 闭环）。
+    proof_registry: Mutex<Option<ProofRegistryWriter>>,
 }
 
 impl ProofPipeline {
@@ -327,6 +352,9 @@ impl ProofPipeline {
             metrics,
             real_policy,
             real_ops: Arc::new(Mutex::new(HashSet::new())),
+            produced_batches: Mutex::new(Vec::new()),
+            aggregate_cursor: Mutex::new(AggregateCursor::default()),
+            proof_registry: Mutex::new(None),
         });
         // worker：从 pending 队列取任务（优先级排序），rayon 并行 prove
         for _ in 0..pipeline.config.workers.max(1) {
@@ -360,6 +388,13 @@ impl ProofPipeline {
                 );
                 match res {
                     Ok(Ok(bundle)) => {
+                        // M9-ACC-4：证明就绪延迟 = 任务入队 → 证明完成（含
+                        // 排队与重试全程），完成路径统一观测
+                        p.metrics.observe(
+                            "proof_ready_ms",
+                            u64::try_from(job.enqueued_at.elapsed().as_millis())
+                                .unwrap_or(u64::MAX),
+                        );
                         // 先发送后计数：completed==N 保证 N 个 bundle 已可收割
                         let _ = p.tx.send(bundle);
                         p.completed.fetch_add(1, Ordering::Relaxed);
@@ -378,11 +413,13 @@ impl ProofPipeline {
                         if attempts == MAX_PROVE_RETRIES {
                             p.metrics.inc("prove_retry_exhausted_total");
                         }
-                        // 有界重试，超限仍留队列（不丢任务；见 MAX_PROVE_RETRIES）
-                        p.pending
-                            .lock()
-                            .expect("pending lock")
-                            .push(PendingJob { job: job.job, attempts });
+                        // 有界重试，超限仍留队列（不丢任务；见 MAX_PROVE_RETRIES）。
+                        // enqueued_at 原样携带：proof_ready_ms 覆盖含重试全程
+                        p.pending.lock().expect("pending lock").push(PendingJob {
+                            job: job.job,
+                            attempts,
+                            enqueued_at: job.enqueued_at,
+                        });
                         std::thread::sleep(Duration::from_millis(PROVE_RETRY_BACKOFF_MS));
                     }
                 }
@@ -397,6 +434,62 @@ impl ProofPipeline {
     /// `sequencer::Sequencer::mark_proven_through`。
     pub fn set_on_batch_proven(&self, cb: ProvenCallback) {
         *self.on_batch_proven.lock().expect("callback lock") = Some(cb);
+    }
+
+    /// 挂载 proof 归档注册表 sidecar（E2 闭环）：此后每次
+    /// [`Self::drain_completions`] 收割完成的 bundle 时逐条追加一行冻结
+    /// 契约 JSONL（`proof_registry.rs` 模块文档）。
+    ///
+    /// sidecar 语义（文档化取舍）：归档是**旁路优化**，写失败**不吞完成
+    /// 项**——bundle 照常进入 completions（可组批、可推进水位），只计
+    /// `proof_registry_write_failed_total` 告警计数 + warn，且本实例此后
+    /// 不再追加（`ProofRegistryWriter::failed` 置位，避免日志与内存无界
+    /// 漂移）。这与 proven log 的"fail-closed 挂起水位"不同：证明产物的
+    /// 权威载体是批次验证回调（`set_on_batch_proven` → 水位），注册表只
+    /// 服务 explorer 下载端点。
+    ///
+    /// # Errors
+    /// 打开失败 → [`AppchainError::WalCorrupted`]。
+    pub fn attach_proof_registry(&self, path: &Path) -> AppchainResult<()> {
+        *self.proof_registry.lock().expect("proof registry lock") =
+            Some(ProofRegistryWriter::open(path)?);
+        Ok(())
+    }
+
+    /// proof 注册表 fsync 开关（builder 风格）：`true` = 每行追加后
+    /// `sync_all` 真落盘；`false`（默认）= 只做用户态 flush。未挂载
+    /// sidecar 时为无操作。
+    pub fn with_registry_fsync(&self, enabled: bool) -> &Self {
+        if let Some(w) = self.proof_registry.lock().expect("proof registry lock").as_mut() {
+            w.with_fsync(enabled);
+        }
+        self
+    }
+
+    /// 归档单个 bundle 到已挂载的 proof 注册表（sidecar 语义：失败不吞
+    /// 完成项，只计告警 + warn）。
+    fn archive_bundle(&self, bundle: &ProofBundle) {
+        let mut guard = self.proof_registry.lock().expect("proof registry lock");
+        let Some(w) = guard.as_mut() else { return };
+        if w.failed {
+            return; // 已失败：不再追加（见 attach_proof_registry 文档）
+        }
+        let entry = ProofRegistryEntry {
+            binding_hex: bundle.binding_hex.clone(),
+            op_index: bundle.op_index,
+            engine: bundle.engine.to_string(),
+            attestor_public: bundle.attestor_public,
+            payload: bundle.payload.clone(),
+        };
+        if let Err(e) = w.append(&entry) {
+            w.failed = true;
+            self.metrics.inc("proof_registry_write_failed_total");
+            eprintln!(
+                "[poker-appchain::pipeline] warning: proof registry write failed \
+                 (op {} archived = false, further writes suspended): {e}",
+                bundle.op_index
+            );
+        }
     }
 
     /// 提交任务（有界背压：队列满时短暂阻塞重试）。
@@ -423,7 +516,11 @@ impl ProofPipeline {
                 self.pending
                     .lock()
                     .expect("pending lock")
-                    .push(PendingJob { job, attempts: 0 });
+                    .push(PendingJob {
+                        job,
+                        attempts: 0,
+                        enqueued_at: std::time::Instant::now(),
+                    });
                 self.metrics.inc("proof_submitted_total");
                 return Ok(());
             }
@@ -469,6 +566,10 @@ impl ProofPipeline {
     }
 
     /// 收割完成结果（非阻塞），返回本轮收集的 bundle 数。
+    ///
+    /// E2 挂账：已挂载 proof 注册表时，每个收割的 bundle 逐条追加归档
+    /// （[`Self::archive_bundle`]）——写失败不吞完成项、不改本方法签名
+    /// （sidecar 语义，见 [`Self::attach_proof_registry`]）。
     pub fn drain_completions(&self) -> usize {
         let rx_opt = {
             let mut guard = self.rx.lock().expect("rx lock");
@@ -479,6 +580,7 @@ impl ProofPipeline {
             loop {
                 match rx.try_recv() {
                     Ok(b) => {
+                        self.archive_bundle(&b);
                         self.completions
                             .lock()
                             .expect("completions lock")
@@ -618,12 +720,83 @@ impl ProofPipeline {
         if let Some(cb) = self.on_batch_proven.lock().expect("callback lock").as_ref() {
             cb(through_op);
         }
+        // M4 outer aggregate：登记产出批次根（aggregate_due 的折叠窗口来源；
+        // 先于返回值，保证聚合游标之后的可见性）
+        self.produced_batches
+            .lock()
+            .expect("produced batches lock")
+            .push(BatchRoot {
+                index,
+                root,
+                count: take.len(),
+                through_op,
+            });
         Ok(Some(BatchRoot {
             index,
             root,
             count: take.len(),
             through_op,
         }))
+    }
+
+    /// M4 outer aggregate：到期触发一次批次根二级聚合。
+    ///
+    /// 触发条件（同时满足）：
+    /// - 自上次聚合以来已产出的批次根（[`Self::try_build_batch`] 登记的
+    ///   `BatchRoot` 序列的未消费后缀）**非空**；
+    /// - `now_ms ≥ 上次聚合时刻 + interval_ms`（首次聚合基准 = 0，即
+    ///   `now ≥ interval` 即可触发）。
+    ///
+    /// 满足则把窗口内全部批次根按产出序折叠（[`aggregate_roots`]）产出
+    /// [`AggregateRecord`] 并**原子推进内部游标**（同一 root 不重复聚合；
+    /// 空窗口返回 `Ok(None)`，不推进任何水位）。并发安全：窗口切片与游标
+    /// 在同一把锁序内读取推进（produced_batches → aggregate_cursor，两把
+    /// 锁均只在方法内短暂持有，与现有锁风格一致）。
+    ///
+    /// # Errors
+    /// 聚合折叠失败 → 对应 [`AppchainError`]（游标不推进，可重试）。
+    pub fn aggregate_due(
+        &self,
+        now_ms: u64,
+        interval_ms: u64,
+    ) -> AppchainResult<Option<AggregateRecord>> {
+        let batches = self.produced_batches.lock().expect("produced batches lock");
+        let mut cursor = self.aggregate_cursor.lock().expect("aggregate cursor lock");
+        // 空窗口：没有未聚合的批次根 → 无操作
+        if cursor.consumed >= batches.len() {
+            return Ok(None);
+        }
+        // 时间窗未到
+        if now_ms < cursor.last_ms.saturating_add(interval_ms) {
+            return Ok(None);
+        }
+        let window: Vec<[u8; 32]> = batches[cursor.consumed..].iter().map(|b| b.root).collect();
+        let batch_count = u64::try_from(window.len()).unwrap_or(u64::MAX);
+        let root = aggregate_roots(&window)?;
+        let through_op = batches
+            .last()
+            .map(|b| b.through_op)
+            .expect("non-empty window checked");
+        let rec = AggregateRecord {
+            index: cursor.next_index,
+            through_op,
+            root,
+            ts_ms: now_ms,
+            batch_count,
+        };
+        // 推进游标（同一 root 不重复聚合）
+        cursor.consumed = batches.len();
+        cursor.next_index = cursor.next_index.wrapping_add(1);
+        cursor.last_ms = now_ms;
+        Ok(Some(rec))
+    }
+
+    /// 已产出但尚未聚合的批次根数量（观测/测试用）。
+    #[must_use]
+    pub fn pending_aggregate_count(&self) -> usize {
+        let batches = self.produced_batches.lock().expect("produced batches lock");
+        let cursor = self.aggregate_cursor.lock().expect("aggregate cursor lock");
+        batches.len().saturating_sub(cursor.consumed)
     }
 
     /// 健康输入（M9 告警评估）。
@@ -635,6 +808,7 @@ impl ProofPipeline {
             withdrawal_queue_depth: 0,
             reconciliation_delta: 0,
             soft_confirm_idle_ms: 0,
+            rate_limit_rejected_window: 0,
         }
     }
 
@@ -800,6 +974,219 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         panic!("condition not reached within timeout");
+    }
+
+
+    /// M4-ACC-4 端到端注入：灌入超容量任务 → 降级档触发（degraded + 告警
+    /// 规则命中）→ 放行后积压清空、降级解除（恢复面）。
+    #[test]
+    fn backlog_degraded_end_to_end_injection_and_recovery() {
+        // 门控引擎：gate 关闭时 worker 阻塞（模拟 prove 停滞 → 积压真实堆积）
+        struct GateEngine {
+            open: std::sync::atomic::AtomicBool,
+        }
+        impl SettlementProver for GateEngine {
+            fn name(&self) -> &'static str {
+                "gate-engine-v1"
+            }
+            fn prove(&self, job: &ProofJob) -> AppchainResult<ProofBundle> {
+                while !self.open.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(ProofBundle {
+                    binding_hex: hex::encode(job.record.hand_binding),
+                    op_index: job.op_index,
+                    engine: self.name(),
+                    attestor_public: [7u8; 32],
+                    payload: vec![0u8; 64],
+                })
+            }
+            fn verify(&self, _bundle: &ProofBundle) -> AppchainResult<()> {
+                Ok(())
+            }
+        }
+
+        let metrics = Arc::new(MetricsRegistry::new());
+        let gate = Arc::new(GateEngine {
+            open: std::sync::atomic::AtomicBool::new(false),
+        });
+        let p = ProofPipeline::new(
+            PipelineConfig {
+                workers: 1,
+                batch_size: 4,
+                queue_bound: 64,
+                // 高水位 4：灌 12 个任务（8 inflight > 4）必降级
+                high_watermark: 4,
+                batch_interval_ms: 1_000,
+            },
+            gate.clone(),
+            metrics,
+        );
+        // 灌入 12 个任务（queue_bound=64 足够容纳）
+        for i in 0..12u64 {
+            let seed = u8::try_from(i + 1).unwrap_or(u8::MAX);
+            p.submit(ProofJob {
+                op_index: i,
+                table_id: 1,
+                record: Arc::new(dummy_record(seed)),
+                policy: FeePolicy::Zero,
+                priority: Priority::Play,
+            })
+            .unwrap();
+        }
+        // 等待 worker 取走第一批（inflight 计入 worker 手中），门关闭 →
+        // 其余滞留 pending/inflight，降级必须触发
+        poll_until(|| p.inflight_count() >= 5);
+        assert!(
+            p.degraded(),
+            "inflight {} 必须超过高水位 4 触发降级",
+            p.inflight_count()
+        );
+        // 告警规则联动（M4-ACC-4 的"告警"面）
+        let alerts = crate::metrics::evaluate_alerts(&p.health());
+        assert!(
+            alerts.iter().any(|a| a.rule == "proof_backlog_degraded"),
+            "降级档必须触发 proof_backlog_degraded 告警"
+        );
+        // 放行：积压应被清空（12 个全部完成）
+        gate.open.store(true, Ordering::Relaxed);
+        poll_until(|| p.completed_count() >= 12);
+        assert_eq!(p.drain_completions(), 12);
+        poll_until(|| !p.degraded());
+        assert!(
+            !p.degraded(),
+            "积压清空后降级必须解除（恢复面）"
+        );
+        assert!(crate::metrics::evaluate_alerts(&p.health()).is_empty());
+    }
+
+    // ===== M4 outer aggregate：定期批次聚合触发 =====
+
+    /// aggregate_due：时间窗触发、空窗口 None、同一 root 不重复聚合。
+    #[test]
+    fn aggregate_due_time_window_and_no_duplicate() {
+        let metrics = Arc::new(MetricsRegistry::new());
+        let p = ProofPipeline::new(
+            PipelineConfig {
+                workers: 1,
+                batch_size: 2,
+                queue_bound: 16,
+                high_watermark: 16,
+                batch_interval_ms: 1_000,
+            },
+            Arc::new(ValidationEngine::default()),
+            metrics,
+        );
+        // 尚无批次：时间窗再长也 None（空窗口优先）
+        assert!(p.aggregate_due(10_000, 1_000).unwrap().is_none());
+
+        // 产出一个批次（2 帧）
+        for i in 0..2u8 {
+            p.submit(ProofJob {
+                op_index: u64::from(i),
+                table_id: 1,
+                record: Arc::new(dummy_record(i + 1)),
+                policy: FeePolicy::Zero,
+                priority: Priority::Play,
+            })
+            .unwrap();
+        }
+        poll_until(|| p.completed_count() >= 2);
+        let b1 = p.try_build_batch().unwrap().expect("batch 1");
+        assert_eq!(p.pending_aggregate_count(), 1);
+
+        // 时间窗未到（now < 0 + interval）→ None，不消费窗口
+        assert!(p.aggregate_due(500, 1_000).unwrap().is_none());
+        assert_eq!(p.pending_aggregate_count(), 1);
+
+        // 到期 → Some；聚合根 = 窗口批次根的独立域折叠；through_op 对齐
+        let rec1 = p.aggregate_due(1_000, 1_000).unwrap().expect("first aggregate");
+        assert_eq!(rec1.index, 0);
+        assert_eq!(rec1.batch_count, 1);
+        assert_eq!(rec1.through_op, b1.through_op);
+        assert_eq!(rec1.root, aggregate_roots(&[b1.root]).unwrap());
+        assert_eq!(rec1.ts_ms, 1_000);
+        assert_eq!(p.pending_aggregate_count(), 0);
+
+        // 同一 root 不重复聚合：窗口空 → None
+        assert!(p.aggregate_due(2_000, 1_000).unwrap().is_none());
+
+        // 再出一个批次，下一个时间窗 → index 递进，聚合第二窗口的根
+        for i in 2..4u8 {
+            p.submit(ProofJob {
+                op_index: u64::from(i),
+                table_id: 1,
+                record: Arc::new(dummy_record(i + 1)),
+                policy: FeePolicy::Zero,
+                priority: Priority::Play,
+            })
+            .unwrap();
+        }
+        poll_until(|| p.completed_count() >= 4);
+        let b2 = p.try_build_batch().unwrap().expect("batch 2");
+        let rec2 = p.aggregate_due(2_500, 500).unwrap().expect("second aggregate");
+        assert_eq!(rec2.index, 1);
+        assert_eq!(rec2.batch_count, 1);
+        assert_eq!(rec2.through_op, b2.through_op);
+        assert_eq!(rec2.root, aggregate_roots(&[b2.root]).unwrap());
+        assert!(p.aggregate_due(9_999, 1_000).unwrap().is_none());
+    }
+
+    /// E2 挂账：挂载 proof 注册表后 drain_completions 逐条归档；
+    /// 注册表内容与批次内 bundle 一致（binding/op_index/engine/payload）。
+    #[test]
+    fn proof_registry_archives_drained_bundles() {
+        let dir = std::env::temp_dir().join("poker-appchain-pipeline-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("proof_registry.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        let metrics = Arc::new(MetricsRegistry::new());
+        let engine = Arc::new(ValidationEngine::default());
+        let p = ProofPipeline::new(
+            PipelineConfig {
+                workers: 1,
+                batch_size: 2,
+                queue_bound: 16,
+                high_watermark: 16,
+                batch_interval_ms: 1_000,
+            },
+            engine.clone(),
+            Arc::clone(&metrics),
+        );
+        p.attach_proof_registry(&path).unwrap();
+        p.with_registry_fsync(false);
+        for i in 0..2u8 {
+            p.submit(ProofJob {
+                op_index: u64::from(i),
+                table_id: 1,
+                record: Arc::new(dummy_record(i + 1)),
+                policy: FeePolicy::Zero,
+                priority: Priority::Play,
+            })
+            .unwrap();
+        }
+        poll_until(|| p.completed_count() >= 2);
+        let batch = p.try_build_batch().unwrap().expect("batch built");
+        // try_build_batch 内部 drain → 两个 bundle 已归档
+        assert_eq!(metrics.counter("proof_registry_write_failed_total"), 0);
+        let entries = crate::proof_registry::read_registry(&path).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].binding_hex, hex::encode([1u8; 32]));
+        assert_eq!(entries[0].op_index, 0);
+        assert_eq!(entries[0].engine, "host-validate-v2");
+        assert_eq!(entries[0].payload.len(), 64);
+        assert_eq!(entries[1].op_index, 1);
+        // attestor 公钥与引擎一致（可验证 attestation 回路）
+        let bundle = crate::pipeline::ProofBundle {
+            binding_hex: entries[0].binding_hex.clone(),
+            op_index: entries[0].op_index,
+            engine: "host-validate-v2",
+            attestor_public: entries[0].attestor_public,
+            payload: entries[0].payload.clone(),
+        };
+        assert!(engine.verify(&bundle).is_ok(), "archived payload verifies");
+        let _ = batch;
     }
 
     #[test]

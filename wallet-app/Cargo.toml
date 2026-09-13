@@ -1,0 +1,9 @@
+# wallet-app — 独立桌面钱包 MVP（plan §6.12.5）
+#
+# 独立 Cargo workspace（隔离模式，参照 poker-appchain-texasair）：
+# - 不加入 zchain 根 workspace（避免 feature/lockfile 污染）；
+# - 自带独立 Cargo.lock；
+# - 经 path 依赖 ../poker-wallet（wallet-core，仅默认 feature，不开 wasm）。
+[workspace]
+resolver = "2"
+members = ["crates/zwallet", "src-tauri"]

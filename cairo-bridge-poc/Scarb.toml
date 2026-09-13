@@ -1,0 +1,26 @@
+[workspace]
+members = [
+    "crates/base",
+    "crates/prog_baseline",
+    "crates/prog_hades",
+    "crates/prog_m31_add",
+    "crates/prog_m31_mul",
+    "crates/prog_qm31_mul",
+    "crates/prog_fri_fold",
+    "crates/prog_channel",
+    "crates/prog_merkle",
+    "crates/prog_verify_min",
+]
+
+[workspace.dependencies]
+bounded_int = { path = "vendor/bounded_int" }
+stwo_verifier_core = { path = "vendor/verifier_core", features = ["poseidon252_verifier"] }
+base = { path = "crates/base" }
+
+[cairo]
+enable-gas = false
+
+[profile.proving.cairo]
+enable-gas = false
+unsafe-panic = true
+allow-warnings = false

@@ -20,6 +20,16 @@
 //!   - 窗口内合理申辩 → 豁免 slashing 仅记录审查嫌疑
 //!   - **R4-H5**：`under_investigation_count` 仅当申辩无效或无申辩时 +1（非"无论申辩是否成功 +1"）；
 //!     衰减机制：每 epoch 衰减 1（最低为 0），防止历史指控永久累积
+//!
+//! # 与 `consensus/slash.rs` 的分工（裁定：两模块并存，非重复）
+//!
+//! 本模块是**金额计算与优先级规则层**（Task 13 规约面）：`compute_slash_amount`
+//! / `apply_slashing` / `apply_multi_slashing`（SEC2-H2 优先级与剩余质押基数）、
+//! 停机/调查状态机、证据结构校验（含签名重验）。`slash.rs`（v1.5 plan §2-b）
+//! 是**事件账本 + bond 扣减执行层**：`SlashLedger`（append-only，evidence_digest
+//! 幂等键）、`ValidatorEntry.stake` 扣减与 `Slashed` 状态准入联动。罚没百分比
+//! 经本模块计算后传入 `SlashLedger::apply_slash`；两模块符号名（Slash* vs
+//! Slashing*）与职责边界一一对应，无重复 API。
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use serde::{Deserialize, Serialize};
@@ -990,6 +1000,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: parent_hashes.clone(),
             author_sig: vec![],
+            forced_tx_hashes: vec![],
         };
         let signing_hash = unsigned.signing_hash(chain_id);
         let sig = sign_hash(secret, &signing_hash);

@@ -40,12 +40,12 @@ use super::betting::BettingRound;
 use super::card::{BoardCards, Card, HoleCards};
 // 复用 constants.rs 中与 Move 端逐字节一致的 phase 常量（避免本地重复定义导致语义分叉）
 use super::constants::{
-    ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE,
-    RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE, REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE,
-    REVEAL_PHASE_PREFLOP, REVEAL_PHASE_RIVER, REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN,
-    RIT_MODE_DISABLED, RIT_MODE_TWICE, ROUND_FLOP, ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN,
-    ROUND_TURN, ROUND_WAITING, SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE,
-    SHUFFLE_PHASE_RECONSTRUCT,
+    ANTE_MODE_BBA, ANTE_MODE_NONE, ANTE_MODE_NORMAL, RAKE_MODE_FIXED_RAKE_BURN, RAKE_MODE_NONE,
+    RAKE_MODE_PERCENTAGE, RECONSTRUCT_PHASE_COLLECTING, RECONSTRUCT_PHASE_NONE,
+    REVEAL_PHASE_FLOP, REVEAL_PHASE_NONE, REVEAL_PHASE_PREFLOP, REVEAL_PHASE_RIVER,
+    REVEAL_PHASE_SHOWDOWN, REVEAL_PHASE_TURN, RIT_MODE_DISABLED, RIT_MODE_TWICE, ROUND_FLOP,
+    ROUND_PREFLOP, ROUND_RIVER, ROUND_SHOWDOWN, ROUND_TURN, ROUND_WAITING,
+    SHUFFLE_PHASE_BEFORE_PREFLOP, SHUFFLE_PHASE_NONE, SHUFFLE_PHASE_RECONSTRUCT,
 };
 
 // ========== 常量 ==========
@@ -1736,7 +1736,7 @@ pub struct TableRules {
     pub ante_mode: u8,
     /// Ante debit per configured payer.
     pub ante_amount: u64,
-    /// Rake mode (`NONE` or `PERCENTAGE`).
+    /// Rake mode (`NONE`, `PERCENTAGE`, or `FIXED_RAKE_BURN`).
     pub rake_mode: u8,
     /// Rake rate in basis points.
     pub rake_bps: u16,
@@ -1892,8 +1892,12 @@ impl TableRules {
                 self.ante_mode
             )));
         }
-        if !matches!(self.rake_mode, RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE)
-            || self.rake_bps > 10_000
+        // TE-M4：RAKE_MODE_FIXED_RAKE_BURN (2) 为合法开桌配置（TE-E0 判别值
+        // 冻结）。计价与 PERCENTAGE 同式；销毁处置见 settlement::rake_disposal。
+        if !matches!(
+            self.rake_mode,
+            RAKE_MODE_NONE | RAKE_MODE_PERCENTAGE | RAKE_MODE_FIXED_RAKE_BURN
+        ) || self.rake_bps > 10_000
         {
             return Err(PokerL1Error::Serialization(format!(
                 "Texas rake configuration mode={} bps={} is not canonical",
@@ -3662,5 +3666,30 @@ mod tests {
         let bytes = borsh::to_vec(&seat).unwrap();
         let recovered: Seat = borsh::from_slice(&bytes).unwrap();
         assert_eq!(seat, recovered);
+    }
+
+    // ===== TE-M4：TableRules 开桌配置接受 FIXED_RAKE_BURN（判别值冻结 = 2）=====
+
+    #[test]
+    fn table_rules_accept_fixed_rake_burn_and_reject_unknown_modes() {
+        let mut rules = TableRules::new(3, 50, 100);
+        rules.rake_mode = RAKE_MODE_FIXED_RAKE_BURN;
+        rules.rake_bps = 500;
+        rules.rake_cap = 1_000;
+        rules.validate_canonical().expect("mode 2 is a canonical open-table configuration");
+        // mode 0/1 零回退
+        rules.rake_mode = RAKE_MODE_NONE;
+        rules.validate_canonical().unwrap();
+        rules.rake_mode = RAKE_MODE_PERCENTAGE;
+        rules.validate_canonical().unwrap();
+        // 未知模式仍拒（fail-closed）
+        rules.rake_mode = 3;
+        assert!(rules.validate_canonical().is_err());
+        rules.rake_mode = u8::MAX;
+        assert!(rules.validate_canonical().is_err());
+        // mode 2 的 bps 越界同样拒（与 mode 0/1 同一校验口径）
+        rules.rake_mode = RAKE_MODE_FIXED_RAKE_BURN;
+        rules.rake_bps = 10_001;
+        assert!(rules.validate_canonical().is_err());
     }
 }

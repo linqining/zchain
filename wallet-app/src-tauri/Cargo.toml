@@ -1,0 +1,24 @@
+[package]
+name = "wallet-app"
+version = "0.1.0"
+edition = "2024"
+description = "ZChain 独立桌面钱包 MVP（Tauri v2 壳 + wallet-core；plan §6.12.5）"
+license = "BUSL-1.1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# ===== Tauri v2 桌面壳（macOS：wry/objc2，仅需 Xcode CLT + 系统 WebKit）=====
+tauri = { version = "2", features = [] }
+# ===== 原生文件对话框（备份导出/导入的落盘选择）=====
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ===== wallet-core 接线层（本 workspace 内）=====
+zwallet = { path = "../crates/zwallet" }
+
+# 生产运行（嵌入 ../ui 静态资源）：
+#   cargo build --release --features custom-protocol
+[features]
+custom-protocol = ["tauri/custom-protocol"]

@@ -2,6 +2,12 @@
 //!
 //! v1 托管模式下 owner 密钥由客户端持有；本模块只做密钥/签名的纯函数封装，
 //! 不做任何密钥存储。生产密钥走环境注入（延续仓库"私钥不入库"纪律）。
+//!
+//! v1.2.4 注（外部评审建议 4，向后兼容）：生产侧密钥**注入**统一走
+//! [`crate::key_provider`]（env / file / remote-KMS 三实现，fail-closed，
+//! 无默认种子回退）；本模块保持 v1 纯函数语义不变，[`SequencerKey::from_seed`]
+//! 降格定位为"32B 种子 → 密钥"的底层原语 + 测试辅助——**生产构造路径禁止
+//! 常量种子**（见 `sequencer.rs` 中 `Sequencer::new` 的装配文档）。
 
 use blake2::Blake2s256;
 use blake2::Digest as _;

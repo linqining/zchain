@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>ZChain Proof Portal — 验证一手牌</title>
+  <link rel="stylesheet" href="../popup/popup.css" />
+  <style>
+    body { width: auto; max-width: 860px; margin: 0 auto; padding: 0 16px 32px; }
+    header { border-left: none; border-right: none; }
+    .grid { display: flex; gap: 12px; flex-wrap: wrap; }
+    .grid .card { flex: 1 1 380px; }
+    .checks li.ok { color: var(--ok); }
+    .checks li.no { color: var(--bad); }
+  </style>
+</head>
+<body>
+  <header>
+      <div class="brand">
+        <span class="logo">Z</span>
+        <span class="title">ZChain Proof Portal（0.4.0-alpha）</span>
+      </div>
+    <span id="net-badge" class="badge badge-devnet">devnet</span>
+  </header>
+
+  <main id="view">
+    <div class="card">
+      <h2>验证一手牌</h2>
+      <div class="dim" id="gateway-line">网关：加载中…</div>
+      <div class="row" style="margin-top:8px">
+        <span class="k">hand binding</span>
+      </div>
+      <input type="text" id="binding" placeholder="64 hex（32 字节，可带 0x 前缀）" />
+      <div class="err" id="err"></div>
+      <button id="verify">拉取并本地验证</button>
+      <div class="dim" style="margin-top:8px">
+        诚实边界：本页面用 wallet-core wasm 复验<b>结算关系</b>（payout_root 复算 + 守恒 +
+        费率关系）；0.4 起 <b>STARK 证明本体也在浏览器内完整验证</b>（vendor/stwo-verify
+        的 wasm 验证器：FRI + Merkle + 约束 + 公开 scope 承诺重建，验证器版本与耗时如实
+        展示）。网关不可达/超时/STARK 验证拒绝均明确报错，不伪造验证结果。
+      </div>
+    </div>
+
+    <div class="card" id="settings">
+      <h2>网关设置（按当前网络）</h2>
+      <div class="dim">devnet 默认 127.0.0.1:18900；testnet 未部署公共网关，必须显式设置。跨源访问需要网关以 --public 启动，或授予本扩展对该源的主机权限（可选权限，按钮在下方）。</div>
+      <input type="text" id="gateway-input" placeholder="http://127.0.0.1:18900" />
+      <button class="secondary" id="save-gateway">保存网关 URL</button>
+      <button class="secondary" id="grant-permission" style="margin-top:6px">授予网关主机权限（可选）</button>
+    </div>
+
+    <div class="grid">
+      <div class="card" id="settlement-card" style="display:none">
+        <h2>结算明细（网关）</h2>
+        <div id="settlement-body"></div>
+      </div>
+      <div class="card" id="proof-card" style="display:none">
+        <h2>Proof 归档（网关）</h2>
+        <div id="proof-body"></div>
+      </div>
+      <div class="card" id="stark-card" style="display:none">
+        <h2>STARK 完整验证（stwo wasm）</h2>
+        <div id="stark-body"></div>
+      </div>
+      <div class="card" id="verdict-card" style="display:none">
+        <h2>本地验证结论（wallet-core wasm）</h2>
+        <div id="verdict-body"></div>
+      </div>
+      <div class="card" id="conclusion-card" style="display:none">
+        <h2>结论</h2>
+        <div id="conclusion-body"></div>
+      </div>
+    </div>
+  </main>
+
+  <footer>仅展示协议状态 · 验证失败/网关不可达均如实报告 · extension/portal</footer>
+
+  <script src="portal.js" type="module"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+[package]
+name = "gen-canonical"
+version = "0.1.0"
+edition = "2021"
+description = "Path A 原生出证工具：poker_texas_air 真实 canonical 证明（≥3 桌）borsh 落盘，供 wasm 侧只做 verify"
+
+[[bin]]
+name = "gen-canonical"
+path = "src/main.rs"
+
+[dependencies]
+poker_texas_air = { path = "../../../../poker_texas_air" }
+borsh = { version = "1", default-features = false, features = ["std"] }

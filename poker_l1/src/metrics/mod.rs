@@ -18,6 +18,7 @@
 //! | `zchain_peer_count` | gauge | 当前 P2P peer 数 |
 //! | `zchain_mempool_size` | gauge | 交易池当前大小 |
 //! | `zchain_gas_used_total` | counter | 累计 gas 用量 |
+//! | `zchain_censorship_detected_total` | counter | 审查证据成立的次数（M3-ACC-6，v1 仅记录） |
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -39,6 +40,8 @@ pub struct MetricsCollector {
     mempool_size: AtomicU64,
     /// 累计 gas 用量（counter）。
     gas_used_total: AtomicU64,
+    /// 审查证据成立次数（counter，M3-ACC-6：v1 仅记录不罚没）。
+    censorship_detected_total: AtomicU64,
 }
 
 impl MetricsCollector {
@@ -53,6 +56,7 @@ impl MetricsCollector {
             peer_count: AtomicU64::new(0),
             mempool_size: AtomicU64::new(0),
             gas_used_total: AtomicU64::new(0),
+            censorship_detected_total: AtomicU64::new(0),
         }
     }
 
@@ -85,6 +89,11 @@ impl MetricsCollector {
     /// 累加 gas 用量。
     pub fn inc_gas_used(&self, gas: u64) {
         self.gas_used_total.fetch_add(gas, Ordering::Relaxed);
+    }
+
+    /// 记录一次审查证据成立（M3-ACC-6：v1 仅计数，bond 罚没属 v2）。
+    pub fn inc_censorship_detected(&self) {
+        self.censorship_detected_total.fetch_add(1, Ordering::Relaxed);
     }
 
     /// 导出为 Prometheus text exposition format。
@@ -139,6 +148,15 @@ impl MetricsCollector {
             "zchain_gas_used_total {}\n",
             self.gas_used_total.load(Ordering::Relaxed)
         ));
+        // zchain_censorship_detected_total (counter，M3-ACC-6)
+        out.push_str(
+            "# HELP zchain_censorship_detected_total Censorship proofs verified as standing.\n",
+        );
+        out.push_str("# TYPE zchain_censorship_detected_total counter\n");
+        out.push_str(&format!(
+            "zchain_censorship_detected_total {}\n",
+            self.censorship_detected_total.load(Ordering::Relaxed)
+        ));
         out
     }
 }
@@ -173,6 +191,15 @@ mod tests {
     }
 
     #[test]
+    fn metrics_censorship_counter_accumulates() {
+        let m = MetricsCollector::new();
+        m.inc_censorship_detected();
+        m.inc_censorship_detected();
+        let text = m.export();
+        assert!(text.contains("zchain_censorship_detected_total 2"));
+    }
+
+    #[test]
     fn metrics_counters_accumulate() {
         let m = MetricsCollector::new();
         m.inc_tx(5);
@@ -196,6 +223,7 @@ mod tests {
             "zchain_peer_count",
             "zchain_mempool_size",
             "zchain_gas_used_total",
+            "zchain_censorship_detected_total",
         ] {
             assert!(
                 text.contains(&format!("# HELP {name}")),

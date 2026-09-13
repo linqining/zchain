@@ -139,6 +139,13 @@ pub const TIME_BANK_REFILL_PER_HAND_MS: u32 = 10_000;
 pub const RAKE_MODE_NONE: u8 = 0;
 /// 按比例抽水（pot * rake_bps / 10000，受 rake_cap 上限）。
 pub const RAKE_MODE_PERCENTAGE: u8 = 1;
+/// 固定比例计费 + 销毁处置（GAME 桌销毁计费，TE-E0 判别值冻结 = 2）。
+///
+/// 计价与 [`RAKE_MODE_PERCENTAGE`] **同式**（`min(pot·bps/10⁴, cap)`，
+/// canonical AIR opening 对 mode ∈ {1, 2} 同式并冻结该数量关系）；
+/// **资金处置不同**：抽出的 rake 份额不产生 Treasury/operator 现金输出，
+/// 而是全额销毁（处置规则见 `settlement::rake_disposal`，TE-M4 定稿）。
+pub const RAKE_MODE_FIXED_RAKE_BURN: u8 = 2;
 
 /// 默认 rake 比例（500 = 5%）。
 pub const DEFAULT_RAKE_BPS: u16 = 500;

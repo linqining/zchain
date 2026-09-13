@@ -1,12 +1,23 @@
 //! M5：费率模块。
 //!
 //! 核心原则（plan §0）：**费率是状态机里的数据（策略注册表），不是协议参数**。
-//! v1 仅两种策略：`ZERO`（零费休闲桌）与 `FIXED_RAKE`（固定比例 + 封顶 +
-//! 分账）。策略在开桌时绑定并**冻结**（注册表无更新路径），结算关系
+//! v1 两种策略：`ZERO`（零费休闲桌）与 `FIXED_RAKE`（固定比例 + 封顶 +
+//! 分账）；TE-E0 追加枚举先行的 `FIXED_RAKE_BURN`（判别值 2，GAME 桌
+//! 销毁计费）。策略在开桌时绑定并**冻结**（注册表无更新路径），结算关系
 //! （M2）按 policy_commitment 验证抽取，篡改即不可证明。
 //!
 //! 对齐既有资产：`canonical_rake_opening` 的 `rake_mode`（NONE=0 /
-//! PERCENTAGE=1）与本模块语义一致，ABI 层保持相同判别值。
+//! PERCENTAGE=1 / FIXED_RAKE_BURN=2）与本模块语义一致，ABI 层保持相同
+//! 判别值（三仓对照见 `docs/ABI_TE.md`）。判别值一经发布即冻结。
+//!
+//! ## FIXED_RAKE_BURN 语义边界（TE-E0，枚举先行）
+//!
+//! `FixedRakeBurn` 只承载**计价**（rate_bps/cap 与 `FixedRake` 同式：
+//! `min(base * rate_bps / 10_000, cap)`，`split_of` 同式）——fee 层不管
+//! 资金去向。**销毁语义在合约侧实现（poker_l1，TE-M4 排期）**：燃烧的
+//! 资金处置规则（燃烧份额、事件、守恒闭合）由合约定义；在合约规则落地
+//! 前，结算/分账路径（`settlement.rs` / `note_v2.rs` 的 `FixedRake`
+//! 分支）不会匹配该变体，且现有流程不会构造 burn 策略，故行为不变。
 //!
 //! ## rake 计费基数（ABI v1.2.2，BLOCKERS B9 口径统一）
 //!
@@ -27,12 +38,16 @@ use starknet_crypto::{poseidon_hash_many, FieldElement};
 use crate::error::{AppchainError, AppchainResult};
 use crate::felt::{bytes32_to_felts, domain_felt, felt_from_u64, felt_to_bytes32, DOMAIN_FEE_POLICY};
 
-/// rake 模式判别值，对齐 `canonical_rake_opening`（NONE=0, PERCENTAGE=1）。
+/// rake 模式判别值，对齐 `canonical_rake_opening`（NONE=0, PERCENTAGE=1,
+/// FIXED_RAKE_BURN=2）。判别值一经发布即冻结，不得重排或复用。
 pub mod rake_mode {
     /// 零费。
     pub const NONE: u8 = 0;
     /// 固定比例。
     pub const PERCENTAGE: u8 = 1;
+    /// 固定比例计费 + GAME 桌销毁处置（TE-E0 枚举先行；销毁的资金处置
+    /// 规则在 poker_l1 合约侧实现，fee 层只承载计价）。
+    pub const FIXED_RAKE_BURN: u8 = 2;
 }
 
 /// 分账配置：treasury 按 bps 取 rake，其余归 operator。
@@ -64,6 +79,20 @@ pub enum FeePolicy {
         /// 分账。
         split: FeeSplit,
     },
+    /// 固定比例计费 + GAME 桌销毁处置（TE-E0，borsh 判别值 2，末位追加）。
+    ///
+    /// **判别值冻结**：borsh 枚举判别值 = 声明序，本变体必须保持末位，
+    /// 已有序列化数据（判别值 0/1）不受影响。计费数学与 [`FeePolicy::FixedRake`]
+    /// 完全同式——burn 只是合约侧的资金处置语义（poker_l1，TE-M4），
+    /// fee 层只承载计价，不改抽取/分账数学。
+    FixedRakeBurn {
+        /// 比例（bps of pot，≤ 10000）。
+        rate_bps: u16,
+        /// 单手封顶（0 = 无封顶）。
+        cap: u64,
+        /// 分账（计价层拆分；合约侧销毁处置如何映射该拆分由合约规则定义）。
+        split: FeeSplit,
+    },
 }
 
 impl FeePolicy {
@@ -73,6 +102,7 @@ impl FeePolicy {
         match self {
             Self::Zero => rake_mode::NONE,
             Self::FixedRake { .. } => rake_mode::PERCENTAGE,
+            Self::FixedRakeBurn { .. } => rake_mode::FIXED_RAKE_BURN,
         }
     }
 
@@ -86,7 +116,8 @@ impl FeePolicy {
     pub fn rake_of(&self, base: u64) -> u64 {
         match self {
             Self::Zero => 0,
-            Self::FixedRake { rate_bps, cap, .. } => {
+            Self::FixedRake { rate_bps, cap, .. }
+            | Self::FixedRakeBurn { rate_bps, cap, .. } => {
                 let raw = (u128::from(base) * u128::from(*rate_bps)) / 10_000;
                 let capped = if *cap == 0 {
                     raw
@@ -105,7 +136,7 @@ impl FeePolicy {
     pub fn split_of(&self, total: u64) -> (u64, u64) {
         match self {
             Self::Zero => (0, 0),
-            Self::FixedRake { split, .. } => {
+            Self::FixedRake { split, .. } | Self::FixedRakeBurn { split, .. } => {
                 let t = (u128::from(total) * u128::from(split.treasury_bps)) / 10_000;
                 let t = u64::try_from(t).unwrap_or(u64::MAX);
                 (t, total - t)
@@ -115,10 +146,16 @@ impl FeePolicy {
 
     /// 策略承诺：`poseidon(DOMAIN, mode, rate, cap, treasury_bps, t_x*, t_y*,
     /// o_x*, o_y*)`（公钥 32B 走 hi/lo 无损拆分）。
+    ///
+    /// `FixedRakeBurn` 复用同一 preimage 形状，仅 mode 判别值不同（2 vs 1）：
+    /// mode 进承诺 ⇒ 同参数的 burn 与 percentage 策略 commitment 必然不同，
+    /// 结算关系按 policy_commitment 抽取时二者不可混淆。
     #[must_use]
     pub fn commitment(&self) -> FieldElement {
         let mut parts = vec![domain_felt(DOMAIN_FEE_POLICY), felt_from_u64(u64::from(self.mode()))];
-        if let Self::FixedRake { rate_bps, cap, split } = self {
+        if let Self::FixedRake { rate_bps, cap, split }
+        | Self::FixedRakeBurn { rate_bps, cap, split } = self
+        {
             parts.push(felt_from_u64(u64::from(*rate_bps)));
             parts.push(felt_from_u64(*cap));
             parts.push(felt_from_u64(u64::from(split.treasury_bps)));
@@ -146,7 +183,9 @@ impl FeePolicy {
     /// # Errors
     /// rate_bps > 10000 或 treasury_bps > 10000 → [`AppchainError::OutOfRange`]。
     pub fn validate(&self) -> AppchainResult<()> {
-        if let Self::FixedRake { rate_bps, split, .. } = self {
+        if let Self::FixedRake { rate_bps, split, .. }
+        | Self::FixedRakeBurn { rate_bps, split, .. } = self
+        {
             if u32::from(*rate_bps) > 10_000 {
                 return Err(AppchainError::OutOfRange("rate_bps"));
             }
@@ -230,6 +269,7 @@ impl FeeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use borsh::BorshDeserialize as _;
 
     fn pk(seed: u8) -> [u8; 33] {
         crate::keys::OwnerKey::from_seed(&[seed; 32])
@@ -293,5 +333,81 @@ mod tests {
             split: FeeSplit { treasury_bps: 0, treasury: pk(1), operator: pk(2) },
         };
         assert!(r.bind(1, bad).is_err());
+    }
+
+    // ---- TE-E0：FixedRakeBurn（判别值 2，计价同式，销毁语义在合约侧）----
+
+    fn fixed_rake(rate_bps: u16, cap: u64, treasury_bps: u16) -> FeePolicy {
+        FeePolicy::FixedRake {
+            rate_bps,
+            cap,
+            split: FeeSplit { treasury_bps, treasury: pk(1), operator: pk(2) },
+        }
+    }
+
+    fn fixed_rake_burn(rate_bps: u16, cap: u64, treasury_bps: u16) -> FeePolicy {
+        FeePolicy::FixedRakeBurn {
+            rate_bps,
+            cap,
+            split: FeeSplit { treasury_bps, treasury: pk(1), operator: pk(2) },
+        }
+    }
+
+    /// borsh 判别值 = 声明序：Zero=0、FixedRake=1、FixedRakeBurn=2。
+    /// 判别值冻结，不得重排（既有 0/1 序列化数据兼容性依赖此序）。
+    #[test]
+    fn borsh_discriminants_are_frozen() {
+        let tag = |policy: &FeePolicy| borsh::to_vec(policy).unwrap()[0];
+        assert_eq!(tag(&FeePolicy::Zero), 0);
+        assert_eq!(tag(&fixed_rake(500, 0, 0)), 1);
+        assert_eq!(tag(&fixed_rake_burn(500, 0, 0)), 2);
+    }
+
+    /// 计费数学与 FixedRake 完全同式（burn 只是合约侧资金处置语义）。
+    #[test]
+    fn fixed_rake_burn_pricing_matches_fixed_rake() {
+        let burn = fixed_rake_burn(250, 500, 2_000);
+        for base in [0u64, 1, 10_000, 30_000, u64::MAX] {
+            assert_eq!(burn.rake_of(base), fixed_rake(250, 500, 2_000).rake_of(base));
+        }
+        assert_eq!(burn.rake_of(10_000), 250); // 2.5% floor
+        assert_eq!(burn.rake_of(30_000), 500); // 750 → cap 500
+        assert_eq!(burn.rake_of(1), 0); // floor
+        for total in [1u64, 7, 100, 999, 123_456] {
+            let (t, o) = burn.split_of(total);
+            assert_eq!(t + o, total, "零头归 operator，两份之和守恒");
+        }
+        assert!(burn.validate().is_ok());
+        // 越界拒绝与 FixedRake 同口径（fail-closed）。
+        let mut bad = fixed_rake_burn(10_001, 0, 0);
+        assert!(bad.validate().is_err());
+        bad = fixed_rake_burn(100, 0, 10_001);
+        assert!(bad.validate().is_err());
+    }
+
+    /// mode=2 进 commitment：同参数 burn 与 percentage 承诺必然不同；
+    /// 注册表绑定/冲突拒绝语义不变。
+    #[test]
+    fn fixed_rake_burn_mode_and_commitment_distinct() {
+        let burn = fixed_rake_burn(500, 1_000, 3_333);
+        let percentage = fixed_rake(500, 1_000, 3_333);
+        assert_eq!(burn.mode(), 2);
+        assert_eq!(percentage.mode(), 1);
+        assert_ne!(burn.commitment(), percentage.commitment());
+        assert_ne!(burn.commitment_bytes(), percentage.commitment_bytes());
+        assert_eq!(burn.commitment(), burn.commitment()); // 确定性
+
+        // borsh roundtrip：判别值与字段无损。
+        let decoded =
+            FeePolicy::try_from_slice(&borsh::to_vec(&burn).unwrap()).expect("borsh roundtrip");
+        assert_eq!(decoded, burn);
+        assert_eq!(decoded.mode(), 2);
+        assert_eq!(decoded.commitment_bytes(), burn.commitment_bytes());
+
+        // 注册表：burn 策略可绑定、幂等；与同参数 percentage 互为异策略。
+        let mut r = FeeRegistry::new();
+        r.bind(7, burn).unwrap();
+        r.bind(7, burn).unwrap();
+        assert!(r.bind(7, percentage).is_err());
     }
 }

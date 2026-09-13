@@ -1,0 +1,15 @@
+[package]
+name = "poker-settlement-core"
+version = "0.1.0"
+edition = "2024"
+description = "德州扑克结算语义唯一事实源：SettlementPlan / side-pot / run-it-twice / payout_root（plan-appchain §5.2-1）"
+license = "BUSL-1.1"
+
+# wallet-app vendor 快照（zchain 仓库 HEAD，见 wallet-app/README.md "vendor 快照"）：
+# 原 manifest 使用 workspace 继承依赖；此处改写为与根 workspace
+# [workspace.dependencies] 完全一致的具象版本，语义不变。
+[dependencies]
+# 结算核心保持零重依赖：blake2b 摘要 + 稳定 borsh 编码 + 错误派生。
+blake2 = "0.10.6"
+borsh = { version = "1.7", features = ["derive"] }
+thiserror = "1.0.61"

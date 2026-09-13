@@ -33,8 +33,8 @@ export const ZCHAIN_NETWORK_ID = 'zchain-devnet-1';
  */
 export const EIP1193_CHAIN_ID_MAP = {
   'zchain-devnet-1': '0x7a0001', // 7995393
-  'zchain-testnet-1': '0x7a0002', // 0.2 预留（交付前不启用）
-  'zchain-mainnet-1': '0x7a0003', // 预留
+  'zchain-testnet-1': '0x7a0002', // 0.2 起启用（换网交付）
+  'zchain-mainnet-1': '0x7a0003', // 预留；0.2 扩展注册表刻意不登记（红线）
 };
 
 /** 字符串网络 id → EIP-1193 hex chain id；未知网络返回 null（fail-closed）。 */

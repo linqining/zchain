@@ -71,6 +71,10 @@ function mockZchain(over = {}) {
       state.calls.push(['getNotes', filter]);
       return [{ commitment: 'cc'.repeat(32), amount: '50', spendable: true }];
     },
+    switchNetwork: async (networkId) => {
+      state.calls.push(['switchNetwork', networkId]);
+      return { chainId: networkId, kind: networkId.endsWith('testnet-1') ? 'testnet' : 'devnet', changed: true };
+    },
     lock: async () => {
       state.unlocked = false;
       return { locked: true };
@@ -166,15 +170,25 @@ test('07 zchain_signOperation 透传路由：参数原样、结果透传', async
   assert.equal(call[2], ''); // previewHash 原样
 });
 
-test('08 zchain_* 白名单：未知方法 UnknownMethod、0.1 未交付 NotSupportedIn01、缺参 MissingParam', async () => {
-  const { provider: z } = mockZchain({ unlocked: true });
+test('08 zchain_* 白名单：未知方法 UnknownMethod、未交付 NotSupportedIn01、缺参 MissingParam；switchNetwork 0.2 透传', async () => {
+  const { provider: z, state } = mockZchain({ unlocked: true });
   const p = createEip1193Provider({ zchain: z });
   const e1 = await requestError(p.request({ method: 'zchain_foo' }));
   assert.equal(e1.data.zchainCode, 'UnknownMethod');
-  const e2 = await requestError(p.request({ method: 'zchain_switchNetwork', params: { chainId: 'zchain-devnet-1' } }));
+  // 0.2 未交付方法仍 NotSupportedIn01（verifyProof/watchProof 是 proof portal
+  // 的 provider 面，0.2 只交付扩展页 portal）。
+  const e2 = await requestError(p.request({ method: 'zchain_verifyProof', params: { proof: 'x' } }));
   assert.equal(e2.data.zchainCode, 'NotSupportedIn01');
   const e3 = await requestError(p.request({ method: 'zchain_signOperation', params: {} }));
   assert.equal(e3.data.zchainCode, 'MissingParam');
+  // 0.2：switchNetwork（注册表内网络）结构合法并透传到 provider（确认流在后台）。
+  const res = await p.request({ method: 'zchain_switchNetwork', params: { chainId: 'zchain-testnet-1' } });
+  assert.equal(res.chainId, 'zchain-testnet-1');
+  const call = state.calls.find((c) => Array.isArray(c) && c[0] === 'switchNetwork');
+  assert.equal(call[1], 'zchain-testnet-1');
+  // 注册表外网络（mainnet 红线）→ NetworkUnsupported。
+  const e4 = await requestError(p.request({ method: 'zchain_switchNetwork', params: { chainId: 'zchain-mainnet-1' } }));
+  assert.equal(e4.data.zchainCode, 'NetworkUnsupported');
 });
 
 test('09 zchain 结构校验透传：换链不符 → NetworkMismatch（validation.js 同一拒绝面）', async () => {

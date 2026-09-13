@@ -147,7 +147,7 @@ test('09 未知 method → UnknownMethod', () => {
   assert.equal(r.code, 'UnknownMethod');
 });
 
-test('10 0.1 未交付 method（switchNetwork/authorizeSessionKey/verifyProof）→ NotSupportedIn01', () => {
+test('10 未交付 method（authorizeSessionKey/revokeSessionKey/verifyProof/watchProof）→ NotSupportedIn01', () => {
   for (const m of ['zchain_authorizeSessionKey', 'zchain_revokeSessionKey', 'zchain_verifyProof', 'zchain_watchProof']) {
     const r = validateRequest(m, {}, { network: NETWORK });
     assert.equal(r.code, 'NotSupportedIn01', m);
@@ -361,4 +361,47 @@ test('28 信封畸形：缺 envelope / method 缺失 / requestId 过长 → BadE
   assert.equal(noMethod.code, 'BadEnvelope');
   const longId = checkEnvelope(msg({ env: { ...envelope(), requestId: 'x'.repeat(129) } }), ORIGIN, STATE, { now: NOW_MS, grants: GRANTS });
   assert.equal(longId.code, 'BadEnvelope');
+});
+
+// ---------------------------------------------------------------------------
+// Extension 0.2：多网络 switchNetwork 判定面（mainnet 红线 + REAL 展示透传）
+// ---------------------------------------------------------------------------
+
+test('29 换网（0.2）：目标必须是注册表内网络；mainnet/未知网络 → NetworkUnsupported', () => {
+  // testnet：结构合法（0.2 交付真换网；确认流由后台弹窗完成）
+  const t = validateRequest('zchain_switchNetwork', { chainId: 'zchain-testnet-1' }, { network: NETWORK });
+  assert.equal(t.ok, true, t.reason);
+  // 同网切换也结构合法（幂等 no-op 在后台处理）
+  const same = validateRequest('zchain_switchNetwork', { chainId: 'zchain-devnet-1' }, { network: NETWORK });
+  assert.equal(same.ok, true);
+  // mainnet 红线：刻意不注册 → NetworkUnsupported（理由必须明示"刻意"）
+  const m = validateRequest('zchain_switchNetwork', { chainId: 'zchain-mainnet-1' }, { network: NETWORK });
+  assert.equal(m.code, 'NetworkUnsupported');
+  assert.match(m.reason, /intentionally not configured/);
+  // 任意未知网络
+  const junk = validateRequest('zchain_switchNetwork', { chainId: '0x1' }, { network: NETWORK });
+  assert.equal(junk.code, 'NetworkUnsupported');
+  // 缺参
+  const missing = validateRequest('zchain_switchNetwork', {}, { network: NETWORK });
+  assert.equal(missing.code, 'MissingParam');
+  // 换网恒需显式确认（权限最小化纵深）
+  assert.equal(requiresExplicitConfirm({ method: 'zchain_switchNetwork', params: { chainId: 'zchain-testnet-1' }, origin: ORIGIN }, { grants: GRANTS }), true);
+});
+
+test('30 REAL 签名面 0.2 仍关闭（0.2 只交付隔离展示，不暗示可提现）→ AssetClassDisabledIn01', () => {
+  const r = validateRequest('zchain_signOperation', { operation: validTransfer({ assetClass: 'REAL' }), previewHash: 'f'.repeat(64) }, { network: NETWORK });
+  assert.equal(r.code, 'AssetClassDisabledIn01');
+  assert.match(r.reason, /display-only/);
+});
+
+test('31 脱敏透传：asset_class 仅在显式提供（REAL/PLAY）时透传，其余一律不推断', () => {
+  const out = sanitizeNotesForPage([
+    { commitment: 'ab'.repeat(32), amount: '5', table_id: null, proof: 'soft', spendable: true, asset_class: 'REAL', spend_secret: 'ff'.repeat(32) },
+    { commitment: 'cd'.repeat(32), amount: '6', table_id: null, proof: 'soft', spendable: true, asset_class: 'PLAY' },
+    { commitment: 'ee'.repeat(32), amount: '7', table_id: null, proof: 'soft', spendable: true, asset_class: 'POINTS' },
+  ]);
+  assert.equal(out[0].assetClass, 'REAL');
+  assert.equal(out[1].assetClass, 'PLAY');
+  assert.equal(out[2].assetClass, undefined); // 未知类不透传
+  assert.ok(!JSON.stringify(out).includes('spend_secret'));
 });

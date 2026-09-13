@@ -16,6 +16,51 @@
 //! 2. 某轮的 "leader" vertex 被后续轮 ≥2/3 vertex 间接引用 → 形成 commit
 //! 3. commit 内所有 vertex 按 (round, author_index) 线性排序
 //! 4. 排序后的 tx 聚合 + S9/R4-M4 排序 → 产出 block
+//!
+//! ## 恰 quorum 存活 commit 停滞修复（canonical leader 候选序）
+//!
+//! 根因（7 节点 kill-2 演练实测，全活阶段即复现）：validator loop 旧实现按本地
+//! `max_r-4..max_r-1` 滑窗 + DAG 插入序取「首个满足 quorum 的候选 leader」。
+//! 窗口边界是本地量：本节点刚出 vertex 则 `max_r` 已前移、peer 尚未同步则落后，
+//! 随各节点生产节奏错位；同轮候选又按各自到达序排列。于是不同节点对同一份
+//! DAG 推断出不同的首候选 leader → 对不同 `cert_signing_hash` 签票 → 票数分裂
+//! （实测 2/4/1），恰 quorum 存活（7 杀 2 余 5，quorum=5）时任何单个 cert 都
+//! 凑不齐 5 票：DAG/vertex 平面健康推进（round 1300+）而链 tip 停滞。
+//!
+//! 修复分四层（L1 在本模块，L2/L4/L5 在 validator loop 侧接入）：
+//! - **L1 规范化候选序** [`canonical_commit_candidates`]：候选集改为
+//!   (DAG 内容, committed 集) 的**纯函数** —— 全量未提交 vertex 按
+//!   (round asc, author_pubkey asc, vertex_hash asc) 全序排列，配
+//!   [`has_quorum_distinct_author_references`] 廉价预检。收敛性依据：
+//!   (1) 全序与本地扫描时刻 / 插入序 / max_r 无关；(2) 引用计数只增、committed
+//!   只增，故「首个过 quorum 的未提交候选」在各节点视角收敛前保持不变，落后
+//!   节点下一生产周期自然汇入同一 cert —— 投票单调累积而非随窗口滑走。
+//! - **L2 成熟度门**（validator loop）：只考虑 round ≤ max_r-2 的候选，引用轮
+//!   落后前沿一整轮、引用集基本冻结，降低投影随 gossip 漂移的窗口。
+//! - **投影缺口 fail-closed**（本就由 [`bullshark_linear_order`] 的祖先存在性
+//!   检查承担）：本地 DAG 缺历史 round 时投影构造直接失败，validator loop 弃权
+//!   不投票 —— 缺口视角不可能产出「偏小但可用」的投影去分裂 cert。
+//! - **L4 意图稳定门**（validator loop）：连续两个生产周期 (height, leader,
+//!   投影) 一致才签票，杜绝视角收敛期内同一节点对同一高度双票。
+//! - **L5 投票钉扎 + 池内 last-write-wins**（validator loop + VoteCollector）：
+//!   (epoch, commit_round) 内已签票即钉扎，钉扎期内拒绝为不同 cert 再签
+//!   （fail-closed）； VoteCollector 按 (epoch, commit_round, signer) 只保留
+//!   最新一票 —— signer 重票**替换**旧票，旧 cert 失去其票，任何时刻池内总票数
+//!   ≤ validator 数，两个 5 票 quorum 在 n=7 下不可能同时成立（5+5 > 7）。
+//!   钉扎超时（高度长期未决策）才释放重投，作为视图长期分歧的活性逃生口。
+//! - **L6 前沿缺席分类**（validator loop 引用轮闭合检查 + 本模块
+//!   [`author_has_vertex_since`]/[`COMMIT_ABSENCE_ROUNDS`]）：kill-2 后存活恰
+//!   = quorum 时，掉线 validator 的后续轮 vertex 永不到来，闭合检查把「永久
+//!   缺席」当「gossip 在途」无限等待，且候选 (round asc) 序最老者优先 ——
+//!   含缺席作者的老候选每周期触发整体弃权，全网 commit 冻死（二次盘点复验
+//!   实测：阈值/聚合演练该场景必现）。前沿前移 [`COMMIT_ABSENCE_ROUNDS`] 轮
+//!   且作者自待检轮起无任何 vertex → 按离线处理，引用集视为已冻结。分类是
+//!   DAG 内容纯函数，无新 cert 分裂源；finality 口径不变（2/3 签名 quorum
+//!   仍按全集 validator 数）。修复后 kill-2 演练第 1 次尝试即 PASS=9（修复前
+//!   连续 3 次全败）。
+//!
+//! 权威判定仍由 [`detect_commit_leader`] 承担（本模块函数只做排序、预检与
+//! 完整性校验）。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -181,6 +226,235 @@ pub fn detect_commit_leader(
     }
 }
 
+/// 规范化 commit-leader 候选序（恰 quorum 存活 commit 停滞修复，见模块头注释）。
+///
+/// 枚举全部**未提交** vertex，按 (round asc, author_pubkey 字节序 asc,
+/// vertex_hash asc) 全序返回。该序与本地扫描时刻、DAG 插入序、本地 max_r 无关：
+/// 任何持有相同 DAG 内容与 committed 集的节点必然得到同一候选序列，从而对同一
+/// 首候选 leader 构造同一 `cert_signing_hash` —— commit 投票得以跨节点汇聚。
+///
+/// 参数：
+/// - `dag`：DAG 存储
+/// - `committed`：已提交 vertex 集（tip 链投影；调用方经 block import 保持一致）
+pub fn canonical_commit_candidates(dag: &Dag, committed: &BTreeSet<Hash>) -> Vec<Hash> {
+    let mut candidates: Vec<Hash> = Vec::new();
+    // rounds 为 BTreeMap：升序迭代即 round 全序；轮内再按 (author, hash) 规范化，
+    // 消除插入序差异。代价 O(轮数 × 轮内顶点 log)，且首轮命中即停的调用方可提前截断。
+    for (_, hashes) in &dag.rounds {
+        let mut round_candidates: Vec<Hash> = hashes
+            .iter()
+            .filter(|hash| !committed.contains(*hash))
+            .copied()
+            .collect();
+        if round_candidates.len() > 1 {
+            round_candidates.sort_by(|a, b| {
+                match (dag.get(a), dag.get(b)) {
+                    (Some(va), Some(vb)) => va
+                        .author_pubkey
+                        .to_bytes()
+                        .cmp(&vb.author_pubkey.to_bytes())
+                        // 同 author 兜底按 hash 决胜（validated DAG 同 author 同轮唯一，
+                        // 此支路仅为防御索引不一致时保持确定性）。
+                        .then_with(|| a.cmp(b)),
+                    _ => a.cmp(b),
+                }
+            });
+        }
+        candidates.extend(round_candidates);
+    }
+    candidates
+}
+
+/// 投影尝试结果：成功的规范未提交序 + 本地缺失的未提交祖先清单。
+///
+/// 恰 quorum 存活修复：本地 DAG 缺口（晚启动/丢 gossip/重启）曾是投票分歧的
+/// 根源 —— 缺口节点要么投影失败弃权（恰 quorum 时少一票即全网停滞），要么对
+/// 同一 leader 产出不同投影签出分裂票。把「缺了哪些 vertex（含期望轮次）」
+/// 显式返回，调用方可向 peer **定向请求补洞**（RequestVerticesByRange），使
+/// 全部节点视角收敛到同一投影 —— 这正是 [`bullshark_linear_order`] 注释中
+/// "callers should request the missing vertex from the peer and retry" 的落地。
+#[derive(Debug, Clone, Default)]
+pub struct CommitProjectionAttempt {
+    /// 规范未提交投影（已按 (round, author, hash) 排序；有缺失时为空序）。
+    pub ordered_hashes: Vec<Hash>,
+    /// 缺失的未提交祖先：(vertex hash, 期望轮次)。非空时 ordered_hashes 为空。
+    pub missing: Vec<(Hash, Round)>,
+}
+
+/// 尝试构造 leader 的规范未提交投影（祖先遍历不降入已提交 vertex）。
+///
+/// 遍历中遇到的「本地缺失 vertex」不使投影失败，而是记入 `missing`（连同从
+/// 引用边推导的期望轮次：parent 的轮次 = child.round - 1；根引用顶点缺失时
+/// 记 `missing_root_round`）。调用方据 missing 列表定向补洞后重试即可收敛。
+///
+/// 参数：
+/// - `dag`：DAG 存储
+/// - `commit_hashes`：leader 的引用集（detect_commit_leader.referencing_hashes）
+/// - `committed`：已提交 vertex 集（祖先封闭；遍历不降入其中）
+/// - `missing_root_round`：根引用顶点缺失时报告的期望轮次（= leader_round + 1）
+pub fn attempt_commit_projection(
+    dag: &Dag,
+    commit_hashes: &[Hash],
+    committed: &BTreeSet<Hash>,
+    missing_root_round: Round,
+) -> CommitProjectionAttempt {
+    let mut all_hashes: BTreeSet<Hash> = BTreeSet::new();
+    let mut missing: BTreeMap<Round, BTreeSet<Hash>> = BTreeMap::new();
+    // (hash, 期望轮次) —— 缺失 hash 无本地 round 信息，沿引用边推导。
+    let mut stack: Vec<(Hash, Round)> = commit_hashes
+        .iter()
+        .map(|hash| (*hash, missing_root_round))
+        .collect();
+    let mut visited: BTreeSet<Hash> = BTreeSet::new();
+    while let Some((hash, round)) = stack.pop() {
+        if !visited.insert(hash) {
+            continue;
+        }
+        // 已提交：其祖先必然已提交（祖先封闭），不纳入投影也不下钻。
+        if committed.contains(&hash) {
+            continue;
+        }
+        let Some(vertex) = dag.get(&hash) else {
+            // 未提交且本地缺失 → 记入缺失清单（fail-closed：不产出偏小投影）。
+            all_hashes.remove(&hash);
+            missing.entry(round).or_default().insert(hash);
+            continue;
+        };
+        all_hashes.insert(hash);
+        let parent_round = round.saturating_sub(1);
+        for parent in &vertex.parent_hashes {
+            if !visited.contains(parent) {
+                stack.push((*parent, parent_round));
+            }
+        }
+    }
+    if !missing.is_empty() {
+        return CommitProjectionAttempt {
+            ordered_hashes: Vec::new(),
+            missing: missing
+                .into_iter()
+                .flat_map(|(round, hashes)| {
+                    hashes.into_iter().map(move |hash| (hash, round))
+                })
+                .collect(),
+        };
+    }
+    // 转为 Vec 并按 (round, author_pubkey_bytes) 排序（与 bullshark_linear_order 同序）。
+    let mut sorted: Vec<Hash> = all_hashes.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let va = dag.get(a).expect("validated vertex must exist in DAG");
+        let vb = dag.get(b).expect("validated vertex must exist in DAG");
+        va.round.cmp(&vb.round).then_with(|| {
+            va.author_pubkey
+                .to_bytes()
+                .cmp(&vb.author_pubkey.to_bytes())
+        })
+        .then_with(|| a.cmp(b))
+    });
+    CommitProjectionAttempt {
+        ordered_hashes: sorted,
+        missing: Vec::new(),
+    }
+}
+
+/// 扫描 [from_round, to_round] 中 vertex 引用的、本地 DAG 缺失的 parent。
+///
+/// 返回 (缺失 hash, 期望轮次 = child.round - 1) 按轮升序去重列表。用于检测
+/// 「引用叶缺口」：round-r 的 leader 其引用集 = round-(r+1) 中引用它的 vertex，
+/// 缺失的引用叶自身不在任何祖先路径上，投影/预检都不会报错，但会让不同节点
+/// 的引用集（进而投影）不同 —— 通过其下轮子顶点的 parent 指针即可定位缺失。
+pub fn find_missing_parent_vertices(
+    dag: &Dag,
+    from_round: Round,
+    to_round: Round,
+) -> Vec<(Hash, Round)> {
+    let mut missing: BTreeMap<Round, BTreeSet<Hash>> = BTreeMap::new();
+    for (&round, hashes) in dag.rounds.range(from_round..=to_round) {
+        for hash in hashes {
+            let Some(vertex) = dag.get(hash) else {
+                continue;
+            };
+            for parent in &vertex.parent_hashes {
+                if dag.get(parent).is_none() {
+                    missing
+                        .entry(round.saturating_sub(1))
+                        .or_default()
+                        .insert(*parent);
+                }
+            }
+        }
+    }
+    missing
+        .into_iter()
+        .flat_map(|(round, hashes)| hashes.into_iter().map(move |hash| (hash, round)))
+        .collect()
+}
+
+/// 「前沿缺席」窗口（恰 quorum 存活活性修复，validator loop 引用轮闭合检查
+/// 的配套原语）：validator 的 vertex 生产是逐轮连续的（每生产周期恰一轮），
+/// 健康作者的最新 vertex 与全网 `max_round` 的差距恒小于该窗口。前沿已前移
+/// 本窗口那么多轮、而某作者自待检轮起仍无任何 vertex，即可判定其离线 ——
+/// 其后续轮次的 vertex 永远不会到来，闭合检查对其无限等待只会把恰 quorum
+/// 存活（kill-2 后存活恰 = quorum）的全网 commit 冻死（7 节点演练实测：
+/// DAG/vertex 平面持续推进而链 tip 停滞）。
+pub const COMMIT_ABSENCE_ROUNDS: Round = 4;
+
+/// 作者自 `min_round` 起（含）在 DAG 中是否有任何 vertex。
+///
+/// 「前沿缺席」分类原语：与 [`canonical_commit_candidates`] 一样是 DAG 内容
+/// 的纯函数 —— 持有相同 DAG 内容的节点必然得到相同分类，因此把它用于
+/// 投影闭合判定不引入新的 cert 分裂源（gossip 收敛窗口期由 validator loop
+/// 的 L4 意图稳定门兜底）。finality 口径不受影响：cert 的 2/3 签名 quorum
+/// 与引用 quorum 仍按全集 validator 数执行。
+pub fn author_has_vertex_since(dag: &Dag, author: &[u8], min_round: Round) -> bool {
+    for (_, hashes) in dag.rounds.range(min_round..) {
+        for hash in hashes {
+            if let Some(v) = dag.get(hash)
+                && v.author_pubkey.to_bytes().as_slice() == author
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 廉价 quorum 预检：统计引用某 vertex 的不同 author 数是否已达 quorum。
+///
+/// validate_vertex 保证 parent 恰好位于 vertex.round-1，因此 round-r vertex 的
+/// 引用者只可能出现在 r+1 轮 —— 本检查与 [`detect_commit_leader`] 的全轮扫描在
+/// 已验证 DAG 上等价，但把单候选成本从 O(全 DAG 顶点) 降到 O(r+1 轮顶点)，使得
+/// 「全量候选逐个预检」的开销可忽略。候选的权威判定与 CommitLeader 构造仍由
+/// 调用方随后调用 [`detect_commit_leader`] 完成。
+///
+/// 参数：
+/// - `dag`：DAG 存储
+/// - `leader_hash`：待预检的 vertex hash
+/// - `validator_count`：当前 validator 集规模（quorum 口径与 detect 一致）
+pub fn has_quorum_distinct_author_references(
+    dag: &Dag,
+    leader_hash: &Hash,
+    validator_count: usize,
+) -> bool {
+    let leader = match dag.get(leader_hash) {
+        Some(leader) => leader,
+        None => return false,
+    };
+    let required = required_quorum(validator_count);
+    let mut unique_validators: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for child_hash in dag.round_vertices(leader.round + 1) {
+        if let Some(child) = dag.get(child_hash)
+            && child.parent_hashes.contains(leader_hash)
+        {
+            unique_validators.insert(child.author_pubkey.to_bytes());
+            if unique_validators.len() >= required {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// 获取 vertex 的所有祖先（递归遍历 parent_hashes，含自身）。
 fn collect_ancestors(dag: &Dag, hash: &Hash) -> Vec<Hash> {
     let mut visited: BTreeSet<Hash> = BTreeSet::new();
@@ -253,19 +527,73 @@ pub fn bullshark_linear_order(dag: &Dag, commit_hashes: &[Hash]) -> PokerL1Resul
 /// Return the canonical Bullshark order after removing vertices already materialized in an
 /// earlier block.
 ///
-/// The DAG deliberately retains committed frontier vertices because later vertices reference
+/// The DAG deliberately retains committed frontier vertices because later rounds reference
 /// them.  They must remain available for ancestry traversal, but their transactions must never be
 /// executed twice.  Keeping this filtering in the consensus module makes the committed-frontier
 /// rule explicit and gives every producer the same projection primitive.
+///
+/// 恰 quorum 存活修复：祖先遍历**不降入已提交 vertex**。committed 集按构造是
+/// 祖先封闭的（每个投影 = 全体祖先 − 更早已提交），因此已提交 vertex 的祖先
+/// 必然已提交，继续下钻只会要求节点持有它早已「提交并遗忘」的历史 —— 晚启动 /
+/// 重启 / 丢 gossip 的节点其 live DAG 缺历史 round，旧遍历会永久性投影失败，
+/// 节点从此无法签 commit 票；恰 quorum 存活（5/7）时少一个投票者即全网停滞。
+/// 剪枝后，投影只依赖已提交边界之上的未提交区（近期 gossip，视角天然收敛），
+/// 缺口节点随 block import 补齐 committed 集后自动恢复投票资格，且所有节点对
+/// 同一 (DAG, committed) 仍得到逐位相同的投影。
 pub fn bullshark_linear_order_uncommitted(
     dag: &Dag,
     commit_hashes: &[Hash],
     committed: &BTreeSet<Hash>,
 ) -> PokerL1Result<Vec<Hash>> {
-    Ok(bullshark_linear_order(dag, commit_hashes)?
-        .into_iter()
-        .filter(|hash| !committed.contains(hash))
-        .collect())
+    let mut all_hashes: BTreeSet<Hash> = BTreeSet::new();
+    let mut visited: BTreeSet<Hash> = BTreeSet::new();
+    let mut stack: Vec<Hash> = commit_hashes.to_vec();
+    while let Some(hash) = stack.pop() {
+        if !visited.insert(hash) {
+            continue;
+        }
+        // 已提交：其祖先必然已提交（祖先封闭），不纳入投影也不下钻。
+        if committed.contains(&hash) {
+            continue;
+        }
+        all_hashes.insert(hash);
+        if let Some(vertex) = dag.get(&hash) {
+            for parent in &vertex.parent_hashes {
+                if !visited.contains(parent) {
+                    stack.push(*parent);
+                }
+            }
+        }
+    }
+
+    // Never let an incomplete DAG turn deterministic ordering into a panic.  A commit can only
+    // be projected when every *uncommitted* referenced vertex is present locally; callers should
+    // request the missing vertex from the peer and retry instead of producing a partial block.
+    for hash in &all_hashes {
+        if dag.get(hash).is_none() {
+            return Err(PokerL1Error::DagVertexNotFound);
+        }
+    }
+
+    // 转为 Vec 并按 (round, author_pubkey_bytes) 排序
+    let mut sorted: Vec<Hash> = all_hashes.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let va = dag.get(a).expect("validated vertex must exist in DAG");
+        let vb = dag.get(b).expect("validated vertex must exist in DAG");
+        // 先按 round 排序
+        va.round
+            .cmp(&vb.round)
+            // 同 round 按 author_pubkey_bytes 排序
+            .then_with(|| {
+                va.author_pubkey
+                    .to_bytes()
+                    .cmp(&vb.author_pubkey.to_bytes())
+            })
+            // 同 author 按 vertex_hash 排序（确定性）
+            .then_with(|| a.cmp(b))
+    });
+
+    Ok(sorted)
 }
 
 /// Block 投影结果（SubTask 9.3）。
@@ -613,7 +941,7 @@ fn bitmap_set_bits(bitmap: &[u8]) -> Vec<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::consensus::{DagVertex, MAX_VERTEX_SIZE};
+    use crate::consensus::{DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE};
     use crate::signature::TaggedPubkey;
     use crate::signature::tagged_pubkey::{SignatureScheme, encode_tag};
     use crate::transaction::{Gas, RouteHint, TxLane};
@@ -633,6 +961,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: parents,
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         }
     }
 
@@ -712,6 +1041,32 @@ mod tests {
         assert_eq!(dag.max_round(), Some(3));
     }
 
+    // ===== 前沿缺席分类原语（恰 quorum 存活活性修复） =====
+
+    #[test]
+    fn author_has_vertex_since_classifies_frontier_absence() {
+        let mut dag = Dag::new();
+        let a1 = dag.insert(make_vertex(1, 1, 0x10, vec![]));
+        let b1 = dag.insert(make_vertex(1, 1, 0x11, vec![]));
+        let _c1 = dag.insert(make_vertex(1, 1, 0x12, vec![]));
+        // round 2：0x10/0x11 出 vertex，0x12 离线不再产出。
+        dag.insert(make_vertex(1, 2, 0x10, vec![a1]));
+        dag.insert(make_vertex(1, 2, 0x11, vec![b1]));
+
+        let a_bytes = make_tagged_pubkey(0x10).to_bytes();
+        let b_bytes = make_tagged_pubkey(0x11).to_bytes();
+        let c_bytes = make_tagged_pubkey(0x12).to_bytes();
+
+        // 0x10 在 round 2 有 vertex；0x12 自 round 2 起缺席。
+        assert!(author_has_vertex_since(&dag, &a_bytes, 2));
+        assert!(author_has_vertex_since(&dag, &b_bytes, 2));
+        assert!(!author_has_vertex_since(&dag, &c_bytes, 2));
+        // 0x12 在 round 1（含）起仍有 vertex —— 缺席是相对待检轮的。
+        assert!(author_has_vertex_since(&dag, &c_bytes, 1));
+        // 自 round 3 起无人有 vertex（前沿未到）。
+        assert!(!author_has_vertex_since(&dag, &a_bytes, 3));
+    }
+
     // ===== detect_commit_leader 测试（SubTask 9.1） =====
 
     #[test]
@@ -773,6 +1128,312 @@ mod tests {
         let unknown = [0xFF; 32];
         let err = detect_commit_leader(&dag, &unknown, 4).unwrap_err();
         assert!(matches!(err, PokerL1Error::DagVertexNotFound));
+    }
+
+    // ===== canonical commit-leader 候选序测试（恰 quorum 存活 commit 停滞修复） =====
+
+    /// 构造「每轮全 fan」健康 DAG 的 vertex 集：authors 各出 1 vertex/轮，
+    /// round>1 的 vertex 引用上一轮全部 vertex。返回 round → 按构造序的 vertex 列表。
+    fn build_fan_vertices(max_round: Round, authors: &[u8]) -> BTreeMap<Round, Vec<DagVertex>> {
+        let mut by_round: BTreeMap<Round, Vec<DagVertex>> = BTreeMap::new();
+        for round in 1..=max_round {
+            for &author in authors {
+                let parents: Vec<Hash> = if round == 1 {
+                    vec![]
+                } else {
+                    by_round[&(round - 1)]
+                        .iter()
+                        .map(|vertex| vertex.vertex_hash())
+                        .collect()
+                };
+                by_round
+                    .entry(round)
+                    .or_default()
+                    .push(make_vertex(1, round, author, parents));
+            }
+        }
+        by_round
+    }
+
+    /// 构造「每轮全 fan」健康 DAG：authors 各出 1 vertex/轮，round>1 的 vertex
+    /// 引用上一轮全部 vertex。返回 round → 按插入序的 vertex hash 列表。
+    fn build_fan_dag(
+        dag: &mut Dag,
+        max_round: Round,
+        authors: &[u8],
+    ) -> BTreeMap<Round, Vec<Hash>> {
+        let mut by_round: BTreeMap<Round, Vec<Hash>> = BTreeMap::new();
+        for (round, vertices) in build_fan_vertices(max_round, authors) {
+            let hashes: Vec<Hash> = vertices.into_iter().map(|vertex| dag.insert(vertex)).collect();
+            by_round.insert(round, hashes);
+        }
+        by_round
+    }
+
+    /// 旧 validator loop 选择逻辑（窗口 max_r-4..max_r-1 + 插入序 + 逐个 detect，
+    /// committed 检查在 detect 之后）—— 仅用于测试对照，演示窗口错位下的分歧。
+    fn legacy_window_first_candidate(
+        dag: &Dag,
+        committed: &BTreeSet<Hash>,
+        validator_count: usize,
+    ) -> Option<Hash> {
+        let max_r = dag.max_round()?;
+        if max_r < 2 {
+            return None;
+        }
+        let scan_start = max_r.saturating_sub(4).max(1);
+        for round in scan_start..max_r {
+            for vh in dag.round_vertices(round) {
+                let detect_passes = matches!(
+                    detect_commit_leader(dag, vh, validator_count),
+                    Ok(Some(_))
+                );
+                if detect_passes && !committed.contains(vh) {
+                    return Some(*vh);
+                }
+            }
+        }
+        None
+    }
+
+    /// 新 validator loop 选择逻辑（规范化候选序 + quorum 预检，取首个命中）。
+    fn canonical_first_candidate(
+        dag: &Dag,
+        committed: &BTreeSet<Hash>,
+        validator_count: usize,
+    ) -> Option<Hash> {
+        canonical_commit_candidates(dag, committed)
+            .into_iter()
+            .find(|hash| has_quorum_distinct_author_references(dag, hash, validator_count))
+    }
+
+    /// 复现生产路径的 cert 签名对象：leader 权威检测 → 未提交规范投影 → cert
+    /// signing_hash（与 main.rs compute_cert_signing_hash 的投影输入一致）。
+    fn cert_statement_hash(
+        dag: &Dag,
+        leader_hash: &Hash,
+        committed: &BTreeSet<Hash>,
+        validator_count: usize,
+    ) -> Hash {
+        let leader = detect_commit_leader(dag, leader_hash, validator_count)
+            .expect("detect 应成功")
+            .expect("leader 应满足 quorum");
+        let ordered =
+            bullshark_linear_order_uncommitted(dag, &leader.referencing_hashes, committed)
+                .expect("投影应成功");
+        assert!(!ordered.is_empty());
+        let cert = DagCommitCertificate {
+            epoch: 1,
+            commit_round: 4,
+            prev_commit_hash: [0xAB; 32],
+            vertex_hash_list: ordered,
+            round_attendance_bitmap: vec![0xFF],
+            state_root: [7u8; 32],
+            public_tx_root: [8u8; 32],
+            gameturn_tx_root: [9u8; 32],
+            signature_list: vec![],
+            signer_bitmap: vec![0x00],
+        };
+        cert.signing_hash(crate::DEFAULT_CHAIN_ID)
+    }
+
+    #[test]
+    fn canonical_candidates_converge_across_misaligned_node_views() {
+        // 5 validators（quorum = 2*5/3+1 = 4），rounds 1..5 全 fan DAG。
+        // 三个节点视角模拟窗口/插入序错位 —— 注意 vertex 内容全网唯一（作者一次
+        // 构造、gossip 分发），各视角差异只在本地 Dag 的插入（到达）顺序与可见轮次：
+        //   X：到达序 author 升序（完整 DAG，max_r=5）
+        //   P：到达序 author 降序（完整 DAG，max_r=5）
+        //   Q：到达序 author 降序且尚未收到 round 5（落后一轮，max_r=4）
+        // committed = rounds 1..2（链已提交到那里，三节点 tip 一致）。
+        const AUTHORS: [u8; 5] = [0x10, 0x11, 0x12, 0x13, 0x14];
+        let authors_rev: Vec<u8> = AUTHORS.iter().rev().copied().collect();
+
+        // 一次构造同一组 vertex（作者视角，author 升序），再按不同到达序装入各节点。
+        let by_round = build_fan_vertices(5, &AUTHORS);
+        let committed: BTreeSet<Hash> = by_round
+            .iter()
+            .filter(|(round, _)| **round <= 2)
+            .flat_map(|(_, vertices)| vertices.iter().map(|vertex| vertex.vertex_hash()))
+            .collect();
+
+        // 按给定 author 到达序装入选定轮次的 vertex（内容全网一致；
+        // by_round 以 AUTHORS 升序构造，索引即 author 位次）。
+        let insert_arrival_order =
+            |rounds: std::ops::RangeInclusive<Round>, authors_order: &[u8]| -> Dag {
+                let mut dag = Dag::new();
+                for round in rounds {
+                    for author in authors_order {
+                        if let Some(idx) = AUTHORS.iter().position(|a| a == author) {
+                            dag.insert(by_round[&round][idx].clone());
+                        }
+                    }
+                }
+                dag
+            };
+        let dag_x = insert_arrival_order(1..=5, &AUTHORS);
+        let dag_p = insert_arrival_order(1..=5, &authors_rev);
+        let dag_q = insert_arrival_order(1..=4, &authors_rev);
+        // 三视角可见部分内容一致（同 tip 链投影 → 同 committed 集）。
+        assert_eq!(dag_x.len(), 25);
+        assert_eq!(dag_p.len(), 25);
+        assert_eq!(dag_q.len(), 20);
+
+        // --- 旧逻辑：窗口 + 插入序 → 不同视角选出不同首候选（根因演示） ---
+        let legacy_x = legacy_window_first_candidate(&dag_x, &committed, 5);
+        let legacy_p = legacy_window_first_candidate(&dag_p, &committed, 5);
+        let legacy_q = legacy_window_first_candidate(&dag_q, &committed, 5);
+        assert_ne!(
+            legacy_x, legacy_p,
+            "插入序错位时旧逻辑应选出不同 leader（根因）"
+        );
+        assert_ne!(
+            legacy_x, legacy_q,
+            "窗口/插入序错位时旧逻辑应选出不同 leader（根因）"
+        );
+
+        // --- 新逻辑：规范化候选序 → 三视角收敛到同一 leader ---
+        let pick_x = canonical_first_candidate(&dag_x, &committed, 5);
+        let pick_p = canonical_first_candidate(&dag_p, &committed, 5);
+        let pick_q = canonical_first_candidate(&dag_q, &committed, 5);
+        assert_eq!(pick_x, pick_p, "插入序不同不应改变首候选");
+        assert_eq!(
+            pick_x, pick_q,
+            "落后一轮的视角（max_r 错位）应选出同一 leader"
+        );
+        let pick = pick_x.expect("应存在 quorum 候选");
+        // 首候选必须是 round 3 中 author 字节序最小者（rounds 1..2 已提交）。
+        assert_eq!(pick, by_round[&3][0].vertex_hash());
+
+        // cert 签名对象收敛：三视角对同一 leader 构造出同一 signing_hash。
+        let hash_x = cert_statement_hash(&dag_x, &pick, &committed, 5);
+        let hash_p = cert_statement_hash(&dag_p, &pick, &committed, 5);
+        let hash_q = cert_statement_hash(&dag_q, &pick, &committed, 5);
+        assert_eq!(hash_x, hash_p, "cert signing_hash 必须跨插入序收敛");
+        assert_eq!(hash_x, hash_q, "cert signing_hash 必须跨 max_r 错位收敛");
+    }
+
+    #[test]
+    fn canonical_candidates_order_and_committed_filter() {
+        // round 1: authors 0x11 先插、0x10 后插（插入序与规范序相反）
+        // round 2: 全 fan 引用；committed = round 1 全部。
+        let mut dag = Dag::new();
+        let h11 = dag.insert(make_vertex(1, 1, 0x11, vec![]));
+        let h10 = dag.insert(make_vertex(1, 1, 0x10, vec![]));
+        let mut round2 = vec![dag.insert(make_vertex(1, 2, 0x12, vec![h10, h11]))];
+        round2.push(dag.insert(make_vertex(1, 2, 0x10, vec![h10, h11])));
+
+        let committed: BTreeSet<Hash> = [h10, h11].into_iter().collect();
+        let candidates = canonical_commit_candidates(&dag, &committed);
+        assert_eq!(
+            candidates,
+            vec![round2[1], round2[0]],
+            "候选应为 round 2 全部未提交 vertex，author 升序（0x10 在 0x12 前）"
+        );
+        assert!(canonical_commit_candidates(&dag, &BTreeSet::new()).len() == 4);
+    }
+
+    #[test]
+    fn canonical_scan_skips_unreferenced_straggler_without_stalling() {
+        // 迟到 straggler：author 0x15 的 round-3 vertex 在 round-4 全 fan 之后才插入，
+        // 没有任何 round-4 vertex 引用它（引用集已冻结）→ 永远不满足 quorum。
+        // 规范化扫描必须跳过它并继续选中下一规范候选，不得阻塞 commit。
+        const AUTHORS: [u8; 5] = [0x10, 0x11, 0x12, 0x13, 0x14];
+        let mut dag = Dag::new();
+        let by_round = build_fan_dag(&mut dag, 4, &AUTHORS);
+        let straggler = dag.insert(make_vertex(1, 3, 0x15, by_round[&2].clone()));
+
+        let committed: BTreeSet<Hash> = by_round
+            .iter()
+            .filter(|(round, _)| **round <= 2)
+            .flat_map(|(_, hashes)| hashes.iter().copied())
+            .collect();
+
+        let pick = canonical_first_candidate(&dag, &committed, 5).expect("应存在 quorum 候选");
+        assert_ne!(pick, straggler, "无引用 straggler 不得成为候选");
+        assert_eq!(pick, by_round[&3][0], "应选中 round 3 规范首候选");
+        // straggler 在候选序列中存在（未提交），但被 quorum 预检过滤。
+        assert!(canonical_commit_candidates(&dag, &committed).contains(&straggler));
+        assert!(!has_quorum_distinct_author_references(
+            &dag, &straggler, 5
+        ));
+    }
+
+    #[test]
+    fn has_quorum_precheck_matches_detect_commit_leader_on_all_vertices() {
+        const AUTHORS: [u8; 5] = [0x10, 0x11, 0x12, 0x13, 0x14];
+        let mut dag = Dag::new();
+        let by_round = build_fan_dag(&mut dag, 4, &AUTHORS);
+        let straggler = dag.insert(make_vertex(1, 3, 0x15, by_round[&2].clone()));
+
+        for hashes in by_round.values() {
+            for hash in hashes {
+                let precheck = has_quorum_distinct_author_references(&dag, hash, 5);
+                let detect = matches!(
+                    detect_commit_leader(&dag, hash, 5),
+                    Ok(Some(_))
+                );
+                assert_eq!(precheck, detect, "预检与权威检测必须等价（validated DAG）");
+            }
+        }
+        assert!(!has_quorum_distinct_author_references(
+            &dag, &straggler, 5
+        ));
+    }
+
+    #[test]
+    fn projection_prunes_committed_ancestry_and_fails_closed_on_uncommitted_gap() {
+        // 晚启动节点的 live DAG 缺历史 round（gossip 一次性，不会回补）。
+        // 投影遍历不降入已提交 vertex：committed 集祖先封闭，历史缺口不再阻断
+        // 投影 —— 缺口节点随 block import 补齐 committed 集后，投影与完整视角
+        // 逐位一致（cert hash 收敛、恢复投票资格）。
+        const AUTHORS: [u8; 5] = [0x10, 0x11, 0x12, 0x13, 0x14];
+        let mut full = Dag::new();
+        let by_round = build_fan_dag(&mut full, 4, &AUTHORS);
+
+        let committed: BTreeSet<Hash> = by_round
+            .iter()
+            .filter(|(round, _)| **round <= 2)
+            .flat_map(|(_, hashes)| hashes.iter().copied())
+            .collect();
+        // 与生产路径一致：投影的 commit_hashes = leader 的引用集（round 4 顶点，
+        // 它们引用全部 round-3 作者）。
+        let referencing: Vec<Hash> = by_round[&4].clone();
+        let projection =
+            bullshark_linear_order_uncommitted(&full, &referencing, &committed).unwrap();
+        assert!(!projection.is_empty());
+
+        // 缺口视角：live DAG 仅装入 rounds 3-4（历史 rounds 1-2 缺失，但已提交）。
+        let mut gapped = Dag::new();
+        for round in 3..=4 {
+            for hash in &by_round[&round] {
+                let vertex = full.get(hash).unwrap().clone();
+                gapped.insert(vertex);
+            }
+        }
+        let gapped_projection =
+            bullshark_linear_order_uncommitted(&gapped, &referencing, &committed).unwrap();
+        assert_eq!(
+            gapped_projection, projection,
+            "committed 集覆盖历史缺口时，缺口节点投影必须与完整视角逐位一致"
+        );
+
+        // fail-closed 保持：缺口落在**未提交**区（round 3 的部分 vertex 缺失）时，
+        // 投影构造仍然必须失败（DagVertexNotFound），不得产出偏小投影。
+        let mut gapped_uncommitted = Dag::new();
+        for round in 3..=4 {
+            for hash in &by_round[&round] {
+                let vertex = full.get(hash).unwrap().clone();
+                gapped_uncommitted.insert(vertex);
+                break; // 每轮只装 1 个 vertex，制造 round-3 内部缺口
+            }
+        }
+        let result =
+            bullshark_linear_order_uncommitted(&gapped_uncommitted, &referencing, &committed);
+        assert!(
+            matches!(result, Err(PokerL1Error::DagVertexNotFound)),
+            "未提交区的缺口必须投影失败（fail-closed 弃权）"
+        );
     }
 
     // ===== bullshark_linear_order 测试（SubTask 9.2） =====

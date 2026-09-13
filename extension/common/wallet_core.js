@@ -21,9 +21,19 @@ import __wbg_init, {
   wallet_persist,
   wallet_faucet_play,
   wallet_get_notes,
+  wallet_get_all_notes,
+  wallet_display_views,
   wallet_preview,
   wallet_sign,
   wallet_sign_settle_input,
+  wallet_verify_settlement_detail,
+  wallet_backup_export,
+  wallet_backup_import,
+  wallet_session_key_create,
+  wallet_session_key_list,
+  wallet_session_admit,
+  wallet_binding_status,
+  wallet_snip12_authorize_digest,
 } from '../vendor/wallet-core/wallet_core_wasm.js';
 
 let initPromise = null;
@@ -61,9 +71,22 @@ export async function callCore(fn, ...args) {
     wallet_persist,
     wallet_faucet_play,
     wallet_get_notes,
+    // Extension 0.2：REAL/PLAY 分库视图 + 展示门 + 结算复验 + 备份导出/导入
+    wallet_get_all_notes,
+    wallet_display_views,
+    wallet_verify_settlement_detail,
+    wallet_backup_export,
+    wallet_backup_import,
     wallet_preview,
     wallet_sign,
     wallet_sign_settle_input,
+    // Extension 0.3/0.4：会话密钥生成/列表 + binding 状态查询 + 限额
+    // enforcement + SNIP-12 授权摘要（wallet-core 单实现，JS 零密码学）。
+    wallet_session_key_create,
+    wallet_session_key_list,
+    wallet_session_admit,
+    wallet_binding_status,
+    wallet_snip12_authorize_digest,
   };
   const f = registry[fn];
   if (!f) throw new WalletCoreError('InvalidArgument', `unknown core entry ${fn}`);

@@ -254,6 +254,7 @@ fn make_vertex() -> DagVertex {
         tx_list: vec![make_tx(), make_tx(), make_tx()],
         parent_hashes: vec![[0x11; 32], [0x22; 32]],
         author_sig: vec![0xCC; 65],
+        forced_tx_hashes: vec![],
     }
 }
 

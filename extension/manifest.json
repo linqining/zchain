@@ -2,8 +2,9 @@
   "manifest_version": 3,
   "name": "ZChain Wallet",
   "short_name": "ZChain",
-  "version": "0.1.0",
-  "description": "ZChain browser wallet (Extension 0.1): PLAY + devnet, versioned window.zchain provider, wallet-core WASM signing. Not an EIP-1193 provider.",
+  "version": "0.4.0",
+  "version_name": "0.4.0-alpha",
+  "description": "ZChain browser wallet (Extension 0.4 alpha): multi-account, devnet/testnet switch, REAL/PLAY split view, encrypted backup, proof portal, SNIP-12 session keys with limits, capability matrix. Not an EIP-1193 provider.",
   "minimum_chrome_version": "116",
   "background": {
     "service_worker": "background/service_worker.js",
@@ -32,7 +33,7 @@
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "ZChain Wallet (0.1, devnet/PLAY)"
+    "default_title": "ZChain Wallet (0.4 alpha, devnet+testnet)"
   },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"

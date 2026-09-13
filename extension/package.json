@@ -1,8 +1,8 @@
 {
   "name": "zchain-extension",
-  "version": "0.1.0",
+  "version": "0.4.0-alpha",
   "private": true,
-  "description": "ZChain browser wallet extension (plan-appchain §6.12.4 Extension 0.1). Not published to npm; exists so node --test runs the ES-module test suite and the service worker's ES-module imports resolve consistently.",
+  "description": "ZChain browser wallet extension (plan-appchain §6.12.4 Extension 0.4 alpha: multi-account, devnet/testnet, REAL/PLAY split, backup, proof portal, SNIP-12 session keys with limits, capability matrix). Not published to npm; exists so node --test runs the ES-module test suite and the service worker's ES-module imports resolve consistently.",
   "type": "module",
   "scripts": {
     "test": "node --test tests/*.test.js tests/adapters/*.test.js"

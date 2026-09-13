@@ -1,0 +1,12 @@
+[package]
+name = "stwo-verify-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Path A crate B：canonical STARK 验证器的 wasm32 cdylib（手写 C ABI，无 wasm-bindgen；模式同 stwo-wasm-probe）"
+
+[lib]
+name = "stwo_verify_wasm"
+crate-type = ["cdylib"]
+
+[dependencies]
+stwo-verify-core = { path = "../verify-core" }

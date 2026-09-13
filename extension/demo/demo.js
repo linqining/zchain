@@ -1,4 +1,7 @@
-// ZChain dapp demo（页面 world；验证 window.zchain provider 的 0.1 行为）。
+// ZChain dapp demo（页面 world；验证 window.zchain provider 的 0.2 行为）。
+// 0.2：switchNetwork(devnet↔testnet) 走弹窗二次确认（批准后生效）；
+// previewHash 仍允许为空（dapp 侧摘要绑定属 dapp SDK，未随 0.2 交付——弹窗
+// 结构化预览是唯一确认面）。
 // 本文件由 localhost 静态服务直接提供，不属于扩展本身。
 
 const $out = document.getElementById('out');
@@ -47,7 +50,7 @@ document.getElementById('sign').onclick = () =>
     const accounts = await window.zchain.getAccounts();
     const op = makeTransferOperation(notes);
     op.outputs = [{ owner: accounts.accounts[0], amount: '1' }];
-    // 0.1：previewHash 允许为空（dapp 侧摘要绑定随 0.2 SDK 交付）；
+    // previewHash 允许为空（dapp 侧摘要绑定属 dapp SDK，未交付）；
     // 弹窗预览是唯一确认面。
     const res = await window.zchain.signOperation(op, '');
     return { digest: res.digest, preview: res.preview, operationBorshLen: res.operationBorsh.length / 2 };

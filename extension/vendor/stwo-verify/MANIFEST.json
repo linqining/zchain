@@ -1,0 +1,32 @@
+{
+  "artifact": "stwo_verify_wasm (canonical STARK verifier, path A)",
+  "generated": "2026-09-13",
+  "source": {
+    "workspace": "stwo-wasm-verify/ (independent cargo workspace)",
+    "crate": "stwo-verify-wasm 0.1.0 (cdylib, hand-written C ABI: sv_alloc/sv_free/sv_verify/sv_stats/sv_last_error/sv_stats_len)",
+    "verifierLogic": "poker_texas_air verify_canonical_tagged_proof (read-only path dependency, unchanged)",
+    "stwo": "crates.io stwo 2.3.0 vendored at third_party/stwo-wasm-patch/stwo-2.3.0 (cfg(not(wasm32)) -> feature wasm-poseidon gate, default-on; see PATCH-vs-crates-io-2.3.0.diff)",
+    "buildCommand": "CARGO_TARGET_DIR=target-wasm RUSTFLAGS='-C target-feature=+simd128' cargo build --release --target wasm32-unknown-unknown -p stwo-verify-wasm (from stwo-wasm-verify/)",
+    "toolchain": "nightly-2026-04-15 (stwo prover feature needs portable_simd; zchain root rust-toolchain.toml)"
+  },
+  "files": [
+    {
+      "name": "stwo_verify_wasm.wasm",
+      "sha256": "8e5c0f2e1604de2925e63f45ce089df6b4f603e4f8547f8b51e0b76484d8f2bb",
+      "bytes": 3050318,
+      "note": "simd128 target feature enabled (~3.5% faster than plain, honest bench: p50 1734.7ms / p95 1861.0ms in node v24.4.1; OVER the 500ms budget gate - low-frequency verification use accepted, perf work deferred). wasm-bindgen placeholder imports are stubbed fail-closed by the loader (verify path is deterministic; a shim call refuses loudly)."
+    },
+    {
+      "name": "stwo_verify_loader.mjs",
+      "sha256": "f58c6d4eda8459624734e3f1231977ad5d1bb978cda58e51e97cfc80f7f67f1c",
+      "bytes": 6164,
+      "note": "host-side glue (node/browser, zero-dep ESM). rc: 0=verified -1=archive-invalid -2=rejected -3=internal. Wall clock measured host-side (wasm32 has no clock)."
+    }
+  ],
+  "bench": {
+    "raw": "stwo-wasm-verify/logs/bench_run_02_simd128.txt (this artifact), logs/bench_run_01.txt (plain build p50 1795.9 / p95 1982.1)",
+    "resultJson": "stwo-wasm-verify/logs/wasm_bench_result.json",
+    "gate500ms": "OVER (p95 1861.0ms); delivered per path A decision: real latency shown in portal, perf optimization deferred"
+  },
+  "negativeEvidence": "3 genuine proofs accepted; 9 tamper/truncate negatives all rejected (mid_byte_flip -> Root mismatch; header_field_flip -> scope detachment; truncated -> borsh decode error)"
+}

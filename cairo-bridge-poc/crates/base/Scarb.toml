@@ -1,0 +1,11 @@
+[package]
+name = "base"
+version = "0.1.0"
+edition = "2024_07"
+
+[lib]
+
+[dependencies]
+bounded_int = { path = "../../vendor/bounded_int" }
+stwo_verifier_core = { path = "../../vendor/verifier_core", features = ["poseidon252_verifier"] }
+stwo_verifier_utils = { path = "../../vendor/verifier_utils", features = ["poseidon252_verifier"] }

@@ -454,6 +454,7 @@ fn test_soundness_vertex_too_large_fails() {
         tx_list: vec![],
         parent_hashes: vec![],
         author_sig: vec![0u8; 300_000], // 300KB > 256KB
+        forced_tx_hashes: vec![],
     };
 
     let result = validate_vertex_size(&vertex);

@@ -22,6 +22,9 @@ serde_json = { workspace = true }
 bincode = { workspace = true }
 # ===== 哈希与编码 =====
 blake2 = { workspace = true }
+# ===== 提现根 Merkle（withdrawal_root：RFC 6962 风格双 sha256 + 域标签；
+# workspace 既有依赖（poker_l1/poker_zkvm 在用），非新 crate）=====
+sha2 = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
 # ===== 证明管道并行 =====

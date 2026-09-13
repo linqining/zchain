@@ -6,7 +6,12 @@ description = "德州扑克结算语义唯一事实源：SettlementPlan / side-p
 license = "BUSL-1.1"
 
 [dependencies]
-# 结算核心保持零重依赖：blake2b 摘要 + 稳定 borsh 编码 + 错误派生。
+# 结算核心依赖纪律：blake2b 摘要 + 稳定 borsh 编码 + 错误派生。starknet-crypto
+# 为 deck 链摘要裁决（2026-09-12，SHUFFLE_CONSUME.md §1.2）新增的**唯一**
+# 哈希依赖——消费侧 deck_chain_digest 必须逐位重导上游 stage0 的 poseidon
+# 折叠（与生产者同源）；该 crate 已在本 workspace 依赖表内（poker-appchain
+# 同源 0.6.x），Cargo.lock 零新 crate。
 blake2 = { workspace = true }
 borsh = { workspace = true }
+starknet-crypto = { workspace = true }
 thiserror = { workspace = true }

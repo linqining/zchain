@@ -120,6 +120,7 @@ fn make_vertex(epoch: u64, round: u64, author_byte: u8, parents: Vec<[u8; 32]>) 
         tx_list: vec![],
         parent_hashes: parents,
         author_sig: vec![0u8; 65],
+        forced_tx_hashes: vec![],
     }
 }
 

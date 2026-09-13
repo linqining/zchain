@@ -1,0 +1,161 @@
+{
+  "date": "2026-09-13T10:03:38.029Z",
+  "browser": "Chrome/153.0.8010.36",
+  "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
+  "pageOrigin": "http://127.0.0.1:57595",
+  "total": 30,
+  "pass": 30,
+  "fail": 0,
+  "results": [
+    {
+      "step": "S0 SW 预热（bridge:getSession 应答）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "S1 创建账户",
+      "ok": true,
+      "detail": "{\"accountId\":\"bc1c45dc-54b2-4c26-8e7e-cd6c98f03450\",\"publicKey\":\"037eaa043215df898f03af19536e24b5b6c"
+    },
+    {
+      "step": "S2 两张 PLAY note（300 + 200）",
+      "ok": true,
+      "detail": "{\"play_free\":\"500\",\"play_locked\":\"0\",\"real_free\":\"0\",\"real_locked\":\"0\"}"
+    },
+    {
+      "step": "S3 授权草稿：wallet-core 生成 delegated key（66 hex）+ SNIP-12 摘要（0x..64 hex）",
+      "ok": true,
+      "detail": "{\"request\":{\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\"0x00000000000000000000000000000000000000000000000000000000000000cd\",\"allowedScopes\":[\"play\",\"buyin\",\"settle\",\"transfer\"],\"perTxLimit\":\"250\",\"perDayLimit\":\"1000\",\"tableAllowlist\":null"
+    },
+    {
+      "step": "S4 devnet 入口形态登记（evidence=devnet_local_entry，状态 active）",
+      "ok": true,
+      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
+    },
+    {
+      "step": "S5 registry 列表：1 条会话密钥 + origin/限额/有效期投影",
+      "ok": true,
+      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
+    },
+    {
+      "step": "L0 页面连接（origin 授权）",
+      "ok": true,
+      "detail": "{\"accounts\":[\"037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa\"],\"chainId\":\"zchain"
+    },
+    {
+      "step": "L1 限额内签名请求打开（amount_in=200 ≤ perTx 250）",
+      "ok": true,
+      "detail": "{\"abi_version\":1,\"amount_in\":\"200\",\"amount_out\":\"200\",\"asset_class\":\"PLAY\",\"chain_id\":\"zchain-devnet"
+    },
+    {
+      "step": "L2 限额内签名成功（批准 → wallet-core 真实签名）",
+      "ok": true,
+      "detail": "{\"digest\":\"3dc6664b8960c88d71fc4ca958e2ce4d9e180a2b5345809c3cc0ba0359063b01\"}"
+    },
+    {
+      "step": "L3 日限记账：binding dailyUsedToday = 200（amount_in 口径）",
+      "ok": true,
+      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1"
+    },
+    {
+      "step": "L4 单笔超限 → SessionOverPerTxLimit（批准前拒绝，不打开弹窗）",
+      "ok": true,
+      "detail": "ERR:SessionOverPerTxLimit"
+    },
+    {
+      "step": "L5 超限拒绝不遗留待确认请求",
+      "ok": true,
+      "detail": "{\"pending\":[]}"
+    },
+    {
+      "step": "L6 撤销：JS 粘滞位 + wallet-core 状态查询一致（revoked）",
+      "ok": true,
+      "detail": "{\"binding\":\"revoked\",\"core\":\"revoked\"}"
+    },
+    {
+      "step": "L7 撤销后签名 → SessionRevoked（fail-closed，不打开弹窗）",
+      "ok": true,
+      "detail": "ERR:SessionRevoked"
+    },
+    {
+      "step": "L8 删除记录（撤销态唯一清除路径）",
+      "ok": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "step": "L9 registry 已无该 binding",
+      "ok": true,
+      "detail": "[]"
+    },
+    {
+      "step": "L10 删除后签名恢复常规路径（请求可打开等待批准）",
+      "ok": true,
+      "detail": "{\"abi_version\":1,\"amount_in\":\"300\",\"amount_out\":\"300\",\"asset_class\":\"PLAY\",\"chai"
+    },
+    {
+      "step": "L11 常规路径签名成功（owner 路径不受会话密钥影响）",
+      "ok": true,
+      "detail": "{\"digest\":\"894093fd29d103345e03bd60f7b2fc1339023dbb47a4b4762ba8fb9cafda0f4e\"}"
+    },
+    {
+      "step": "R1 授权簿含页面 origin",
+      "ok": true,
+      "detail": "[{\"origin\":\"http://127.0.0.1:57595\",\"grantedAt\":1789293817}]"
+    },
+    {
+      "step": "R2 撤销 origin 授权",
+      "ok": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "step": "R3 撤销后页面请求 → OriginNotPermitted（fail-closed）",
+      "ok": true,
+      "detail": "ERR:OriginNotPermitted"
+    },
+    {
+      "step": "R4 重连可恢复授权（批准后 granted）",
+      "ok": true,
+      "detail": "{\"accounts\":[\"037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa"
+    },
+    {
+      "step": "C1 矩阵三协议行齐全（EIP-1193/WC/Starknet）",
+      "ok": true,
+      "detail": "[\"EIP-1193（兼容形状）\",\"WalletConnect v2\",\"Starknet 钱包接口\"]"
+    },
+    {
+      "step": "C2 EIP-1193：detected=false（headless 无注入）+ 签名方法全拒清单",
+      "ok": true,
+      "detail": "{\"detected\":false,\"denied\":7}"
+    },
+    {
+      "step": "C3 WalletConnect：dormant 如实（SignClient 未注入 = B5 外部依赖）",
+      "ok": true,
+      "detail": "{\"active\":false,\"summary\":\"dormant：未注入 SignClient，不监听任何会话事件（生产 relay 属 B5 外部依赖）\"}"
+    },
+    {
+      "step": "C4 Starknet：未检测到钱包对象如实标注 + note spend 拒绝红线",
+      "ok": true,
+      "detail": "{\"detected\":false}"
+    },
+    {
+      "step": "W1 提现预览：canSubmit 恒 false + vault_offline/库空原因 + 托管风险",
+      "ok": true,
+      "detail": "{\"kind\":\"withdraw\",\"assetClass\":\"REAL\",\"chainId\":\"zchain-devnet-1\",\"amount\":\"100\",\"owner\":\"ababababababababababababababababababababababababababababababababab\",\"inputs\":[],\"finality\":{\"worstProof\":\"none\",\"requiredProof\":\"finalized\",\"reached\""
+    },
+    {
+      "step": "W2 坏金额 fail-closed（AmountInvalid）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"AmountInvalid\",\"reason\":\"金额必须是正十进制整数\"}}"
+    },
+    {
+      "step": "P1 provider 授权方法面未开放 → NotSupportedIn01（popup UI 为唯一入口）",
+      "ok": true,
+      "detail": "ERR:NotSupportedIn01"
+    },
+    {
+      "step": "U1 popup 页面存活",
+      "ok": true,
+      "detail": "ok"
+    }
+  ]
+}

@@ -16,7 +16,7 @@ use crate::plan::{
     MAX_RUNOUTS, MAX_TOTAL_BET, SETTLEMENT_PLAN_VERSION, SETTLEMENT_SEATS,
 };
 use crate::side_pot::{self, SidePot};
-use crate::{RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE};
+use crate::{RAKE_MODE_FIXED_RAKE_BURN, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE};
 
 /// Canonical board input used while deriving a settlement plan.
 ///
@@ -208,7 +208,16 @@ pub struct TableSnapshot<'a> {
     pub all_in: &'a [bool],
     /// 每座位暴露的底牌索引（参与争夺的座位必须恰好 2 张）。
     pub hole_cards: &'a [&'a [u8]],
-    /// rake 模式（`RAKE_MODE_NONE` / `RAKE_MODE_PERCENTAGE`）。
+    /// rake 模式（`RAKE_MODE_NONE` / `RAKE_MODE_PERCENTAGE` /
+    /// `RAKE_MODE_FIXED_RAKE_BURN`）。
+    ///
+    /// 三种判别值（0/1/2，冻结）：NONE 零费；PERCENTAGE 固定比例抽取；
+    /// FIXED_RAKE_BURN 为 GAME 桌销毁计费模式（TE-E0 判别值冻结）。
+    /// TE-M4 定稿：本 crate 承载三者的**计价数量关系**（mode 2 与 mode 1
+    /// 同式——canonical AIR opening 已证明并冻结该数量关系），**资金处置**
+    /// （rake 份额入 treasury/operator 还是销毁）不在 plan 内建模，由
+    /// poker_l1 合约侧（`texas_poker::settlement::rake_disposal`）与
+    /// appchain admission/settlement 层落点。
     pub rake_mode: u8,
     /// rake 比例（bps）。
     pub rake_bps: u16,
@@ -408,6 +417,22 @@ fn compute_rake(snapshot: &TableSnapshot, gross_pot: u64) -> Result<u64, Settlem
     match snapshot.rake_mode {
         RAKE_MODE_NONE => Ok(0),
         RAKE_MODE_PERCENTAGE => {
+            let raw = crate::payout::rake_for(gross_pot, u64::from(snapshot.rake_bps), 10_000);
+            Ok(raw
+                .min(snapshot.rake_cap)
+                .min(gross_pot))
+        }
+        // TE-M4 定稿：FIXED_RAKE_BURN（GAME 桌销毁计费）与 PERCENTAGE
+        // **计价同式**（`min(floor(contested·bps/10⁴), cap, contested)`）。
+        // 理由（二选一决策记录）：canonical AIR opening 对 mode 2 已证明并
+        // 冻结同一数量关系（poker_texas_air `canonical_settlement_rake` 对
+        // mode ∈ {1, 2} 同式）；plan 只编码数量（gross = awards + rake 的
+        // 输出侧切分），**处置**（treasury 分账 vs 销毁）不在 plan 内——
+        // 它是 poker_l1 合约侧（`texas_poker::settlement::rake_disposal`）
+        // 与 appchain admission（v2 结算 burn 处置）的落点。保持显式分支
+        // 而非并入 PERCENTAGE 臂：文档化"同式是 TE-M4 定稿决策而非巧合"，
+        // 且未知模式仍走通配 fail-closed。
+        RAKE_MODE_FIXED_RAKE_BURN => {
             let raw = crate::payout::rake_for(gross_pot, u64::from(snapshot.rake_bps), 10_000);
             Ok(raw
                 .min(snapshot.rake_cap)
@@ -674,6 +699,67 @@ mod tests {
             plan.rake
         );
         plan.validate(3).unwrap();
+    }
+
+    /// TE-E0：rake 模式判别值三仓冻结对照（settlement-core u8 常量 ==
+    /// appchain FeePolicy borsh 判别值 == 上游 canonical_rake_opening
+    /// rake_mode）。判别值一经发布不得再改。
+    #[test]
+    fn rake_mode_discriminators_are_frozen() {
+        assert_eq!(crate::RAKE_MODE_NONE, 0);
+        assert_eq!(crate::RAKE_MODE_PERCENTAGE, 1);
+        assert_eq!(crate::RAKE_MODE_FIXED_RAKE_BURN, 2);
+    }
+
+    /// TE-M4 定稿：FIXED_RAKE_BURN 与 PERCENTAGE **计价同式**——同一手的
+    /// plan（rake/awards/守恒）逐字段相等，digest 也相等。处置差异不在
+    /// plan 内（落点：poker_l1 `rake_disposal` / appchain v2 admission）。
+    #[test]
+    fn fixed_rake_burn_prices_identically_to_percentage() {
+        let board: Vec<u8> = vec![10, 9, 8, 13, 26]; // ♠Q ♠J ♠10 ♥2 ♦2
+        let holes: Vec<&'static [u8]> = vec![
+            Box::leak(vec![0u8, 1].into_boxed_slice()),
+            Box::leak(vec![12u8, 11].into_boxed_slice()),
+        ];
+        let snap = |rake_mode: u8| TableSnapshot {
+            seat_count: 2,
+            button: 0,
+            total_bets: Box::leak(vec![100u64, 100].into_boxed_slice()),
+            inactive: Box::leak(vec![false, false].into_boxed_slice()),
+            all_in: Box::leak(vec![true, true].into_boxed_slice()),
+            hole_cards: Box::leak(holes.clone().into_boxed_slice()),
+            rake_mode,
+            rake_bps: 500,
+            rake_cap: 1_000,
+        };
+        let burn = derive_settlement_plan(
+            &snap(crate::RAKE_MODE_FIXED_RAKE_BURN),
+            &SettlementBoards::single(board.to_vec()),
+        )
+        .unwrap();
+        let percentage = derive_settlement_plan(
+            &snap(crate::RAKE_MODE_PERCENTAGE),
+            &SettlementBoards::single(board.to_vec()),
+        )
+        .unwrap();
+        assert_eq!(burn, percentage, "mode 2 与 mode 1 计价数量关系同式（TE-M4 定稿）");
+        assert_eq!(burn.rake, 10, "5% of 200 contested gross，cap 未触发");
+        assert_eq!(burn.rake_base(), 200);
+        assert_eq!(burn.gross_pot, burn.total_awards + burn.rake, "burn 桌守恒同式");
+        // digest 一致：同一手在两种模式下不可由 plan 摘要区分（处置在合约）
+        assert_eq!(burn.digest().unwrap(), percentage.digest().unwrap());
+
+        // 未知模式仍走通配 fail-closed（mode 2 分支不得吞并通配拒绝）。
+        let snap_unknown = TableSnapshot {
+            rake_mode: 3,
+            ..snap(crate::RAKE_MODE_FIXED_RAKE_BURN)
+        };
+        let error =
+            derive_settlement_plan(&snap_unknown, &SettlementBoards::single(board)).unwrap_err();
+        assert!(
+            error.to_string().contains("unsupported rake mode 3"),
+            "unknown mode must hit the wildcard rejection, got: {error}"
+        );
     }
 
     #[test]

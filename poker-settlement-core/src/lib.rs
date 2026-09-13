@@ -42,10 +42,14 @@
 //! | plan 摘要（跨组件事实源） | blake2b-256 | `zchain.texas_poker.settlement_plan.v2`（历史冻结，不变） |
 //! | payout_root（输出绑定） | blake2b-256 + RFC 6962 域分离 | `zchain.settlement.payout_root.v1` |
 //! | side_pot_root（分层承诺） | blake2b-256 | `zchain.settlement.side_pot_root.v1` |
+//! | deck_chain_digest（deck 承诺链，hand_binding v2 输入） | Poseidon252（上游同源，2026-09-12 裁决） | `zchain.texas.canonical-shuffle-chain.v1`（与上游 stage0 逐字节一致） |
 //! | AIR 绑定层（appchain 承诺树/批次根/结算绑定） | Poseidon252 | 见 `poker-appchain/src/felt.rs` |
 //!
 //! blake2b 用于**字节对象**（borsh 计划、赔付叶），与 VM/归档栈一致；
-//! Poseidon 留给 zk 域内对象（felt 树）。两层不混用。
+//! Poseidon 用于 zk 域内对象（felt 树）与**必须与生产者重导一致**的链
+//! 摘要（deck 链裁决：消费侧算法冻结为上游 `fold_chain` 逐字节复制，
+//! 早期 blake2b 提案已删除——理由与两侧对照证据见 SHUFFLE_CONSUME.md
+//! §1.2/§5 与 `deck_chain` 模块文档）。两层不混用。
 //!
 //! ## payout_root 的树规则（与 checklist R3-M2/R4-M1 house convention 一致）
 //!
@@ -58,6 +62,7 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+mod deck_chain;
 mod derive;
 mod error;
 mod hand_rank;
@@ -75,13 +80,31 @@ pub use plan::{
     RitStartStreet, RunoutPotPlan, SettlementPlan, SettlementPotPlan, SettlementRunoutSchedule,
     MAX_PLAYERS, MAX_RUNOUTS, MAX_TOTAL_BET, SETTLEMENT_PLAN_VERSION, SETTLEMENT_SEATS,
 };
+pub use deck_chain::{
+    deck_chain_digest, DECK_CHAIN_DIGEST_DOMAIN, DECK_CHAIN_FOLD_LABEL, DECK_CHAIN_MAX,
+};
 pub use payout::{rake_for, side_pot_root, payout_root, PayoutLeaf, PAYOUT_ROOT_DOMAIN,
     SIDE_POT_ROOT_DOMAIN};
 pub use side_pot::{calculate_side_pots, is_eligible, seat_bit, SidePot, SidePotError,
     SidePotResult};
 
 // rake 模式判别值（与 poker_l1 constants 及 canonical_rake_opening 对齐）。
+// 判别值一经发布即冻结（TE-E0）：0/1/2 三值三仓（settlement-core 常量 /
+// appchain borsh 判别值 / 上游 canonical rake_mode）一致，不得重排或复用。
 /// 零费 rake 模式（`RAKE_MODE_NONE`）。
 pub const RAKE_MODE_NONE: u8 = 0;
 /// 固定比例 rake 模式（`RAKE_MODE_PERCENTAGE`）。
 pub const RAKE_MODE_PERCENTAGE: u8 = 1;
+/// 固定比例计费 + GAME 桌销毁处置模式（`RAKE_MODE_FIXED_RAKE_BURN`，
+/// TE-E0 枚举先行，判别值冻结 = 2）。
+///
+/// **语义边界（TE-M4 定稿）**：本 crate 承载三模式的**计价数量关系**——
+/// mode 2 与 mode 1 同式（canonical AIR opening
+/// `canonical_settlement_rake` 对 mode ∈ {1, 2} 同式，数量关系已证并
+/// 冻结）。**资金处置**（rake 份额入 treasury/operator 还是销毁）不在
+/// [`SettlementPlan`] 内建模：plan 只编码数量切分
+/// （gross = awards + rake），处置规则落在 poker_l1 合约侧
+/// （`texas_poker::settlement::rake_disposal`）与 poker-appchain
+/// admission/结算层（v2 结算 burn 处置）。同一手在 mode 1 与 mode 2 下
+/// 的 plan 及 digest 逐字节相等（两侧对照测试钉住）。
+pub const RAKE_MODE_FIXED_RAKE_BURN: u8 = 2;

@@ -1,0 +1,72 @@
+{
+  "date": "2026-09-13T10:03:44.504Z",
+  "browser": "Chrome/153.0.8010.36",
+  "pageOrigin": "http://127.0.0.1:57601",
+  "fixtureGateway": "http://127.0.0.1:57602",
+  "wasmBytes": 1185984,
+  "total": 12,
+  "pass": 12,
+  "fail": 0,
+  "results": [
+    {
+      "step": "F0 harness 页加载（runStarkPortalCheck 可用，common 模块同源加载）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "F1a STARK 正例：真实 canonical 证明 wasm 完整验证 verified",
+      "ok": true,
+      "detail": "{\"rc_proofLen\":1185984,\"verdict\":\"verified\",\"elapsedMs\":1750}"
+    },
+    {
+      "step": "F1b STARK 正例：verifier 版本如实展示（stwo 2.3.0 vendored+wasm-poseidon）",
+      "ok": true,
+      "detail": "stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)"
+    },
+    {
+      "step": "F1c STARK 正例：归档元数据一致（table_id=9101 / log_size=8 / transitions=5）",
+      "ok": true,
+      "detail": "{\"verified\":true,\"error\":null,\"archive_len\":1185984,\"table_id\":9101,\"log_size\":8,\"num_columns\":5391,\"transition_count\":5,\"batch_digest\":\"13c5c830b1849a4e2922c8a"
+    },
+    {
+      "step": "F1d STARK 正例：耗时如实测量（>0 数值；超 500ms 预算由 portal 标注）",
+      "ok": true,
+      "detail": "elapsedMs=1750 wall=1770ms（超500ms=是，如实标注）"
+    },
+    {
+      "step": "F2 篡改证明 → StarkVerifyRejected（fail-closed，不伪造 verified）",
+      "ok": true,
+      "detail": "{\"code\":\"StarkVerifyRejected\",\"reason\":\"STARK 验证拒绝：AIR 约束不满足: Root mismatch.\"}"
+    },
+    {
+      "step": "F2b fail-closed 结论：STARK 拒绝时 overall ≠ fully verified",
+      "ok": true,
+      "detail": "{\"starkPass\":false,\"starkState\":\"StarkVerifyRejected\",\"settlePass\":false,\"overall\":\"not verified\"}"
+    },
+    {
+      "step": "F3 非归档字节 → StarkArchiveInvalid",
+      "ok": true,
+      "detail": "{\"code\":\"StarkArchiveInvalid\"}"
+    },
+    {
+      "step": "F4 无归档 → ProofNotFound（不伪造 STARK 结论）",
+      "ok": true,
+      "detail": "{\"step\":\"fetchProof\",\"code\":\"ProofNotFound\"}"
+    },
+    {
+      "step": "F5 网关不可达 → GatewayUnreachable",
+      "ok": true,
+      "detail": "{\"code\":\"GatewayUnreachable\"}"
+    },
+    {
+      "step": "F6 超时路径存在且独立分类（GatewayTimeout ≠ GatewayUnreachable）",
+      "ok": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "step": "F7 settlement 复验步骤照常执行并记录（fixture 明细不作通过断言）",
+      "ok": true,
+      "detail": "{\"verdict\":\"error\",\"code\":\"InvalidArgument\"}"
+    }
+  ]
+}

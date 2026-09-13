@@ -1,0 +1,23 @@
+{
+  "batch_digest": "62be0e07cd2394cea2e722d8e54624359bc5c13258a14bc6a90b8f1c22c12273",
+  "deck_chain_digest": "073c5e280d7d548111384f60c97f1b492af20b5d1ef4c242497b55605265e66a",
+  "engine_receipt_digest": "0174ced8f6aec0d3fe2f1941e2c95fd65f34980e4e80ed34c6e31299c47550aa",
+  "reveal_chain_digest": "04bbaa7e1f32649da6a39e770c1a3489ac21030b9e21de28d91926561e4e6da4",
+  "reconstruct_chain_digest": "0501ecaa97f278939ca8c58ce2c59f7d20d9ae5fa9be72f4802da05570b249fc",
+  "statement_count": 8,
+  "table_id": 7,
+  "transition_count": 13,
+  "first_transition_kind": 7,
+  "last_transition_kind": 19,
+  "pot": 400,
+  "log_size": 8,
+  "post_state_commitment": "77aa031fbdf7269dd5150cebab5fae354f7f33643df9e00babf13125e07845ca",
+  "pre_state_root": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+  "post_state_root": "0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c",
+  "deck_chain": [
+    "00f29f35d76ac9341ba60a82a6dee2eeaf397ef6a12755726f64e2fc6b9d930b",
+    "004d883ec5cd1ce3e76bfa39604c2c31f13c5d9a0feed5aa8766313a004f02f8",
+    "054834c1f20971a6903faa375ec3ad710b6533cda705ac7618e78560d8998f13",
+    "0414c6b2e6aeaab7104dd5e13a260aebd29bca6dde69a591fe2d30b82b27d548"
+  ]
+}

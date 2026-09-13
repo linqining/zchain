@@ -1,0 +1,194 @@
+{
+  "date": "2026-09-13T10:03:33.285Z",
+  "browser": "Chrome/153.0.8010.36",
+  "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
+  "gateway": {
+    "baseUrl": "http://127.0.0.1:18996",
+    "binding": "0000000000000001000000000000000000000000000000000000000000000000"
+  },
+  "total": 36,
+  "pass": 36,
+  "fail": 0,
+  "results": [
+    {
+      "step": "A0 SW 预热（bridge:getSession 应答）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A1 创建账户1",
+      "ok": true,
+      "detail": "{\"accountId\":\"5433491b-7730-460f-92f2-3e00ec41fa32\",\"publicKey\":\"03fbb7df186b2d75f9c80e89ced0f9155e7a8e76416b13e0ef57c0f"
+    },
+    {
+      "step": "A2 devnet 水龙头 500 PLAY",
+      "ok": true,
+      "detail": "{\"commitment\":\"031a815f060707559c6a6f16fdba5958f7bad3bf44ec13cb6abade7f736ce678\",\"faucet\":\"local-devnet-stub\",\"play_free"
+    },
+    {
+      "step": "A3 REAL/PLAY 分库视图（PLAY 有 note / REAL 空 / 余额分栏）",
+      "ok": true,
+      "detail": "{\"notes\":[{\"commitment\":\"031a815f060707559c6a6f16fdba5958f7bad3bf44ec13cb6abade7f736ce678\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spendable\":true}],\"real"
+    },
+    {
+      "step": "A4 分库视图脱敏（无 spend_secret/nullifier）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A5 REAL 展示门：claim 隐藏 + 托管风险提示（不暗示可提现）",
+      "ok": true,
+      "detail": "{\"play\":{\"faucet_available\":true,\"play_balance\":500},\"real\":{\"balance\":0,\"claim_disabled_reason\":\"vault_offline\",\"custody_risk_notice\":\"real_is_custodial_v1_off"
+    },
+    {
+      "step": "A6 备份导出（ZCBK，自包含备份口令）",
+      "ok": true,
+      "detail": "{\"backupHex\":\"5a43424b01000b8b6643d62c53d67fe20f849fa9956a004c000002000000010000008d2ba93a5291f65376"
+    },
+    {
+      "step": "A7 错误口令导入 → BadPassword（fail-closed）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"BadPassword\",\"reason\":\"keystore authentication failed (wrong passphrase or corrupted envelope)\"}}"
+    },
+    {
+      "step": "A8 篡改文件导入 → 拒绝（fail-closed）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"BadPassword\",\"reason\":\"keystore authentication failed (wrong passphrase or corrupted envelope)\"}}"
+    },
+    {
+      "step": "A9 正确口令导入 → 新增锁定账户（公钥一致）",
+      "ok": true,
+      "detail": "{\"accountId\":\"c3471d33-6f32-4d06-88a6-f0dd522845d5\",\"publicKey\":\"03fbb7df186b2d75f9c80e89ced0f9155e7a8e76416b13e0ef57c0fdc6dd797cab\",\"create"
+    },
+    {
+      "step": "A10 创建账户2（会话切到账户2）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A11 账本含 3 账户（1 原始 + 1 恢复 + 1 新建）",
+      "ok": true,
+      "detail": "count=3"
+    },
+    {
+      "step": "A12 切换回账户1：会话锁定（fail-closed），账户1 数据完好",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A13 账户1 重新解锁：note 库完整（隔离）",
+      "ok": true,
+      "detail": "{\"notes\":[{\"commitment\":\"031a815f060707559c6a6f16fdba5958f7bad3bf44ec13cb6abade7f736ce678\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spe"
+    },
+    {
+      "step": "A14 错误账户口令 → BadPassword（fail-closed）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "B1 popup 换网 testnet（账户元数据持久化）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "B2 testnet 网关未配置如实 null（不回落 devnet）",
+      "ok": true,
+      "detail": "gatewayUrl=null"
+    },
+    {
+      "step": "B3 mainnet 红线 → NetworkUnsupported",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"NetworkUnsupported\",\"reason\":\"zchain-mainnet-1\"}}"
+    },
+    {
+      "step": "C1 页面连接（origin 授权 → 当前账户）",
+      "ok": true,
+      "detail": "{\"accounts\":[\"03fbb7df186b2d75f9c80e89ced0f9155e7a8e76416b13e0ef57c0fdc6dd797cab\"],\"chainId\":\"zchain-devnet-1\",\"granted\":true}"
+    },
+    {
+      "step": "C2 结构化签名预览请求打开（含 REAL/PLAY 徽章字段）",
+      "ok": true,
+      "detail": "{\"abi_version\":1,\"amount_in\":\"500\",\"amount_out\":\"500\",\"asset_class\":\"PLAY\",\"chain_id\":\"zchain-devnet"
+    },
+    {
+      "step": "C3 真实签名成功（wallet-core digest）",
+      "ok": true,
+      "detail": "{\"digest\":\"87cbcea5e9b31766811e24e8ef2b2380c529d8fd817f5cd57c6b104242a81560\",\"kind\":\"transfer\"}"
+    },
+    {
+      "step": "C4 签名回执登记：signed 状态位 + deadline=10000ms（协议默认）",
+      "ok": true,
+      "detail": "{\"status\":\"signed\",\"pastDeadline\":false,\"deadlineMs\":10000,\"evidence\":{\"included\":\"local_manual_entry\",\"seen\":\"not_provided\"},\"hint\":\"等待链上见证"
+    },
+    {
+      "step": "C5 超期判定与提示文案（仅展示，不实现提交路径）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C6 SeenReceipt 形状校验拒绝",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C7 合法形状 SeenReceipt → seen（evidence 如实标注未验签）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C8 included 人工登记（evidence=local_manual_entry）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C9 页面换网请求打开确认卡（devnet → testnet，from/to 展示）",
+      "ok": true,
+      "detail": "{\"fromChainId\":\"zchain-devnet-1\",\"fromKind\":\"devnet\",\"toChainId\":\"zchain-testnet-1\",\"toKind\":\"testnet\"}"
+    },
+    {
+      "step": "C10 换网批准生效（changed=true；getNetwork=testnet）",
+      "ok": true,
+      "detail": "{\"swRes\":{\"chainId\":\"zchain-testnet-1\",\"kind\":\"testnet\",\"label\":\"Testnet\",\"abiVersion\":1,\"defaultGatewayUrl\":null,\"explorerBase\":null,\"previousChainId\":\"zchain-"
+    },
+    {
+      "step": "E1 坏 previewHash → PreviewMismatch（不回退）",
+      "ok": true,
+      "detail": "ERR:PreviewMismatch"
+    },
+    {
+      "step": "E2 锁定后签名 → SessionInvalid（不回退）",
+      "ok": true,
+      "detail": "ERR:SessionInvalid"
+    },
+    {
+      "step": "D0 扩展 portal 页加载（输入/按钮/网关行渲染）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "D1 portal 正例：结算关系复验 verified（payout_root 复算一致）",
+      "ok": true,
+      "detail": "{\"steps\":{\"binding\":\"ok\",\"settlement\":{\"hand_binding\":\"0000000000000001000000000000000000000000000000000000000000000000\",\"pot\":2000,\"payout_root\":\"f3ae5464a5791e98c43d6b2517cbbc2ec556689c25be3c8885081d49fdddfad5\",\"level\":\"proven\",\"rake_tota"
+    },
+    {
+      "step": "D2 展示 verifier 名称/版本/耗时",
+      "ok": true,
+      "detail": "{\"verifier\":{\"abi_version\":1,\"name\":\"wallet-core/verifier\",\"version\":\"0.1.0\"},\"elapsedMs\":11}"
+    },
+    {
+      "step": "D3 proof 归档元数据展示（engine + 字节数；不宣称 STARK 已验证）",
+      "ok": true,
+      "detail": "{\"engine\":\"host-validate-v2\",\"engineSource\":\"body\",\"payloadLen\":64}"
+    },
+    {
+      "step": "D4 未知 binding → SettlementNotFound（不伪造结果）",
+      "ok": true,
+      "detail": "{\"code\":\"SettlementNotFound\"}"
+    },
+    {
+      "step": "D5 网关不可达 → GatewayUnreachable（明确报错）",
+      "ok": true,
+      "detail": "网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。"
+    }
+  ]
+}

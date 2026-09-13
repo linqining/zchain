@@ -34,8 +34,10 @@ use poker_l1::block::validator::{validate_tx_chain_id, validate_tx_nonce, valida
 use poker_l1::block::{Block, BlockHeader, compute_tx_merkle_root};
 use poker_l1::consensus::{
     Dag, DagCommitCertificate, DagVertex, MAX_VERTEX_SIZE, VertexBuilder,
-    assemble_commit_certificate, bullshark_linear_order_uncommitted, detect_commit_leader,
-    required_quorum, sort_commit_txs_r4m4,
+    assemble_commit_certificate, attempt_commit_projection, author_has_vertex_since,
+    canonical_commit_candidates, detect_commit_leader, find_missing_parent_vertices,
+    has_quorum_distinct_author_references, required_quorum, sort_commit_txs_r4m4_with_force_include,
+    COMMIT_ABSENCE_ROUNDS,
 };
 use poker_l1::error::PokerL1Result;
 use poker_l1::network::{
@@ -53,7 +55,7 @@ use poker_l1::{Address, Hash};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// 程序版本。
 const VERSION: &str = "0.1.0";
@@ -197,13 +199,24 @@ impl VoteCollector {
         }
     }
 
-    /// 收集一笔投票（去重：同一 signer_pubkey 对同一 cert_signing_hash 仅计一次）。
+    /// 收集一笔投票（同一 (epoch, commit_round, signer) 仅保留最新一张）。
+    ///
+    /// 恰 quorum 修复：旧实现按 (signer, cert_hash) 去重 —— 同一 signer 对同一
+    /// 高度先后为两个不同 cert 签票时，两张票**同时**留在池中，旧票会继续为
+    /// 已被放弃的 cert 凑 quorum，配合视图收敛后的重票可令两个 cert 各自凑齐
+    /// quorum，形成同高度分叉。改为 last-write-wins：signer 的重票**替换**其
+    /// 旧票，任何时刻池内总票数 ≤ validator 数，两个 5 票 quorum 在 n=7 下
+    /// 不可能同时成立（5+5 > 7）。
     fn add_vote(&self, vote: CommitVote) {
         let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
-        let exists = votes.iter().any(|v| {
-            v.signer_pubkey == vote.signer_pubkey && v.cert_signing_hash == vote.cert_signing_hash
-        });
-        if exists {
+        let same_signer_at_height = |v: &CommitVote| {
+            v.epoch == vote.epoch
+                && v.commit_round == vote.commit_round
+                && v.signer_pubkey == vote.signer_pubkey
+        };
+        if votes.iter().any(|v| {
+            same_signer_at_height(v) && v.cert_signing_hash == vote.cert_signing_hash
+        }) {
             return;
         }
         if votes.len() >= Self::MAX_VOTES {
@@ -211,6 +224,8 @@ impl VoteCollector {
             let drop_count = votes.len() / 4 + 1;
             votes.drain(0..drop_count);
         }
+        // 替换该 signer 在同一高度的旧票（若有不同 hash 的旧票）。
+        votes.retain(|v| !same_signer_at_height(v));
         votes.push(vote);
     }
 
@@ -261,9 +276,21 @@ fn main() {
                 std::process::exit(1);
             }
         }
+        "tx" => {
+            if let Err(e) = run_tx(rest) {
+                error!("tx 构造失败：{e}");
+                std::process::exit(1);
+            }
+        }
         "keygen" => {
             if let Err(e) = run_keygen(rest) {
                 error!("keygen 失败：{e}");
+                std::process::exit(1);
+            }
+        }
+        "dkg" => {
+            if let Err(e) = run_dkg(rest) {
+                error!("dkg 失败：{e}");
                 std::process::exit(1);
             }
         }
@@ -297,6 +324,8 @@ fn print_usage() {
     eprintln!("子命令：");
     eprintln!("  node      启动节点（运行 JSON-RPC server）");
     eprintln!("  keygen    生成密钥对（secp256k1 / ed25519）");
+    eprintln!("  dkg       deal-sum DKG 密钥供给（全部 dealer 单进程执行，v1.5-e 原型部署面）");
+    eprintln!("  tx        构造并签名 Public tx，输出 submit_tx 参数 JSON（v1.5 演练工具）");
     eprintln!("  test-e2e  端到端链路测试（构造交易→签名→提交→出块→查询）");
     eprintln!("  version   打印版本号");
     eprintln!("  help      打印此帮助");
@@ -315,6 +344,21 @@ fn print_usage() {
         "  --validator-key <hex>                   validator 私钥（32B hex，不推荐：ps 可见）"
     );
     eprintln!("  --block-interval-ms <ms>                出块间隔毫秒（默认 1000，仅 validator）");
+    eprintln!(
+        "  --inclusion-deadline-ms <ms>            ForceInclude 强制包含期限毫秒（M3-ACC-6，默认 10000；0 = 禁用）"
+    );
+    eprintln!(
+        "  --checkpoint-interval <n>               checkpoint 产出间隔（块数，v1.5-c 默认 32；0 = 禁用）"
+    );
+    eprintln!(
+        "  --qc-threshold-t <t>                    checkpoint QC 阈值 t（v1.5-e 真 t-of-n 阈值 BLS；默认 0 = 聚合模式零回退）"
+    );
+    eprintln!(
+        "  --dkg-keyset <path>                     DKG 群密钥集 JSON（`zchain dkg` 产出；qc-threshold-t > 0 必填）"
+    );
+    eprintln!(
+        "  --dkg-share <path>                      本节点 DKG 群份额 JSON（`zchain dkg` 产出；qc-threshold-t > 0 必填）"
+    );
     eprintln!(
         "  --peer <addr>                           P2P peer 地址（可重复，如 127.0.0.1:9001）"
     );
@@ -336,6 +380,12 @@ fn print_usage() {
     eprintln!();
     eprintln!("`keygen` 选项：");
     eprintln!("  --scheme <secp256k1|ed25519>            签名方案（默认 secp256k1）");
+    eprintln!();
+    eprintln!("`dkg` 选项：");
+    eprintln!("  --n <n>                                 参与者总数 n");
+    eprintln!("  --t <t>                                 签名/重建阈值 t（2 <= t <= n）");
+    eprintln!("  --out-dir <path>                        输出目录（keyset.json + share-<id>.json）");
+    eprintln!("  --seed <hex>                            可选 32B hex 种子（默认 CSPRNG；原型口径，生产 dealer 应各自执行并销毁种子）");
     eprintln!();
     eprintln!("示例：");
     eprintln!("  zchain keygen --scheme secp256k1");
@@ -443,6 +493,15 @@ fn run_node(args: &[String]) -> Result<(), String> {
     let mut validator_key_hex: Option<String> = None;
     let mut validator_key_file: Option<PathBuf> = None;
     let mut block_interval_ms: u64 = DEFAULT_BLOCK_INTERVAL_MS;
+    // M3-ACC-6：强制包含期限（毫秒，默认 10000；0 = 禁用强制包含路径）。
+    let mut inclusion_deadline_ms: u64 = poker_l1::force_include::DEFAULT_INCLUSION_DEADLINE_MS;
+    // v1.5-c：checkpoint 产出间隔（块数；0 = 禁用）。
+    let mut checkpoint_interval: u64 =
+        poker_l1::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS;
+    // v1.5-e：阈值 QC 阈值 t（0 = 聚合模式）+ DKG 密钥材料路径。
+    let mut qc_threshold_t: u32 = 0;
+    let mut dkg_keyset_path: Option<PathBuf> = None;
+    let mut dkg_share_path: Option<PathBuf> = None;
     let mut peers: Vec<String> = Vec::new();
     // 缺口 #3：genesis validator set 文件（多 validator 共识所需，所有节点须一致）。
     let mut genesis_validators_file: Option<PathBuf> = None;
@@ -517,6 +576,37 @@ fn run_node(args: &[String]) -> Result<(), String> {
                 if block_interval_ms == 0 {
                     return Err("--block-interval-ms 必须 > 0".to_string());
                 }
+            }
+            "--inclusion-deadline-ms" => {
+                i += 1;
+                let v = args.get(i).ok_or("--inclusion-deadline-ms 缺少参数")?;
+                inclusion_deadline_ms = v
+                    .parse::<u64>()
+                    .map_err(|e| format!("--inclusion-deadline-ms 解析失败：{e}"))?;
+            }
+            "--checkpoint-interval" => {
+                i += 1;
+                let v = args.get(i).ok_or("--checkpoint-interval 缺少参数")?;
+                checkpoint_interval = v
+                    .parse::<u64>()
+                    .map_err(|e| format!("--checkpoint-interval 解析失败：{e}"))?;
+            }
+            // v1.5-e：checkpoint QC 阈值 t（0 = 聚合模式零回退；> 0 = 真 t-of-n）。
+            "--qc-threshold-t" => {
+                i += 1;
+                let v = args.get(i).ok_or("--qc-threshold-t 缺少参数")?;
+                qc_threshold_t = v
+                    .parse::<u32>()
+                    .map_err(|e| format!("--qc-threshold-t 解析失败：{e}"))?;
+            }
+            "--dkg-keyset" => {
+                i += 1;
+                dkg_keyset_path =
+                    Some(PathBuf::from(args.get(i).ok_or("--dkg-keyset 缺少参数")?));
+            }
+            "--dkg-share" => {
+                i += 1;
+                dkg_share_path = Some(PathBuf::from(args.get(i).ok_or("--dkg-share 缺少参数")?));
             }
             "--peer" => {
                 i += 1;
@@ -595,6 +685,31 @@ fn run_node(args: &[String]) -> Result<(), String> {
     };
     config.rpc_listen = rpc_listen.clone();
     config.p2p_listen = p2p_listen.clone();
+    // M3-ACC-6：强制包含期限（0 = 禁用，行为与历史版本一致）。
+    config.inclusion_deadline_ms = inclusion_deadline_ms;
+    if inclusion_deadline_ms == 0 {
+        info!("inclusion_deadline: 强制包含路径已禁用（--inclusion-deadline-ms 0）");
+    } else {
+        info!("inclusion_deadline: {inclusion_deadline_ms}ms");
+    }
+    // v1.5-c：checkpoint 间隔（0 = 禁用）。
+    config.checkpoint_interval_blocks = checkpoint_interval;
+    if checkpoint_interval == 0 {
+        info!("checkpoint: 已禁用（--checkpoint-interval 0）");
+    } else if qc_threshold_t > 0 {
+        info!("checkpoint: 每 {checkpoint_interval} 个高度产出一次（真 t-of-n 阈值 QC，t={qc_threshold_t}）");
+    } else {
+        info!("checkpoint: 每 {checkpoint_interval} 个高度产出一次（2f+1 BLS 聚签 QC）");
+    }
+    // v1.5-e：阈值 QC 配置（0 = 聚合模式零回退；> 0 = 阈值形态 + DKG 材料）。
+    config.qc_threshold_t = qc_threshold_t;
+    config.dkg_keyset_path = dkg_keyset_path;
+    config.dkg_share_path = dkg_share_path;
+    if qc_threshold_t == 0 {
+        info!("qc-threshold: 关闭（聚合模式，零回退）");
+    } else {
+        info!("qc-threshold: t={qc_threshold_t}（真 t-of-n 阈值 BLS，密钥来自 deal-sum DKG）");
+    }
     // 缺口 #3：加载 genesis validator set（多 validator 共识的 signer_bitmap index 基准）。
     if let Some(gv_path) = &genesis_validators_file {
         let entries = load_genesis_validators(gv_path)?;
@@ -1584,6 +1699,14 @@ impl NetworkTransport for TcpTransport {
             ));
         }
         let req = NetworkMessage::RequestVerticesByRange(start_round, end_round);
+        // 恰 quorum 存活修复：合并**所有** peer 的响应（按轮升序去重），而不是取
+        // 首个非空 —— 某个 peer 的 vertex 可能因作者已被罚没等原因在本地不可准入
+        //（作者失格 → put_vertex 拒绝），若只取它的响应，有效 peer 的数据永远
+        // 得不到补充。合并后按 (round, author, hash) 排序保证 parent 先于 child
+        // 被 admission 校验。空响应的 peer（自身落后）自然贡献 0 条。
+        let mut merged: Vec<DagVertex> = Vec::new();
+        let mut seen: BTreeSet<Hash> = BTreeSet::new();
+        let mut ok_peers = 0usize;
         for peer in &peers {
             match send_request_and_recv(&peer.address, &req) {
                 Ok(NetworkMessage::ResponseVertices(vertices)) => {
@@ -1592,7 +1715,13 @@ impl NetworkTransport for TcpTransport {
                         peer.address,
                         vertices.len()
                     );
-                    return Ok(vertices);
+                    ok_peers += 1;
+                    for vertex in vertices {
+                        let hash = vertex.vertex_hash();
+                        if seen.insert(hash) {
+                            merged.push(vertex);
+                        }
+                    }
                 }
                 Ok(other) => warn!(
                     "request_vertices_by_range: peer {} 返回非预期消息类型：{other:?}",
@@ -1601,9 +1730,18 @@ impl NetworkTransport for TcpTransport {
                 Err(e) => warn!("request_vertices_by_range: peer {} 失败：{e}", peer.address),
             }
         }
-        Err(poker_l1::error::PokerL1Error::Other(
-            "request_vertices_by_range: 所有 peer 请求失败".to_string(),
-        ))
+        if ok_peers == 0 {
+            return Err(poker_l1::error::PokerL1Error::Other(
+                "request_vertices_by_range: 所有 peer 请求失败".to_string(),
+            ));
+        }
+        merged.sort_by(|a, b| {
+            a.round
+                .cmp(&b.round)
+                .then_with(|| a.author_pubkey.to_bytes().cmp(&b.author_pubkey.to_bytes()))
+                .then_with(|| a.vertex_hash().cmp(&b.vertex_hash()))
+        });
+        Ok(merged)
     }
 
     fn request_proof_package_manifest(
@@ -1886,6 +2024,7 @@ fn reconstruct_compact_vertex(
         tx_list,
         parent_hashes: compact.parent_hashes.clone(),
         author_sig: compact.author_sig.clone(),
+        forced_tx_hashes: compact.forced_tx_hashes.clone(),
     };
     if vertex.vertex_hash() != compact.vertex_hash {
         return Err("compact vertex hash 与重建内容不匹配".into());
@@ -1951,6 +2090,51 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                             continue;
                         }
                         votes.add_vote(vote);
+                    }
+                    NetworkMessage::CheckpointVote(vote) => {
+                        // v1.5-c：checkpoint 投票（BLS 聚签）。签名有效性在
+                        // record 内验证（possession + 位点一致）；凑齐 2f+1 即
+                        // 聚合 QC 并落盘 sidecar。
+                        match node.record_checkpoint_vote(vote) {
+                            Ok((_count, Some(qc))) => {
+                                info!(
+                                    "CHECKPOINT QC FORMED (peer votes) epoch={} height={} signers={}",
+                                    qc.epoch,
+                                    qc.height,
+                                    qc.signer_count()
+                                );
+                            }
+                            Ok((_count, None)) => {}
+                            Err(e) => {
+                                warn!("checkpoint vote rejected: {e}");
+                            }
+                        }
+                    }
+                    NetworkMessage::CheckpointThresholdPartial(partial) => {
+                        // v1.5-e：阈值部分份额签名。验证在 record 内逐份进行
+                        //（对 keyset.public_share(id) 单配对）；凑齐 t 即 Lagrange
+                        // 重构装配阈值 QC 并落盘 sidecar。无 keyset 的节点拒绝
+                        //（fail-closed；聚合模式走 CheckpointVote 路径）。
+                        match node.record_threshold_partial(partial) {
+                            Ok((_count, Some(qc))) => {
+                                info!(
+                                    "THRESHOLD QC FORMED (peer partials) epoch={} height={} mode=threshold signers={}",
+                                    qc.epoch,
+                                    qc.height,
+                                    qc.signer_count()
+                                );
+                            }
+                            Ok((_count, None)) => {}
+                            Err(e) => {
+                                warn!("threshold partial rejected: {e}");
+                            }
+                        }
+                    }
+                    NetworkMessage::DaReceipt(receipt) => {
+                        // v1.5-d：DA 回执（validator 侧可用性签名）。
+                        if let Err(e) = node.record_da_receipt(receipt) {
+                            warn!("da receipt rejected: {e}");
+                        }
                     }
                     NetworkMessage::PeerExchange(peers) => {
                         // 缺口 #5：Peer Discovery / PEX —— 合并发现的 peer。
@@ -2278,31 +2462,105 @@ fn split_txs_into_batches(txs: Vec<Transaction>, max_size: usize) -> Vec<Vec<Tra
     batches
 }
 
+/// 恰 quorum 存活修复：投影结果三分支。
+enum CommitProjectionOutcome {
+    /// 投影就绪：(规范未提交序, 投影顶点)。
+    Ready(Vec<Hash>, Vec<DagVertex>),
+    /// 本地缺失未提交祖先 —— 携带需要定向补洞的轮次区间（min_round, max_round）。
+    MissingVertices(u64, u64),
+    /// leader 的全部祖先均已提交 → 无可投影内容（空投影，弃权）。
+    Empty,
+}
+
 /// Resolve one Bullshark leader into the canonical, not-yet-committed projection.
 ///
 /// Committed vertices remain in the in-memory DAG because later rounds reference them.  The
 /// committed frontier therefore has to be applied before building a block, otherwise an old
 /// ancestor's transactions would be replayed in every later commit.
+///
+/// 恰 quorum 存活修复：投影遍历不降入已提交 vertex（committed 集祖先封闭），
+/// 本地 DAG 缺历史 round 不再导致永久投影失败；未提交区缺口经
+/// [`CommitProjectionOutcome::MissingVertices`] 上报，由调用方定向补洞
+/// （RequestVerticesByRange）后收敛，而非签出分裂票或永久弃权。
 fn canonical_commit_projection(
     dag: &Dag,
     leader: &poker_l1::consensus::CommitLeader,
     committed_vertices: &BTreeSet<Hash>,
-) -> Result<(Vec<Hash>, Vec<DagVertex>), String> {
-    let ordered_hashes =
-        bullshark_linear_order_uncommitted(dag, &leader.referencing_hashes, committed_vertices)
-            .map_err(|error| format!("Bullshark projection unavailable: {error}"))?;
+) -> CommitProjectionOutcome {
+    let attempt = attempt_commit_projection(
+        dag,
+        &leader.referencing_hashes,
+        committed_vertices,
+        leader.leader_round.saturating_add(1),
+    );
+    if !attempt.missing.is_empty() {
+        let min_round = attempt.missing.iter().map(|(_, round)| *round).min().unwrap_or(1);
+        let max_round = attempt.missing.iter().map(|(_, round)| *round).max().unwrap_or(1);
+        return CommitProjectionOutcome::MissingVertices(min_round, max_round);
+    }
+    let ordered_hashes = attempt.ordered_hashes;
     if ordered_hashes.is_empty() {
-        return Err("Bullshark commit contains no uncommitted vertices".into());
+        return CommitProjectionOutcome::Empty;
     }
     let mut vertices = Vec::with_capacity(ordered_hashes.len());
     for hash in &ordered_hashes {
-        vertices.push(
-            dag.get(hash)
-                .cloned()
-                .ok_or_else(|| "Bullshark projection lost a referenced vertex".to_string())?,
-        );
+        match dag.get(hash) {
+            Some(vertex) => vertices.push(vertex.clone()),
+            None => return CommitProjectionOutcome::Empty,
+        }
     }
-    Ok((ordered_hashes, vertices))
+    CommitProjectionOutcome::Ready(ordered_hashes, vertices)
+}
+
+/// 恰 quorum 修复 · 定向补洞：向 peer 请求 [min_round, max_round] 轮的 vertex，
+/// 经完整 admission 校验（put_vertex）后补入本地 live DAG。500ms 限频。
+fn repair_missing_vertices(
+    transport: &TcpTransport,
+    dag: &Arc<Mutex<Dag>>,
+    node: &Node,
+    min_round: u64,
+    max_round: u64,
+    last_repair: &mut Option<std::time::Instant>,
+) {
+    let now = std::time::Instant::now();
+    if let Some(previous) = last_repair {
+        if now.duration_since(*previous) < Duration::from_millis(500) {
+            return;
+        }
+    }
+    *last_repair = Some(now);
+    match transport.request_vertices_by_range(min_round, max_round) {
+        Ok(vertices) => {
+            let mut accepted = 0usize;
+            for vertex in vertices {
+                // accept_p2p_vertex：validate + persist + 写入 live DAG。
+                let hash = vertex.vertex_hash();
+                match node.put_vertex(&vertex) {
+                    Ok(_) => {
+                        let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                        dag_guard.insert(vertex);
+                        accepted += 1;
+                    }
+                    Err(error) => {
+                        // 恰 quorum 修复 · 可观测性：补洞被拒即视角无法收敛的根因信号
+                        //（作者失格 / parent 缺失 / epoch 不合），必须可见。
+                        warn!(
+                            vertex = %hex::encode(hash),
+                            round = vertex.round,
+                            "vertex 定向补洞被拒：{error}"
+                        );
+                    }
+                }
+            }
+            info!(
+                min_round,
+                max_round,
+                accepted,
+                "vertex 定向补洞完成（commit 投影缺口修复）"
+            );
+        }
+        Err(error) => warn!("vertex 定向补洞请求失败：{error}"),
+    }
 }
 
 /// Derive the canonical execution result shared by commit votes and final block construction.
@@ -2330,11 +2588,22 @@ fn derive_commit_execution(
     if vertices.iter().any(|vertex| vertex.epoch != leader.epoch) {
         return Err("Bullshark projection crosses an epoch boundary".into());
     }
+    // v1.5-a2：forced 集以 commit 投影内 vertex 载荷的并集为准（共识数据），
+    // 不再读出块节点本地 force_include 状态 —— 所有 validator 对同一投影
+    // 推导出同一 forced 集，消除本地状态不一致导致的排序分叉。
+    let forced_hashes = poker_l1::consensus::commit_forced_union(vertices);
+    if !forced_hashes.is_empty() {
+        info!(
+            "commit_forced_union: {} 个 forced hash 来自 vertex 载荷（{} 个 vertex，共识数据而非节点本地状态）",
+            forced_hashes.len(),
+            vertices.len()
+        );
+    }
     let vertex_txs: Vec<Vec<Transaction>> = vertices
         .iter()
         .map(|vertex| vertex.tx_list.clone())
         .collect();
-    let sorted_txs = sort_commit_txs_r4m4(vertex_txs);
+    let sorted_txs = sort_commit_txs_r4m4_with_force_include(vertex_txs, &forced_hashes);
     let mut public_txs = Vec::new();
     let mut gameturn_txs = Vec::new();
     for tx in &sorted_txs {
@@ -2441,7 +2710,7 @@ fn commit_and_finalize_block(
                     );
                     transport.publish_light_headers_from_node(node);
                     *commit_round_out += 1;
-                    *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
+                    *prev_commit_hash_out = block.header.dag_commit_certificate.signing_hash(chain_id);
                     *prev_block_hash_out = block_hash;
                     committed_vertices.extend(ordered_hashes.iter().copied());
                     let _ = dag;
@@ -2537,7 +2806,7 @@ fn commit_and_finalize_block_multi(
             );
             transport.publish_light_headers_from_node(node);
             *commit_round_out += 1;
-            *prev_commit_hash_out = block.header.dag_commit_certificate.cert_hash(chain_id);
+            *prev_commit_hash_out = block.header.dag_commit_certificate.signing_hash(chain_id);
             *prev_block_hash_out = block_hash;
             committed_vertices.extend(ordered_hashes.iter().copied());
             let _ = dag;
@@ -2667,6 +2936,155 @@ fn fold_committed_vertices(
 /// 2. secp256k1 签名 vertex → `dag.insert` + `node.put_vertex` + P2P 广播
 /// 3. 从第 2 轮起，当前 vertex 引用上一轮 vertex → 自动满足 quorum(1) → commit
 /// 4. 构造 block → `node.put_block` + P2P 广播
+/// v1.5-c：checkpoint 间隔触发 —— validator 对 tip 签发 BLS checkpoint 投票，
+/// 本地记录并 gossip（各节点独立收集 2f+1 后聚合 QC 并落盘 sidecar）。
+fn maybe_sign_and_gossip_checkpoint(
+    node: &Node,
+    bls_sk: &poker_l1::consensus::checkpoint::BlsSecretKey,
+    transport: &TcpTransport,
+    signed_checkpoints: &mut BTreeSet<(u64, u64)>,
+) {
+    use poker_l1::consensus::checkpoint::CheckpointVote;
+    let Some((epoch, height, state_root)) = node.checkpoint_target() else {
+        return;
+    };
+    // 本节点已签过该位点 → 不重复签发/广播
+    if signed_checkpoints.contains(&(epoch, height)) {
+        return;
+    }
+    let vote = match CheckpointVote::sign(epoch, height, state_root, bls_sk) {
+        Ok(v) => v,
+        Err(e) => {
+            warn!("checkpoint vote 签名失败（epoch={epoch} height={height}）：{e}");
+            return;
+        }
+    };
+    signed_checkpoints.insert((epoch, height));
+    match node.record_checkpoint_vote(vote.clone()) {
+        Ok((_count, Some(qc))) => {
+            info!(
+                "CHECKPOINT QC FORMED epoch={} height={} signers={} agg_sig={} — 已落盘 checkpoints.jsonl",
+                qc.epoch,
+                qc.height,
+                qc.signer_count(),
+                hex::encode(&qc.agg_signature_g1)
+            );
+        }
+        Ok((count, None)) => {
+            debug!(
+                "checkpoint vote 已记录 epoch={epoch} height={height} collected={count}"
+            );
+        }
+        Err(e) => {
+            warn!("checkpoint vote 记录失败（epoch={epoch} height={height}）：{e}");
+            return;
+        }
+    }
+    if let Err(e) = transport.gossip_broadcast(
+        GossipTopic::Checkpoint,
+        &NetworkMessage::CheckpointVote(vote),
+    ) {
+        warn!("checkpoint vote 广播失败：{e}");
+    }
+}
+
+/// v1.5-e：阈值形态 checkpoint 触发 —— validator 对 tip 已覆盖的最新间隔边界
+/// 用 DKG 群份额签发部分签名 `σ_i = x_i·H(m)`，本地记录并 gossip（各节点独立
+/// 收集 ≥ t 份后经 Lagrange 重构装配阈值 QC 并落盘 sidecar）。
+///
+/// 与聚合路径（[`maybe_sign_and_gossip_checkpoint`]）二选一：由节点
+/// `qc_threshold_t` 配置分派（0 = 聚合零回退；> 0 = 阈值）。
+fn maybe_sign_and_gossip_checkpoint_threshold(
+    node: &Node,
+    transport: &TcpTransport,
+    signed_sites: &mut BTreeSet<(u64, u64)>,
+) {
+    use poker_l1::consensus::checkpoint::ThresholdQcPartial;
+    let Some((epoch, height, state_root)) = node.checkpoint_target() else {
+        return;
+    };
+    // 本节点已签过该位点 → 不重复签发/广播
+    if signed_sites.contains(&(epoch, height)) {
+        return;
+    }
+    let Some(dkg_share) = node.dkg_share() else {
+        return; // 无群份额（非阈值参与者）→ 只收集不签发
+    };
+    let signing_hash = poker_l1::consensus::checkpoint::checkpoint_qc_signing_hash(
+        epoch, height, state_root,
+    );
+    let sig = match dkg_share.partial_sign(&signing_hash) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("threshold partial 签名失败（epoch={epoch} height={height}）：{e}");
+            return;
+        }
+    };
+    let partial = ThresholdQcPartial {
+        epoch,
+        height,
+        state_root,
+        participant_id: dkg_share.id,
+        sig_g1: sig.to_vec(),
+    };
+    signed_sites.insert((epoch, height));
+    match node.record_threshold_partial(partial.clone()) {
+        Ok((_count, Some(qc))) => {
+            info!(
+                "THRESHOLD QC FORMED epoch={} height={} mode=threshold signers={} t={} group_digest=0x{} — 已落盘 checkpoints.jsonl",
+                qc.epoch,
+                qc.height,
+                qc.signer_count(),
+                node.qc_threshold_t(),
+                qc.threshold
+                    .as_ref()
+                    .map(|t| hex::encode(t.group_key_digest))
+                    .unwrap_or_default(),
+            );
+        }
+        Ok((count, None)) => {
+            debug!(
+                "threshold partial 已记录 epoch={epoch} height={height} collected={count}/{}",
+                node.qc_threshold_t()
+            );
+        }
+        Err(e) => {
+            warn!("threshold partial 记录失败（epoch={epoch} height={height}）：{e}");
+            return;
+        }
+    }
+    if let Err(e) = transport.gossip_broadcast(
+        GossipTopic::Checkpoint,
+        &NetworkMessage::CheckpointThresholdPartial(partial),
+    ) {
+        warn!("threshold partial 广播失败：{e}");
+    }
+}
+
+/// v1.5-c：fork-anchor 检测 —— commit tip 落后最后 QC checkpoint 超过
+/// `max_lag_blocks` 时告警（分叉/数据缺失原语，watcher 精神的接线点）。
+fn maybe_warn_fork_anchor(node: &Node, max_lag_blocks: u64) {
+    use poker_l1::consensus::checkpoint::{ForkAnchorStatus, check_fork_anchor};
+    let qc_height = node.latest_checkpoint_qc().map(|qc| qc.height);
+    let tip = node
+        .block_store()
+        .get_tip_height()
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+    match check_fork_anchor(qc_height, tip, max_lag_blocks) {
+        ForkAnchorStatus::Anchored => {}
+        ForkAnchorStatus::Lagging => debug!(
+            "fork-anchor: commit tip {tip} 落后 checkpoint 高度 {}（窗口内，容忍）",
+            qc_height.unwrap_or(0)
+        ),
+        ForkAnchorStatus::Diverged => warn!(
+            "FORK ANCHOR WARNING: commit tip {tip} 落后最后 checkpoint QC 高度 {} 超过 {max_lag_blocks} 块 — 可能分叉或数据缺失",
+            qc_height.unwrap_or(0)
+        ),
+    }
+}
+
 fn run_validator_loop(
     node: Arc<Node>,
     validator_key: ValidatorKey,
@@ -2690,6 +3108,16 @@ fn run_validator_loop(
     };
     let author_pubkey = validator_key.tagged_pubkey.clone();
 
+    // v1.5-c：BLS 密钥由 validator secp 私钥域分隔派生（原型口径；阈值/DKG
+    // 接入点见 consensus::checkpoint 模块头）。
+    let bls_sk = poker_l1::consensus::checkpoint::bls_derive_secret_key(
+        &validator_key.secret_key_bytes,
+    );
+    // 本节点已签署的 checkpoint 位点（(epoch, height)；防同一 tick 重复签发/广播）
+    let mut signed_checkpoints: BTreeSet<(u64, u64)> = BTreeSet::new();
+    // v1.5-e：阈值形态同款去重集（阈值模式 t>0 时使用）
+    let mut signed_threshold_sites: BTreeSet<(u64, u64)> = BTreeSet::new();
+
     let mut epoch = node.current_epoch();
     let mut round: u64 = 1;
     let (mut commit_round, mut prev_commit_hash, mut prev_block_hash) = node
@@ -2707,7 +3135,7 @@ fn run_validator_loop(
                 .unwrap_or(u64::MAX);
             (
                 next_round,
-                tip.header.dag_commit_certificate.cert_hash(chain_id),
+                tip.header.dag_commit_certificate.signing_hash(chain_id),
                 tip.block_hash(chain_id),
             )
         });
@@ -2720,6 +3148,19 @@ fn run_validator_loop(
     // tick 增量折叠 tip 新增区块（含 gossip/catch-up 导入的 peer 区块）。
     let mut committed_vertices: BTreeSet<Hash> = BTreeSet::new();
     let mut last_folded_height: u64 = 0;
+    // 恰 quorum 存活修复 · L4 意图稳定门：记录上一生产周期的投票意图
+    // (height, leader_hash, 投影)。视角仍在收敛（gossip 乱序/迟到 vertex 改变
+    // 投影）时本周期弃权，连续两个周期意图一致才签票 —— 防止同一节点对同一
+    // 高度先后为两个不同 cert 签票（双票 → 两个 cert 各自凑齐 quorum → 同高度
+    // 分叉，h3 实测）。
+    let mut last_commit_intent: Option<(u64, Hash, Vec<Hash>)> = None;
+    // 恰 quorum 存活修复 · L5 投票钉扎：(epoch, commit_round) → (cert hash, 首票
+    // 时刻)。同一高度一旦签票，钉扎期内拒绝为不同 cert 再签（fail-closed 防双票
+    // 等价错误）；超时未决策才释放重投（视图长期分歧的逃生口）。已决策高度
+    // （commit_round ≤ tip）的 pin 定期清理。
+    let mut commit_vote_pins: HashMap<(u64, u64), (Hash, std::time::Instant)> = HashMap::new();
+    // 恰 quorum 存活修复 · 定向补洞限频：上次向 peer 请求缺失 vertex 的时刻。
+    let mut last_vertex_repair: Option<std::time::Instant> = None;
     loop {
         let before = last_folded_height;
         fold_committed_vertices(&node, &mut committed_vertices, &mut last_folded_height);
@@ -2729,6 +3170,12 @@ fn run_validator_loop(
     }
     // 缺口 #3 §3.6：epoch 推进周期（每 EPOCH_LENGTH 个 commit 推进一次 epoch）。
     const EPOCH_LENGTH: u64 = 10;
+    // 恰 quorum 修复 · L5 投票钉扎释放窗口：钉扎超过该时长仍未见该高度决策
+    // （tip 未推进过钉扎的 commit_round），允许为不同 cert 重投（视图长期分歧
+    // 的活性逃生口）。窗口内拒绝双票（fail-closed）。取 5s：健康路径上 quorum
+    // 在数百 ms 内决策，5s 足够覆盖启动/epoch 切换期的视图churn，把「同一节点
+    // 先后为两个 cert 签票」压缩到极端分区场景。
+    const COMMIT_VOTE_PIN_RELEASE: Duration = Duration::from_secs(5);
 
     info!(
         "validator 产块循环已启动（混合模式，间隔={}ms，pubkey={})",
@@ -2740,6 +3187,28 @@ fn run_validator_loop(
         // 折叠 tip 新增区块的 cert vertex（本地 commit / peer gossip / catch-up 导入
         // 都汇入 block_store），保持 committed 投影过滤集合与链一致。
         fold_committed_vertices(&node, &mut committed_vertices, &mut last_folded_height);
+        // v1.5-c：checkpoint 间隔触发（签名/收集/聚合/落盘）+ fork-anchor 检测。
+        // v1.5-e：阈值模式（t>0）签份额签名（Lagrange 重构装配阈值 QC）；
+        // 聚合模式（t=0）维持既有 2f+1 聚签路径（零回退）。
+        if node.qc_threshold_t() > 0 {
+            maybe_sign_and_gossip_checkpoint_threshold(
+                &node,
+                &transport,
+                &mut signed_threshold_sites,
+            );
+        } else {
+            maybe_sign_and_gossip_checkpoint(&node, &bls_sk, &transport, &mut signed_checkpoints);
+        }
+        maybe_warn_fork_anchor(&node, 2 * node.checkpoint_interval_blocks().max(1));
+        // v1.5-d：DA 回执 outbox 广播（da_request RPC 签发的本地回执）。
+        for receipt in node.drain_da_outbox() {
+            if let Err(e) = transport.gossip_broadcast(
+                GossipTopic::Checkpoint,
+                &NetworkMessage::DaReceipt(receipt),
+            ) {
+                warn!("da receipt 广播失败：{e}");
+            }
+        }
         // 混合模式核心：等待 tx 或超时
         // - 有 tx 时被 submit_tx 的 notify_one 立即唤醒 → 零延迟出 vertex
         // - 超时返回 false → 检查是否需要出空 vertex 推进 commit
@@ -2749,7 +3218,8 @@ fn run_validator_loop(
         //     "[validator-loop] round={} wait_for_pending_tx 返回 has_tx={}",
         //     round, _has_tx
         // );
-        let txs = node.drain_pending_tx();
+        // v1.5-a2：drain 同时返回本轮 forced 集，写入 vertex 载荷（共识承诺）。
+        let (txs, drain_forced_hashes) = node.drain_pending_tx_for_block_with_forced();
 
         if !txs.is_empty() {
             info!(
@@ -2860,6 +3330,20 @@ fn run_validator_loop(
             for tx in batch {
                 builder.push_tx(tx);
             }
+            // v1.5-a2：本 vertex 实际携带的 forced 集 = 本轮 drain forced 集
+            // ∩ 本 batch tx 集（forced hash 只承诺真实进入本 vertex 的交易）。
+            if !drain_forced_hashes.is_empty() {
+                let batch_hashes: std::collections::BTreeSet<Hash> =
+                    builder.tx_list.iter().map(|tx| tx.tx_hash()).collect();
+                let batch_forced: Vec<Hash> = drain_forced_hashes
+                    .iter()
+                    .copied()
+                    .filter(|h| batch_hashes.contains(h))
+                    .collect();
+                if !batch_forced.is_empty() {
+                    builder = builder.with_forced_tx_hashes(batch_forced);
+                }
+            }
             let builder = builder.with_parents(parent_hashes);
 
             // 创世轮（round 1）无 parent。其余轮次必须先凑齐真实 validator quorum；
@@ -2878,6 +3362,23 @@ fn run_validator_loop(
                         "vertex parent quorum 未就绪，跳过本轮并回排 {} 笔交易：{e}",
                         deferred_count
                     );
+                    // 恰 quorum 存活修复 · 生产侧补洞：parent 缺口多为「vertex 一次性
+                    // gossip 在断连/启动竞态中丢失」所致，而 vertex 不会重播 —— 不主动
+                    // 补齐则节点永久卡在本轮（恰 quorum 时少一个生产者即全网停滞）。
+                    // 丢失常是**连续多轮**（断连窗口内的所有 vertex），且补入的 vertex
+                    // 其 parent 也必须在本地，故请求范围向前覆盖 8 轮；限频执行。
+                    {
+                        let parent_round = round.saturating_sub(1).max(1);
+                        let window_start = parent_round.saturating_sub(8).max(1);
+                        repair_missing_vertices(
+                            &transport,
+                            &dag,
+                            &node,
+                            window_start,
+                            parent_round,
+                            &mut last_vertex_repair,
+                        );
+                    }
                     std::thread::sleep(block_interval.min(Duration::from_secs(1)));
                     break;
                 }
@@ -2951,13 +3452,32 @@ fn run_validator_loop(
 
             // 从第 2 轮起，检测 commit 并产出 block（缺口 #3：真实 2/3 多签闭环）。
             //
-            // 多 validator 活性修复：不只检查 last_vertex，而是扫描最近几轮（max_round-4
-            // 到 max_round-1）的所有 vertex 作为候选 commit leader。这些较旧 vertex 有
-            // 足够时间积累 2/3 distinct-author 引用。首个满足 quorum 的候选即提交。
-            // 单 validator（vc<=1）仍直接用 last_vertex 自签出块。
+            // 恰 quorum 存活 commit 停滞根因修复（详见
+            // poker_l1/src/consensus/bullshark.rs 模块头「canonical leader 候选序」）：
+            // 旧实现扫本地 `max_r-4..max_r-1` 滑窗 + DAG 插入序取首个满足 quorum 的候选。
+            // 窗口边界随各节点生产节奏错位（本节点刚出 vertex 则 max_r 已 +1，peer 未同步
+            // 则 -1），同轮候选又按各自到达序排列 —— 不同节点对同一 DAG 推断出不同的首候选
+            // leader，对不同 cert_signing_hash 签票（实测票数 2/4/1 分裂），恰 quorum 存活
+            // （7 杀 2 余 5，quorum=5）时任何单个 cert 永远凑不齐 5 票：DAG 平面健康推进
+            // 而 chain tip 停滞。现改为全量未提交 vertex 的规范化全序
+            // (round, author, hash) + 廉价 quorum 预检：候选序是 (DAG, committed) 的纯
+            // 函数且单调稳定，投票跨节点单调汇聚。单 validator（vc<=1）仍直接用
+            // last_vertex 自签出块。
             {
                 let vc = node.active_validator_count().max(1);
-                // 收集候选 leader：单 validator 用 last_vertex；多 validator 扫描旧轮。
+                // L5 pin 清理：commit_round ≤ 当前 tip 的高度已经决策，钉扎不再需要。
+                {
+                    let tip_now = node
+                        .block_store()
+                        .get_tip_height()
+                        .ok()
+                        .flatten()
+                        .unwrap_or(0);
+                    commit_vote_pins.retain(|(pin_epoch, pin_cr), _| {
+                        *pin_epoch == epoch && *pin_cr > tip_now
+                    });
+                }
+                // 收集候选 leader：单 validator 用 last_vertex；多 validator 用规范化全序。
                 let candidate_leaders: Vec<Hash> = if vc <= 1 {
                     last_vertex
                         .as_ref()
@@ -2965,29 +3485,30 @@ fn run_validator_loop(
                         .unwrap_or_default()
                 } else {
                     let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                    let max_r = match dag_guard.max_round() {
-                        Some(m) if m >= 2 => m,
-                        _ => {
-                            // max_round < 2，不足以 commit（至少需 2 轮：leader + 引用轮）。
-                            last_vertex = Some(vertex);
-                            round += 1;
-                            let _ = batch_tx_count;
-                            continue;
-                        }
-                    };
-                    // 扫描 max_r-4 到 max_r-1 轮的所有 vertex（去重）作为候选。
-                    let scan_start = max_r.saturating_sub(4).max(1);
-                    let mut cands: Vec<Hash> = Vec::new();
-                    for r in scan_start..max_r {
-                        for vh in dag_guard.round_vertices(r) {
-                            cands.push(*vh);
-                        }
-                    }
-                    cands
+                    // L2 成熟度门：只考虑 round ≤ max_r-2 的候选 —— 其引用轮
+                    // (round+1) 已落后前沿一整轮，引用集基本冻结，投影随 gossip
+                    // 收敛趋于稳定；前沿 1-2 轮内的候选引用集仍在增长，投影易变，
+                    // 据此签票会放大 cert 分歧。
+                    let mature_cap = dag_guard
+                        .max_round()
+                        .and_then(|max_r| max_r.checked_sub(2))
+                        .unwrap_or(0);
+                    canonical_commit_candidates(&dag_guard, &committed_vertices)
+                        .into_iter()
+                        .filter(|leader_hash| {
+                            let mature = dag_guard
+                                .get(leader_hash)
+                                .is_some_and(|v| v.round <= mature_cap);
+                            mature && has_quorum_distinct_author_references(&dag_guard, leader_hash, vc)
+                        })
+                        .collect()
                 };
 
                 // 对每个候选 leader 调 detect_commit_leader，首个满足 quorum 的提交。
+                // 投影缺口（MissingVertices / 引用叶缺失）触发定向补洞后整体弃权，
+                // 下一个生产周期以补齐的视角重新参与投票。
                 let mut committed;
+                let mut repair_plan: Option<(u64, u64)> = None;
                 for leader_hash in &candidate_leaders {
                     let commit_result = {
                         let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
@@ -2996,36 +3517,140 @@ fn run_validator_loop(
                     if let Ok(Some(_)) = &commit_result {
                         // 找到可 commit 的 leader，并 resolve the same canonical projection
                         // that will be committed in the certificate and block body.
-                        let (leader_vertex, ordered_hashes, commit_vertices) = {
+                        let projection_pick: Option<(
+                            DagVertex,
+                            Vec<Hash>,
+                            Vec<DagVertex>,
+                        )> = 'pick: {
                             let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                            let leader_vertex = match dag_guard.get(leader_hash).cloned() {
-                                Some(vertex) => vertex,
-                                None => continue,
+                            let Some(leader_vertex) = dag_guard.get(leader_hash).cloned() else {
+                                break 'pick None;
                             };
                             if committed_vertices.contains(leader_hash) {
-                                continue;
+                                break 'pick None;
                             }
                             let commit_leader = match commit_result.as_ref() {
                                 Ok(Some(commit_leader)) => commit_leader,
-                                _ => continue,
+                                _ => break 'pick None,
                             };
-                            let (ordered_hashes, commit_vertices) =
-                                match canonical_commit_projection(
-                                    &dag_guard,
-                                    commit_leader,
-                                    &committed_vertices,
-                                ) {
-                                    Ok(projection) => projection,
-                                    Err(error) => {
-                                        warn!(
-                                            "Bullshark commit projection unavailable for {}: {}",
-                                            hex::encode(leader_hash),
-                                            error
+                            match canonical_commit_projection(
+                                &dag_guard,
+                                commit_leader,
+                                &committed_vertices,
+                            ) {
+                                CommitProjectionOutcome::Ready(ordered_hashes, commit_vertices) => {
+                                    // 引用轮闭合检查：round-(r+1) 的作者集必须覆盖
+                                    // round-r 的作者集（每 (author, round) 至多一个
+                                    // vertex）。不满足 = 本地还缺 r+1 的 vertex，引用集
+                                    // （进而投影）仍会增长 → 弃权并定向补洞，防止对
+                                    // 「半熟引用集」的投影签票。
+                                    let ref_round = commit_leader.leader_round.saturating_add(1);
+                                    let authors_of = |dag: &Dag, round: u64| -> BTreeSet<Vec<u8>> {
+                                        dag.round_vertices(round)
+                                            .iter()
+                                            .filter_map(|hash| dag.get(hash))
+                                            .map(|vertex| vertex.author_pubkey.to_bytes())
+                                            .collect()
+                                    };
+                                    let authors_leader = authors_of(&dag_guard, commit_leader.leader_round);
+                                    let authors_referencing = authors_of(&dag_guard, ref_round);
+                                    // 恰 quorum 存活修复 · 前沿缺席分类：掉线 validator 的
+                                    // round-(r+1) vertex 永远不会到来。闭合检查原样把「永久
+                                    // 缺席」当「gossip 在途」无限等待，而候选按 (round asc)
+                                    // 序最老者优先 —— 含缺席作者的老候选每个生产周期都触发
+                                    // 整体弃权，恰 quorum 存活（kill-2 后存活恰 = quorum）时
+                                    // 全网 commit 冻死（7 节点演练实测：vertex 平面持续推进
+                                    // 而 tip 停滞）。前沿已前移 COMMIT_ABSENCE_ROUNDS 轮且
+                                    // 作者自 ref_round 起无任何 vertex → 按离线处理，引用集
+                                    // 视为已冻结。分类是 DAG 内容的纯函数（同视图必同分类，
+                                    // 无新 cert 分裂源；收敛窗口由 L4 意图稳定门兜底）。
+                                    // finality 口径不变：cert 2/3 签名与引用 quorum 仍按
+                                    // 全集 validator 数执行。
+                                    let missing_authors: Vec<Vec<u8>> = authors_leader
+                                        .difference(&authors_referencing)
+                                        .cloned()
+                                        .collect();
+                                    let authors_settled = missing_authors.is_empty()
+                                        || (dag_guard
+                                            .max_round()
+                                            .unwrap_or(0)
+                                            .saturating_sub(ref_round)
+                                            >= COMMIT_ABSENCE_ROUNDS
+                                            && missing_authors.iter().all(|author| {
+                                                !author_has_vertex_since(
+                                                    &dag_guard,
+                                                    author,
+                                                    ref_round,
+                                                )
+                                            }));
+                                    if !authors_settled {
+                                        repair_plan = Some((ref_round, ref_round));
+                                        debug!(
+                                            leader = %hex::encode(leader_hash),
+                                            leader_round = commit_leader.leader_round,
+                                            ref_round,
+                                            missing = missing_authors.len(),
+                                            "引用轮作者集不完整（引用集仍会增长），定向补洞后下周期再投票"
                                         );
-                                        continue;
+                                        break 'pick None;
                                     }
-                                };
-                            (leader_vertex, ordered_hashes, commit_vertices)
+                                    // 引用叶缺口扫描：缺失的 round-(r+1) 引用叶不出现在
+                                    // 任何祖先路径上（投影/预检均不报错），但会令不同节点
+                                    // 的引用集不同 → 投影不同 → cert 分裂。经由其在
+                                    // leader.round+2 轮的子顶点 parent 指针定位并补洞。
+                                    let leaf_round =
+                                        commit_leader.leader_round.saturating_add(2);
+                                    let missing_leaves = find_missing_parent_vertices(
+                                        &dag_guard,
+                                        leaf_round,
+                                        leaf_round,
+                                    );
+                                    if !missing_leaves.is_empty() {
+                                        let min_round = missing_leaves
+                                            .iter()
+                                            .map(|(_, round)| *round)
+                                            .min()
+                                            .unwrap_or(leaf_round);
+                                        let max_round = missing_leaves
+                                            .iter()
+                                            .map(|(_, round)| *round)
+                                            .max()
+                                            .unwrap_or(leaf_round);
+                                        repair_plan = Some((min_round, max_round));
+                                        debug!(
+                                            leader = %hex::encode(leader_hash),
+                                            missing_leaves = missing_leaves.len(),
+                                            min_round,
+                                            max_round,
+                                            "引用叶缺失，定向补洞后下周期再投票"
+                                        );
+                                        break 'pick None;
+                                    }
+                                    Some((leader_vertex, ordered_hashes, commit_vertices))
+                                }
+                                CommitProjectionOutcome::MissingVertices(min_round, max_round) => {
+                                    repair_plan = Some((min_round, max_round));
+                                    debug!(
+                                        leader = %hex::encode(leader_hash),
+                                        min_round,
+                                        max_round,
+                                        "commit 投影缺失未提交祖先，定向补洞后下周期再投票"
+                                    );
+                                    break 'pick None;
+                                }
+                                CommitProjectionOutcome::Empty => {
+                                    debug!(
+                                        leader = %hex::encode(leader_hash),
+                                        "commit 投影为空（leader 全部祖先已提交），弃权"
+                                    );
+                                    break 'pick None;
+                                }
+                            }
+                        };
+                        let Some((leader_vertex, ordered_hashes, commit_vertices)) = projection_pick
+                        else {
+                            // 触发了补洞或无需投票：跳出候选循环（本周期弃权）。
+                            break;
                         };
                         // commit 语句四元组永远从本地 tip 现取，而不是用本地缓存：
                         // peer 提交的区块经 gossip 入库后，本节点 tip 已前进，但缓存
@@ -3047,12 +3672,37 @@ fn run_validator_loop(
                                         .commit_round
                                         .checked_add(1)
                                         .unwrap_or(u64::MAX),
-                                    tip.header.dag_commit_certificate.cert_hash(chain_id),
+                                    tip.header.dag_commit_certificate.signing_hash(chain_id),
                                     tip.block_hash(chain_id),
                                 ),
                                 None => (1, 1, [0u8; 32], [0u8; 32]),
                             }
                         };
+
+                        // 恰 quorum 修复 · L4 意图稳定门（仅多 validator 投票路径）：
+                        // 连续两个生产周期意图一致（同 tip 高度、同 leader、同投影）
+                        // 才签票。视角收敛过程中投影会变，贸然签票会给同一高度留下
+                        // 两个不同 cert 各自凑齐 quorum 的分叉窗口（h3 实测）。
+                        // 例外：投影携带 forced 交易（抗审查 force-include fast path）
+                        // 时不做稳定等待 —— 该投影由共识载荷（vertex forced 集）确定，
+                        // 全网同步收敛，且审查罚没的 jail 级联会在数百 ms 内冻结诚实
+                        // 节点的 vertex 准入，多等一个生产周期就可能永远失去把
+                        // forced 交易写入块的机会。
+                        let projection_has_forced = commit_vertices
+                            .iter()
+                            .any(|vertex| !vertex.forced_tx_hashes.is_empty());
+                        if vc > 1 && !projection_has_forced {
+                            let intent = (height, *leader_hash, ordered_hashes.clone());
+                            if last_commit_intent.as_ref() != Some(&intent) {
+                                last_commit_intent = Some(intent);
+                                debug!(
+                                    commit_height = height,
+                                    leader = %hex::encode(leader_hash),
+                                    "commit 意图未稳定（视角仍在收敛），本周期弃权"
+                                );
+                                break;
+                            }
+                        }
 
                         if vc <= 1 {
                             // 单 validator：自签出块。
@@ -3095,6 +3745,40 @@ fn run_validator_loop(
                                     continue;
                                 }
                             };
+                            // 恰 quorum 修复 · L5 投票钉扎：同一 (epoch, commit_round)
+                            // 已为不同 cert 签过票且未超时 → 拒绝再签（fail-closed 防
+                            // 双票等价错误，双票曾致同高度两个 cert 各自凑齐 quorum）。
+                            {
+                                let pin_key = (epoch, tip_commit_round);
+                                let now = std::time::Instant::now();
+                                match commit_vote_pins.get(&pin_key) {
+                                    Some((pinned_hash, pinned_at))
+                                        if *pinned_hash != cert_signing_hash =>
+                                    {
+                                        if now.duration_since(*pinned_at) < COMMIT_VOTE_PIN_RELEASE
+                                        {
+                                            debug!(
+                                                commit_round = tip_commit_round,
+                                                pinned = %hex::encode(pinned_hash),
+                                                new = %hex::encode(cert_signing_hash),
+                                                "同高度已钉扎到不同 cert，拒绝双票"
+                                            );
+                                            break;
+                                        }
+                                        warn!(
+                                            commit_round = tip_commit_round,
+                                            from = %hex::encode(pinned_hash),
+                                            to = %hex::encode(cert_signing_hash),
+                                            "commit 投票钉扎超时释放（该高度长期未决策），按当前意图重投"
+                                        );
+                                        commit_vote_pins.insert(pin_key, (cert_signing_hash, now));
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        commit_vote_pins.insert(pin_key, (cert_signing_hash, now));
+                                    }
+                                }
+                            }
                             let self_sig = secp256k1_sign_hash(&secret_key, &cert_signing_hash);
                             let self_vote = CommitVote {
                                 epoch,
@@ -3121,30 +3805,33 @@ fn run_validator_loop(
                                         .map(|idx| (idx, vote.signature.clone()))
                                 })
                                 .collect();
-                            // 确保本节点签名在列（防御性）。
-                            if !sig_pairs
-                                .iter()
-                                .any(|(idx, _)| active_pubkeys.get(*idx) == Some(&author_pubkey))
-                            {
-                                if let Some(idx) =
-                                    active_pubkeys.iter().position(|pk| *pk == author_pubkey)
-                                {
-                                    sig_pairs.push((
-                                        idx,
-                                        secp256k1_sign_hash(&secret_key, &cert_signing_hash),
-                                    ));
-                                }
-                            }
+                            // 恰 quorum 修复：移除旧的「防御性自签」。旧逻辑在池中票数
+                            // 差一票时用本地签名补足 —— 节点可能从未广播过对该 cert 的
+                            // 投票（其真实投票在另一 cert 上），却在 cert 上留下自己的
+                            // 签名：同一高度两个不同 cert 各自被不同节点用防御性自签
+                            // 凑满 quorum 并落块（实测 h6/h11 相隔 2ms 双出块分叉）。
+                            // 现在只能用真实收集到的投票（含自己已广播的那张）凑 quorum；
+                            // 凑不齐就等待，绝不代签。
                             let quorum = required_quorum(vc);
                             if sig_pairs.len() < quorum {
                                 debug!(
                                     commit_round = tip_commit_round,
                                     votes = sig_pairs.len(),
                                     quorum,
+                                    cert = %hex::encode(cert_signing_hash),
+                                    leader = %hex::encode(leader_hash),
                                     "waiting for commit certificate quorum"
                                 );
-                                continue;
+                                // 恰 quorum 修复：本周期已为本 cert 投票并广播，绝不
+                                // 再为同高度的其他候选投票（防双票等价错误）。票数由
+                                // gossip 持续累积，下一生产周期重试同一 intent。
+                                break;
                             }
+                            // 修复：verify 端（validate_commit_certificate_signatures）按
+                            // bitmap 置位升序枚举并与 signature_list 位置一一对应，因此
+                            // 必须按 idx 升序排列签名（否则自投非最小 idx 的节点组装的
+                            // cert 永远验证失败 —— 既往「只有一个节点能出块」的根因）。
+                            sig_pairs.sort_by_key(|(idx, _)| *idx);
                             // Only discard votes after the block is accepted; a failed put_block
                             // must leave the certificate material available for retry.
                             committed = commit_and_finalize_block_multi(
@@ -3175,6 +3862,17 @@ fn run_validator_loop(
                             break;
                         }
                     }
+                }
+                // 恰 quorum 修复 · 定向补洞执行点：dag_guard 已释放，可安全加锁。
+                if let Some((min_round, max_round)) = repair_plan {
+                    repair_missing_vertices(
+                        &transport,
+                        &dag,
+                        &node,
+                        min_round,
+                        max_round,
+                        &mut last_vertex_repair,
+                    );
                 }
             }
 
@@ -3241,6 +3939,123 @@ fn run_validator_loop(
     info!("validator 产块循环已停止（共产出 {} 轮 vertex）", round - 1);
 }
 
+// ===== tx 子命令（v1.5 演练工具：构造 + 签名 Public tx，输出 submit_tx 参数） =====
+
+/// 构造并签名一笔 Public 通道 tx，输出可直接用于 JSON-RPC `submit_tx` 的参数。
+///
+/// 输出（单行 JSON）：
+/// `{"tx_hash_hex": "..64hex..", "tx_bytes": [b0, b1, ...], "nonce": N}`
+///
+/// tx 形状与 `test-e2e` 同款（空 inputs/outputs、Gas::zero、AnyValidator 路由），
+/// 签名为 secp256k1 recoverable（65B r||s||v）。演练脚本用 `tx_bytes` 数组直接
+/// 拼 `{"method":"submit_tx","params":{"tx_bytes":[..]}}`。
+fn run_tx(args: &[String]) -> Result<(), String> {
+    let mut secret_hex: Option<String> = None;
+    let mut payload = b"tx".to_vec();
+    let mut nonce: u64 = 0;
+    let mut chain_id = poker_l1::DEFAULT_CHAIN_ID;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--secret-key-hex" | "--secret-key-file" => {
+                i += 1;
+                let v = args.get(i).ok_or("--secret-key-* 缺少参数")?;
+                secret_hex = Some(if args[i - 1] == "--secret-key-file" {
+                    std::fs::read_to_string(v)
+                        .map_err(|e| format!("读取私钥文件失败：{e}"))?
+                        .trim()
+                        .to_string()
+                } else {
+                    v.clone()
+                });
+            }
+            "--payload" => {
+                i += 1;
+                let v = args.get(i).ok_or("--payload 缺少参数")?;
+                payload = v.as_bytes().to_vec();
+            }
+            "--nonce" => {
+                i += 1;
+                let v = args.get(i).ok_or("--nonce 缺少参数")?;
+                nonce = v.parse::<u64>().map_err(|e| format!("--nonce 解析失败：{e}"))?;
+            }
+            "--chain-id" => {
+                i += 1;
+                let v = args.get(i).ok_or("--chain-id 缺少参数")?;
+                chain_id = u64::from_str_radix(v.trim_start_matches("0x"), 16)
+                    .map_err(|e| format!("--chain-id 解析失败：{e}"))?;
+            }
+            "--help" | "-h" => {
+                eprintln!("用法: zchain tx --secret-key-hex <hex>|--secret-key-file <path> [--payload <ascii>] [--nonce <n>] [--chain-id <hex>]");
+                eprintln!("  构造并签名 Public tx，输出 submit_tx 参数 JSON（单行）。");
+                return Ok(());
+            }
+            other => return Err(format!("未知参数：{other}")),
+        }
+        i += 1;
+    }
+    let secret_hex = secret_hex.ok_or("必须提供 --secret-key-hex 或 --secret-key-file")?;
+    let secret_bytes = hex::decode(secret_hex.trim()).map_err(|e| format!("私钥 hex 解码失败：{e}"))?;
+    if secret_bytes.len() != 32 {
+        return Err(format!("私钥必须为 32 字节，得到 {}", secret_bytes.len()));
+    }
+    let secp = secp256k1::Secp256k1::new();
+    let secret_key =
+        secp256k1::SecretKey::from_slice(&secret_bytes).map_err(|e| format!("私钥无效：{e}"))?;
+    let public = secp256k1::PublicKey::from_secret_key(&secp, &secret_key);
+    let tagged_pubkey = TaggedPubkey::new(
+        SignatureScheme::Secp256k1,
+        CURRENT_VERSION,
+        public.serialize().to_vec(),
+    )
+    .map_err(|e| format!("tagged_pubkey 构造失败：{e}"))?;
+
+    let unsigned = Transaction {
+        inputs: vec![],
+        outputs: vec![],
+        contract_call: None,
+        tagged_pubkey,
+        signature: vec![],
+        gas: Gas::zero(),
+        lane_hint: TxLane::Public,
+        route_hint: RouteHint::AnyValidator,
+        chain_id,
+        nonce,
+        gameturn_nonce: None,
+        is_fallback: false,
+    };
+    // 签名对象须含 payload 语义：复用 outputs content 参与签名？否 —— v1 tx 签名
+    // 只覆盖 signing_hash（结构域）。payload 写入 outputs.data 以保证不同
+    // --payload 产出不同 tx_hash：改用单 output 携带 payload 字节。
+    let mut tx = unsigned;
+    if !payload.is_empty() {
+        tx.outputs = vec![poker_l1::object_model::Object::new(
+            poker_l1::object_model::ObjectID::new(derive_address(&tx.tagged_pubkey), nonce + 1),
+            poker_l1::object_model::Ownership::Shared,
+            "DrillPayload",
+            payload,
+            None,
+        )];
+    }
+    let signing_hash = tx.signing_hash();
+    let msg = secp256k1::Message::from_digest(signing_hash);
+    let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+    let (recovery_id, compact) = sig.serialize_compact();
+    let mut full_sig = compact.to_vec();
+    full_sig.push(recovery_id.to_i32() as u8);
+    tx.signature = full_sig;
+
+    let tx_bytes = tx.to_bcs().map_err(|e| format!("tx BCS 序列化失败：{e}"))?;
+    let bytes_json: Vec<String> = tx_bytes.iter().map(|b| b.to_string()).collect();
+    println!(
+        "{{\"tx_hash_hex\":\"{}\",\"tx_bytes\":[{}],\"nonce\":{}}}",
+        hex::encode(tx.tx_hash()),
+        bytes_json.join(","),
+        nonce
+    );
+    Ok(())
+}
+
 // ===== keygen 子命令 =====
 
 /// 运行 keygen。
@@ -3288,6 +4103,113 @@ fn run_keygen(args: &[String]) -> Result<(), String> {
     println!(
         "{}",
         serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?
+    );
+    Ok(())
+}
+
+// ===== dkg 子命令 =====
+
+/// 运行 deal-sum DKG 密钥供给（v1.5-e 原型部署面）。
+///
+/// 语义（见 `poker_l1::consensus::dkg` 模块头）：n 个 dealer **在本单进程内**
+/// 各自执行 [`dealer_deal`]（真 t-of-n：群私钥从不以明文存在于任何单点——
+/// 每个 dealer 只产出逐点份额），逐份额 Feldman 校验后 deal-sum 组装
+/// `keyset.json`（公开面，全体节点共用）与 `share-<id>.json`（私密面，分发
+/// 至对应参与者节点 `--dkg-share`）。生产部署中 dealer 应各自在 validator
+/// 进程内执行并经加密 P2P 交换 DkgDeal——算法与安全性性质一致，仅传输面不同。
+fn run_dkg(args: &[String]) -> Result<(), String> {
+    let mut n: u32 = 0;
+    let mut t: u32 = 0;
+    let mut out_dir = PathBuf::from("./dkg-out");
+    let mut seed_hex: Option<String> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--n" => {
+                i += 1;
+                let v = args.get(i).ok_or("--n 缺少参数")?;
+                n = v.parse::<u32>().map_err(|e| format!("--n 解析失败：{e}"))?;
+            }
+            "--t" => {
+                i += 1;
+                let v = args.get(i).ok_or("--t 缺少参数")?;
+                t = v.parse::<u32>().map_err(|e| format!("--t 解析失败：{e}"))?;
+            }
+            "--out-dir" => {
+                i += 1;
+                out_dir = PathBuf::from(args.get(i).ok_or("--out-dir 缺少参数")?);
+            }
+            "--seed" => {
+                i += 1;
+                seed_hex = Some(args.get(i).ok_or("--seed 缺少参数")?.clone());
+            }
+            "--help" | "-h" => {
+                print_usage();
+                return Ok(());
+            }
+            other => return Err(format!("未知参数：{other}")),
+        }
+        i += 1;
+    }
+    if n == 0 || t == 0 {
+        return Err("dkg 需要 --n <n> 与 --t <t>（2 <= t <= n）".to_string());
+    }
+    // 种子：显式提供（演练可重现）或 CSPRNG（生产口径）。
+    let master_seed: [u8; 32] = match seed_hex {
+        Some(hex_str) => {
+            let bytes = hex::decode(hex_str.trim())
+                .map_err(|e| format!("--seed hex 解码失败：{e}"))?;
+            bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "--seed 必须为 32 字节 hex".to_string())?
+        }
+        None => {
+            use rand::rngs::OsRng;
+            use rand::RngCore;
+            let mut s = [0u8; 32];
+            OsRng.fill_bytes(&mut s);
+            s
+        }
+    };
+    let deals: Vec<poker_l1::consensus::dkg::DkgDeal> = (1..=u64::from(n))
+        .map(|dealer_id| {
+            // 每个 dealer 独立域派生种子（同 master 种子下的确定性演练口径）
+            let mut dealer_seed = [0u8; 32];
+            let mut h = blake2::Blake2bVar::new(32).map_err(|e| e.to_string())?;
+            use blake2::digest::{Update, VariableOutput};
+            h.update(b"ZCHAIN_DKG_CLI_DEALER_SEED_V1");
+            h.update(&master_seed);
+            h.update(&dealer_id.to_le_bytes());
+            let mut out = [0u8; 32];
+            h.finalize_variable(&mut out).map_err(|e| e.to_string())?;
+            dealer_seed = out;
+            poker_l1::consensus::dkg::dealer_deal(&dealer_seed, dealer_id, n, t)
+                .map_err(|e| e.to_string())
+        })
+        .collect::<Result<_, String>>()?;
+    let (keyset, shares) =
+        poker_l1::consensus::dkg::assemble_group_keyset(&deals, n, t).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(&out_dir).map_err(|e| format!("创建输出目录失败：{e}"))?;
+    let keyset_json = poker_l1::node::dkg_keyset_to_json(&keyset).map_err(|e| e.to_string())?;
+    let keyset_path = out_dir.join("keyset.json");
+    std::fs::write(&keyset_path, keyset_json)
+        .map_err(|e| format!("写 keyset.json 失败：{e}"))?;
+    for share in &shares {
+        let share_json = poker_l1::node::dkg_share_to_json(share).map_err(|e| e.to_string())?;
+        let path = out_dir.join(format!("share-{}.json", share.id));
+        std::fs::write(&path, share_json).map_err(|e| format!("写 {} 失败：{e}", path.display()))?;
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "n": n,
+            "t": t,
+            "group_key_digest": format!("0x{}", hex::encode(keyset.group_key_digest())),
+            "keyset_file": keyset_path.display().to_string(),
+            "share_files": (1..=n).map(|id| out_dir.join(format!("share-{id}.json")).display().to_string()).collect::<Vec<_>>(),
+        })
+        .to_string()
     );
     Ok(())
 }
@@ -3349,7 +4271,19 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
     sk_bytes.copy_from_slice(&secret_key.secret_bytes()[..]);
     let vkey = ValidatorKey::from_secret_bytes(sk_bytes)
         .map_err(|e| format!("构造 ValidatorKey 失败：{e}"))?;
-    let config = NodeConfig::validator(data_dir.clone(), vkey);
+    // genesis validator set：本测试是单 validator 夹具——把自己的 key 以
+    // Active 状态（stake=0，genesis 无背书记账）注入 genesis 集，否则
+    // put_block 的"空 active 集拒绝 + 证书 quorum 验签"两道生产闸都会
+    // （正确地）拒绝夹具区块。
+    let mut genesis_entry = poker_l1::consensus::validator_set::ValidatorEntry::new(
+        vkey.tagged_pubkey.clone(),
+        [0u8; 33],
+        0,
+        0,
+    );
+    genesis_entry.status = poker_l1::consensus::validator_set::ValidatorStatus::Active;
+    let config = NodeConfig::validator(data_dir.clone(), vkey)
+        .with_genesis_validators(vec![genesis_entry]);
     let node = open_node_with_application_verifiers(config)
         .map_err(|e| format!("Node::open 失败：{e}"))?;
     info!(
@@ -3440,23 +4374,45 @@ fn run_test_e2e(args: &[String]) -> Result<(), String> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
-    let cert = DagCommitCertificate {
-        epoch: 1,
-        commit_round: 1,
-        prev_commit_hash: [0u8; 32],
-        vertex_hash_list: vec![],
-        round_attendance_bitmap: vec![0xFF],
-        state_root: [0u8; 32],
-        public_tx_root,
-        gameturn_tx_root,
-        signature_list: vec![vec![0u8; 65]],
-        signer_bitmap: vec![0xFF],
+    // 真实 state root：与生产路径同款——先在执行环境模拟区块执行，
+    // put_block 的"header.state_root == 执行后状态根"闸要求两者一致。
+    let proposer = poker_l1::account::derive_address(&tagged_pubkey);
+    let env = node
+        .execution_environment(block_height, timestamp_ms)
+        .with_proposer(proposer);
+    let outcome = node
+        .simulate_block_execution(&env, &public_txs)
+        .map_err(|e| format!("simulate_block_execution 失败：{e}"))?;
+    let cert = {
+        // 首块证书：epoch 必须等于 validator set 当前 epoch（0）——
+        // put_block 校验"首个证书 epoch == validator_set epoch"（node/mod.rs）；
+        // 签名必须对本 validator 私钥真实可恢复（证书 quorum 验签闸）。
+        let mut c = DagCommitCertificate {
+            epoch: 0,
+            commit_round: 1,
+            prev_commit_hash: [0u8; 32],
+            vertex_hash_list: vec![],
+            // 单 validator 夹具：bit 0 置位（bitmap 语义 = validator 索引位）
+            round_attendance_bitmap: vec![0x01],
+            state_root: outcome.state_root,
+            public_tx_root,
+            gameturn_tx_root,
+            signature_list: vec![],
+            signer_bitmap: vec![0x01],
+        };
+        let msg = Message::from_digest(c.signing_hash(node.chain_id()));
+        let sig = secp.sign_ecdsa_recoverable(&msg, &secret_key);
+        let (recovery_id, compact) = sig.serialize_compact();
+        let mut sig65 = compact.to_vec();
+        sig65.push(recovery_id.to_i32() as u8);
+        c.signature_list = vec![sig65];
+        c
     };
     let header = BlockHeader {
         height: block_height,
         timestamp_ms,
         prev_hash,
-        state_root: [0u8; 32],
+        state_root: outcome.state_root,
         public_tx_root,
         gameturn_tx_root,
         dag_commit_certificate: cert,
@@ -3789,6 +4745,7 @@ mod tests {
             tx_list: vec![tx],
             parent_hashes: vec![],
             author_sig: vec![],
+            forced_tx_hashes: Vec::new(),
         };
         vertex.author_sig = secp256k1_sign_hash(
             &secret_key,
@@ -3994,6 +4951,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![],
+            forced_tx_hashes: Vec::new(),
         }
     }
 

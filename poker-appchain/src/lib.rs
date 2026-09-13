@@ -13,8 +13,10 @@
 //! - **M3 Sequencer**：[`ops`]（封闭操作集）、[`soft_confirm`]（软确认链）、
 //!   [`wal`]（写前日志）、[`sequencer`]（查重/准入/限流/应用）
 //! - **M4 证明管道**：[`pipeline`](pipeline)（worker 池/批次聚合/积压降级）、
+//!   [`aggregate`](aggregate)（M4 outer aggregate：批次根定期二级聚合）、
 //!   [`real_policy`](real_policy)（P0-3 REAL 出证策略：fail-closed 模式 +
-//!   verifier key 钉扎）
+//!   verifier key 钉扎）、[`proof_registry`](proof_registry)（E2 proof
+//!   归档注册表 sidecar）
 //! - **M7 出入金**：[`vault`](vault)（托管对账 + §5.4 提现 finality 门）
 //! - **M8 安全**：[`watcher`]（等价性/分叉检测）；攻击回归在 `tests/`
 //! - **M9 可观测**：[`metrics`]（计数器/直方图 + 文本导出 + 告警规则）
@@ -28,23 +30,37 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod aggregate;
+pub mod asset_id;
+pub mod archive_index;
+pub mod bond;
+pub mod checkpoint;
+pub mod compliance;
 pub mod client_view;
 pub mod error;
 pub mod fee;
 pub mod felt;
+// TE-M3：GTS 游戏币标准（token genesis 注册表 / 价带 / 供给恒等对账）
+pub mod game_token;
+pub mod key_provider;
 pub mod keys;
 pub mod merkle;
 pub mod metrics;
 pub mod note;
+pub mod note_v2;
 pub mod nullifier_set;
 pub mod ops;
+pub mod owner_v2;
 pub mod pipeline;
+pub mod proof_registry;
 pub mod real_policy;
+pub mod rotation;
 pub mod sequencer;
 pub mod settlement;
 pub mod soft_confirm;
 pub mod vault;
 pub mod wal;
 pub mod watcher;
+pub mod withdrawal_root;
 
 pub use error::{AppchainError, AppchainResult};

@@ -1,0 +1,19 @@
+stwo_wasm_bench wasm_bytes=3050318 node=v24.4.1 n_iters=12 gate_ms=500
+proofs_dir=/Users/mac/projects/zchain/stwo-wasm-verify/proofs proofs=3
+PROOF canonical_table9101.bin bytes=1185984 table_id=9101 log_size=8 cols=5391 transitions=5 digest=13c5c830b1849a4e… cold_ms=1772.9 min=1693.1 p50=1699.3 p95=1797.5 max=1797.5 gate_500ms=OVER
+SAMPLES canonical_table9101.bin 1728.4, 1696.2, 1699.3, 1709.3, 1696.1, 1712.3, 1697.8, 1693.1, 1719.7, 1695.7, 1732.2, 1797.5
+NEGATIVE canonical_table9101.bin/mid_byte_flip: rc=-2 (rejected, ok) error=AIR 约束不满足: Root mismatch.
+NEGATIVE canonical_table9101.bin/header_field_flip: rc=-2 (rejected, ok) error=业务规约违反: canonical pre endpoint image is detached from archive scope
+NEGATIVE canonical_table9101.bin/truncated_quarter: rc=-1 (rejected, ok) error=archive borsh decode: Unexpected length of input
+PROOF canonical_table9102.bin bytes=1156406 table_id=9102 log_size=8 cols=5391 transitions=5 digest=7acf53b4655ce874… cold_ms=1735.9 min=1714.9 p50=1725.7 p95=1781.7 max=1781.7 gate_500ms=OVER
+SAMPLES canonical_table9102.bin 1718.7, 1714.9, 1731.3, 1725.9, 1715.2, 1735.5, 1744.5, 1781.7, 1761.8, 1725.7, 1718.5, 1724.6
+NEGATIVE canonical_table9102.bin/mid_byte_flip: rc=-2 (rejected, ok) error=AIR 约束不满足: Root mismatch.
+NEGATIVE canonical_table9102.bin/header_field_flip: rc=-2 (rejected, ok) error=业务规约违反: canonical pre endpoint image is detached from archive scope
+NEGATIVE canonical_table9102.bin/truncated_quarter: rc=-1 (rejected, ok) error=archive borsh decode: Unexpected length of input
+PROOF canonical_table9103.bin bytes=1156565 table_id=9103 log_size=8 cols=5391 transitions=5 digest=b0beb46964e30701… cold_ms=1688.5 min=1683.8 p50=1698.2 p95=1724.7 max=1724.7 gate_500ms=OVER
+SAMPLES canonical_table9103.bin 1713.0, 1696.5, 1724.7, 1684.3, 1710.3, 1683.8, 1692.1, 1708.2, 1695.7, 1701.4, 1704.4, 1698.2
+NEGATIVE canonical_table9103.bin/mid_byte_flip: rc=-2 (rejected, ok) error=AIR 约束不满足: Root mismatch.
+NEGATIVE canonical_table9103.bin/header_field_flip: rc=-2 (rejected, ok) error=业务规约违反: canonical pre endpoint image is detached from archive scope
+NEGATIVE canonical_table9103.bin/truncated_quarter: rc=-1 (rejected, ok) error=archive borsh decode: Unexpected length of input
+SUMMARY proofs=3 overall_p50_ms=1699.3 overall_p95_ms=1797.5 gate_500ms_p95=OVER all_accepted=true all_negatives_rejected=true
+VS_ESTIMATE probe_estimate_ms=400-800 measured_p50_ms=1699.3 measured_p95_ms=1797.5

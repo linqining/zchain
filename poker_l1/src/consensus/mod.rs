@@ -17,18 +17,28 @@
 pub mod bullshark;
 /// Commit certificate 签名验证（P05-H-source）。
 pub mod cert_verification;
-/// 检查点与归档（缺口 #9）。
+/// 检查点与归档（缺口 #9 + v1.5 BLS 聚合 QC）。
 pub mod checkpoint;
+/// v1.5 DA 原语：请求/回执/聚合凭证最小闭环（plan §2-d）。
+pub mod da;
 /// 真实 ECVRF-secp256k1-SHA256-TAI prover / verifier（缺口 #2 — IMPL-SEC-2）。
 pub mod ecvrf;
+/// DKG —— deal-sum 原型（GJKR 风格 Joint-Feldman，无投诉轮；真 t-of-n
+/// 阈值密钥生成，排期表 §2"阈值 BLS 聚合签名（真 t-of-n）"行）。
+pub mod dkg;
 /// 游戏分配与 epoch 重分配（Task 12）。
 pub mod game_assignment;
 /// 多玩家阶段超时惩罚执行（Phase 4 Task 8）。
 pub mod phase_timeout;
 /// tx 双通道分类与客户端路由（Task 7）。
 pub mod routing;
+/// v1.5 真实罚没：SlashLedger + bond 扣减 + 共识准入联动（plan §2-b）。
+pub mod slash;
 /// Slashing 与审查调查（Task 13 / SubTask 13.2-13.5）。
 pub mod slashing;
+
+/// 阈值 BLS 聚合签名（真 t-of-n；排期表 §2）。
+pub mod threshold_bls;
 /// Texas Hold'em 完整轮转规则（Phase 2 Task 4）。
 pub mod texas_holdem_turn_rule;
 /// ValidatorSet 与 VRF（Task 13 / SubTask 13.1）。
@@ -54,8 +64,9 @@ pub use phase_timeout::{KickResult, handle_submit_phase_timeout};
 pub use vertex_production::{
     DEFAULT_CHECKPOINT_MULTI_REPLICA_COUNT, GameSubBlock, TimeoutProof, VertexBuilder,
     build_game_sub_block, check_sech6_cross_commit_force_advance, required_parent_count,
-    required_quorum, required_witness_count, sort_commit_txs_r4m4, sort_vertex_txs_s9,
-    validate_fallback_tx, validate_game_turn_tx, validate_gameturn_gas_free,
+    required_quorum, required_witness_count, sort_commit_txs_r4m4,
+    sort_commit_txs_r4m4_with_force_include, sort_vertex_txs_s9, validate_fallback_tx,
+    validate_game_turn_tx, validate_gameturn_gas_free,
 };
 
 // 重新导出 validator_set 模块公开 API（Task 13 / SubTask 13.1）。
@@ -90,10 +101,12 @@ pub use game_assignment::{
 
 // 重新导出 bullshark 模块公开 API（Task 9）。
 pub use bullshark::{
-    BlockProjection, CommitLeader, Dag, assemble_commit_certificate, bullshark_linear_order,
-    bullshark_linear_order_uncommitted, detect_commit_cert_equivocation, detect_commit_leader,
+    author_has_vertex_since, BlockProjection, CommitLeader, CommitProjectionAttempt, Dag,
+    assemble_commit_certificate, attempt_commit_projection, bullshark_linear_order,
+    bullshark_linear_order_uncommitted, canonical_commit_candidates, detect_commit_cert_equivocation,
+    detect_commit_leader, find_missing_parent_vertices, has_quorum_distinct_author_references,
     project_block_from_commit, validate_commit_certificate_fields,
-    validate_commit_certificate_quorum,
+    validate_commit_certificate_quorum, COMMIT_ABSENCE_ROUNDS,
 };
 
 use blake2::Blake2bVar;
@@ -126,6 +139,14 @@ const COMMIT_CERT_SIG_DOMAIN: u8 = 0x43; // 'C' for Commit Certificate
 /// - vertex 上限 `max_vertex_size`（默认 256KB），超出分多个 vertex
 ///
 /// SEC-C1 修复：签名对象含 `epoch` 与 `author_pubkey` 字段。
+///
+/// **v1.5-a2（forced 集进共识载荷）**：新增 `forced_tx_hashes` 字段（BCS/borsh
+/// 追加在结构体尾部 —— 与既有字段的序列化顺序向后兼容的 additive 变更；
+/// 旧版本节点无法解析含新字段的 vertex，属版本升级的一次性切换）。该字段
+/// 列出**本 vertex 内被 ForceInclude 强制提升的 tx_hash**，使强制包含集合成为
+/// 共识数据：commit 执行排序以载荷并集为准，而非出块节点本地推导，消除
+/// 「多 validator forced 集不一致」的活性边界。该字段参与 `vertex_hash`
+/// 与签名对象（载荷即承诺）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
 pub struct DagVertex {
     /// 当前 epoch（SEC-C1：绑定 epoch 防 equivocation 证据歧义）。
@@ -140,6 +161,13 @@ pub struct DagVertex {
     pub parent_hashes: Vec<Hash>,
     /// 作者 validator 的 secp256k1 签名（签名对象见 `signing_hash`）。
     pub author_sig: Vec<u8>,
+    /// v1.5-a2：本 vertex 被强制包含的 tx_hash 列表（载荷级承诺）。
+    ///
+    /// 约定：调用方须传入升序（tx_hash 字节序）去重列表；commit 执行时对
+    /// commit 投影内全部 vertex 的该字段取并集，再按 tx_hash 升序应用
+    /// forced-first 排序。不参与本 vertex tx_list 的 hash 无效（执行侧以
+    /// tx_list ∩ forced 的交集排序，见 `sort_commit_txs_r4m4_with_force_include`）。
+    pub forced_tx_hashes: Vec<Hash>,
 }
 
 /// vertex 上限 256KB（spec：max_vertex_size 默认 256KB）。
@@ -148,9 +176,11 @@ pub const MAX_VERTEX_SIZE: usize = 256 * 1024;
 impl DagVertex {
     /// 计算 vertex_hash（vertex 内容哈希，用于 DAG 引用与 commit certificate）。
     ///
-    /// vertex_hash = blake2b_256(0x56 || epoch || round || author_pubkey || tx_hashes || parent_hashes)
+    /// vertex_hash = blake2b_256(0x56 || epoch || round || author_pubkey || tx_hashes || parent_hashes || forced_tx_hashes)
     ///
     /// 注意：vertex_hash 不含 author_sig（签名不参与自身的内容哈希）。
+    /// v1.5-a2：forced_tx_hashes 参与内容哈希（载荷即承诺 —— 相同 tx_list 但
+    /// 不同 forced 声明的 vertex 必须得到不同 hash，否则 equivocation 证据歧义）。
     pub fn vertex_hash(&self) -> Hash {
         let mut h = Blake2bVar::new(32).expect("32 <= 64");
         h.update(&[VERTEX_SIG_DOMAIN]);
@@ -164,6 +194,11 @@ impl DagVertex {
         // parent_hashes
         for parent in &self.parent_hashes {
             h.update(parent);
+        }
+        // v1.5-a2：forced_tx_hashes（本 vertex 强制包含承诺）
+        h.update(&(self.forced_tx_hashes.len() as u64).to_le_bytes());
+        for forced in &self.forced_tx_hashes {
+            h.update(forced);
         }
         let mut out = [0u8; 32];
         h.finalize_variable(&mut out).expect("32 <= 64");
@@ -201,6 +236,23 @@ impl DagVertex {
     pub fn from_bcs(bytes: &[u8]) -> crate::error::PokerL1Result<Self> {
         Ok(borsh::from_slice(bytes)?)
     }
+}
+
+/// v1.5-a2：commit 投影内全部 vertex 的 forced 集并集（去重 + tx_hash 字节序升序）。
+///
+/// 这是「commit 执行以共识载荷为准」的规约点：调用方（node 二进制的 commit 路径）
+/// 把本函数输出传给 [`crate::consensus::vertex_production::sort_commit_txs_r4m4_with_force_include`]，
+/// 取代出块节点本地 `force_included_hashes()` 推导 —— 所有 validator 对同一 commit
+/// 投影必然推导出同一 forced 集，消除节点本地状态不一致导致的排序分叉。
+#[must_use]
+pub fn commit_forced_union(vertices: &[DagVertex]) -> Vec<Hash> {
+    let mut set = std::collections::BTreeSet::new();
+    for vertex in vertices {
+        for hash in &vertex.forced_tx_hashes {
+            set.insert(*hash);
+        }
+    }
+    set.into_iter().collect()
 }
 
 /// Bullshark commit certificate（共识平面）。
@@ -319,6 +371,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![[0u8; 32], [1u8; 32]],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         }
     }
 
@@ -481,5 +534,51 @@ mod tests {
         let json = serde_json::to_string(&c).expect("JSON 序列化");
         let c2: DagCommitCertificate = serde_json::from_str(&json).expect("JSON 反序列化");
         assert_eq!(c, c2, "JSON 往返必须保持一致");
+    }
+
+    // ===== v1.5-a2：forced_tx_hashes 载荷承诺 =====
+
+    #[test]
+    fn vertex_forced_tx_hashes_change_vertex_hash() {
+        let mut v = dummy_vertex();
+        let h_empty = v.vertex_hash();
+        v.forced_tx_hashes = vec![[0xABu8; 32]];
+        let h_forced = v.vertex_hash();
+        assert_ne!(
+            h_empty, h_forced,
+            "forced 集不同必须得到不同 vertex_hash（载荷即承诺）"
+        );
+        // 顺序敏感：未排序的声明视为不同承诺（调用方须传升序）
+        let mut reordered = v.clone();
+        reordered.forced_tx_hashes = vec![[0xCDu8; 32], [0xABu8; 32]];
+        v.forced_tx_hashes = vec![[0xABu8; 32], [0xCDu8; 32]];
+        assert_ne!(v.vertex_hash(), reordered.vertex_hash());
+    }
+
+    #[test]
+    fn vertex_forced_tx_hashes_bcs_roundtrip() {
+        let mut v = dummy_vertex();
+        v.forced_tx_hashes = vec![[0x11u8; 32], [0x22u8; 32]];
+        let bytes = v.to_bcs().expect("BCS 序列化");
+        let v2 = DagVertex::from_bcs(&bytes).expect("BCS 反序列化");
+        assert_eq!(v, v2, "forced_tx_hashes 必须随 vertex 一起 BCS 往返");
+    }
+
+    #[test]
+    fn commit_forced_union_is_deterministic() {
+        // 多 validator 各自 vertex 携带不同 forced 集 → 并集升序、去重。
+        let v1 = DagVertex {
+            forced_tx_hashes: vec![[0x03u8; 32], [0x01u8; 32]],
+            ..dummy_vertex()
+        };
+        let mut v2 = dummy_vertex();
+        v2.forced_tx_hashes = vec![[0x01u8; 32], [0x02u8; 32]];
+        let union = commit_forced_union(&[v1, v2]);
+        assert_eq!(
+            union,
+            vec![[0x01u8; 32], [0x02u8; 32], [0x03u8; 32]],
+            "并集必须去重且升序（forced-first 排序输入约定）"
+        );
+        assert!(commit_forced_union(&[dummy_vertex()]).is_empty());
     }
 }

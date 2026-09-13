@@ -195,6 +195,39 @@ pub struct SettlementTreasuryReceipt {
     pub post_rake_pot: u64,
 }
 
+/// Canonical rake burn derived from one settlement in a dispatch output
+/// (TE-M4: `RAKE_MODE_FIXED_RAKE_BURN` disposal view).
+///
+/// Burn-mode settlements deliberately produce **no** [`SettlementTreasuryReceipt`]:
+/// the collected rake leaves the TableVault without any cash output (supply
+/// contraction). This view is the matching fail-closed derivation of the same
+/// committed events, so the precompile/economics assembly point can advance the
+/// TreasuryCap burn counters from the dispatch output alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettlementRakeBurn {
+    /// Settled table.
+    pub table_id: ObjectID,
+    /// Canonical showdown plan digest, absent for an uncontested settlement.
+    pub plan_digest: Option<[u8; 32]>,
+    /// Pot before rake.
+    pub gross_pot: u64,
+    /// Burned rake amount.
+    pub amount: u64,
+    /// Pot awarded after rake.
+    pub post_rake_pot: u64,
+}
+
+/// One rake receipt resolved against its settlement anchor, with the
+/// contract-side disposal verdict ([`rake_disposal`]) already applied.
+struct ResolvedRake {
+    table_id: ObjectID,
+    plan_digest: Option<[u8; 32]>,
+    gross_pot: u64,
+    amount: u64,
+    post_rake_pot: u64,
+    disposal: super::settlement::RakeDisposal,
+}
+
 impl L1DispatchOutput {
     /// 仅含 events（无证明任务）的便捷构造。
     #[must_use]
@@ -214,11 +247,18 @@ impl L1DispatchOutput {
         }
     }
 
-    /// Derive the unique Treasury receipt, rejecting duplicate or detached rake events.
-    pub fn settlement_treasury_receipt(&self) -> PokerL1Result<Option<SettlementTreasuryReceipt>> {
+    /// Resolve the unique rake receipt against its settlement anchor (TE-M4).
+    ///
+    /// The `rake_mode` carried by `RakeCollected` decides the disposal:
+    /// percentage (1) keeps the legacy Treasury-receipt semantics, burn (2)
+    /// yields a [`SettlementRakeBurn`] instead, and unknown modes are rejected
+    /// fail-closed ("不认识 ≠ 接受"). Every detachment/consistency check of the
+    /// legacy view is preserved for all modes.
+    fn resolve_rake(&self) -> PokerL1Result<Option<ResolvedRake>> {
         let mut plan = None;
         let mut uncontested_award = None;
-        let mut rake_event = None;
+        // (table_id, pot_before, rake_amount, pot_after, rake_mode)
+        let mut rake_event: Option<(ObjectID, u64, u64, u64, u8)> = None;
         for event in &self.events {
             match event {
                 TexasPokerEvent::SettlementPlanCommitted {
@@ -243,10 +283,10 @@ impl L1DispatchOutput {
                     pot_before,
                     rake_amount,
                     pot_after,
-                    ..
+                    rake_mode,
                 } => {
                     if rake_event
-                        .replace((*table_id, *pot_before, *rake_amount, *pot_after))
+                        .replace((*table_id, *pot_before, *rake_amount, *pot_after, *rake_mode))
                         .is_some()
                     {
                         return Err(PokerL1Error::Other(
@@ -274,7 +314,7 @@ impl L1DispatchOutput {
         if let Some((table_id, award)) = uncontested_award {
             return match rake_event {
                 None => Ok(None),
-                Some((rake_table_id, gross_pot, rake, post_rake_pot)) => {
+                Some((rake_table_id, gross_pot, rake, post_rake_pot, rake_mode)) => {
                     if rake_table_id != table_id
                         || post_rake_pot != award
                         || award.checked_add(rake) != Some(gross_pot)
@@ -283,12 +323,13 @@ impl L1DispatchOutput {
                             "Texas rake receipt does not match its uncontested settlement".into(),
                         ));
                     }
-                    Ok(Some(SettlementTreasuryReceipt {
+                    Ok(Some(ResolvedRake {
                         table_id,
                         plan_digest: None,
                         gross_pot,
                         amount: rake,
                         post_rake_pot,
+                        disposal: super::settlement::rake_disposal(rake_mode, rake)?,
                     }))
                 }
             };
@@ -315,7 +356,7 @@ impl L1DispatchOutput {
             )),
             (
                 Some((table_id, plan_digest, gross_pot, rake, total_awards)),
-                Some((rake_table_id, pot_before, rake_amount, pot_after)),
+                Some((rake_table_id, pot_before, rake_amount, pot_after, rake_mode)),
             ) => {
                 if rake_table_id != table_id
                     || pot_before != gross_pot
@@ -326,14 +367,61 @@ impl L1DispatchOutput {
                         "Texas rake receipt does not match its settlement plan".into(),
                     ));
                 }
-                Ok(Some(SettlementTreasuryReceipt {
+                Ok(Some(ResolvedRake {
                     table_id,
                     plan_digest: Some(plan_digest),
                     gross_pot,
                     amount: rake,
                     post_rake_pot: total_awards,
+                    disposal: super::settlement::rake_disposal(rake_mode, rake)?,
                 }))
             }
+        }
+    }
+
+    /// Derive the unique Treasury receipt, rejecting duplicate or detached rake events.
+    ///
+    /// TE-M4: burn-mode (`RAKE_MODE_FIXED_RAKE_BURN`) settlements return `None`
+    /// here — the collected rake must **not** become a Treasury-owned UTXO. The
+    /// matching disposal is exposed by [`Self::settlement_rake_burn`].
+    pub fn settlement_treasury_receipt(&self) -> PokerL1Result<Option<SettlementTreasuryReceipt>> {
+        match self.resolve_rake()? {
+            None => Ok(None),
+            Some(rake) => match rake.disposal {
+                super::settlement::RakeDisposal::TreasurySplit { .. } => {
+                    Ok(Some(SettlementTreasuryReceipt {
+                        table_id: rake.table_id,
+                        plan_digest: rake.plan_digest,
+                        gross_pot: rake.gross_pot,
+                        amount: rake.amount,
+                        post_rake_pot: rake.post_rake_pot,
+                    }))
+                }
+                // 销毁处置：rake 不产生 Treasury 现金输出（一致性已由 resolve_rake 校验）
+                super::settlement::RakeDisposal::Burn { .. }
+                | super::settlement::RakeDisposal::None => Ok(None),
+            },
+        }
+    }
+
+    /// Derive the unique rake burn, rejecting duplicate or detached rake events
+    /// (TE-M4). `None` unless the settled hand's rake mode is
+    /// `RAKE_MODE_FIXED_RAKE_BURN` with a positive rake.
+    pub fn settlement_rake_burn(&self) -> PokerL1Result<Option<SettlementRakeBurn>> {
+        match self.resolve_rake()? {
+            None => Ok(None),
+            Some(rake) => match rake.disposal {
+                super::settlement::RakeDisposal::Burn { amount } if amount > 0 => {
+                    Ok(Some(SettlementRakeBurn {
+                        table_id: rake.table_id,
+                        plan_digest: rake.plan_digest,
+                        gross_pot: rake.gross_pot,
+                        amount,
+                        post_rake_pot: rake.post_rake_pot,
+                    }))
+                }
+                _ => Ok(None),
+            },
         }
     }
 }
@@ -389,5 +477,119 @@ mod tests {
         assert_eq!(recovered.table_id, 42);
         assert_eq!(recovered.context, dummy_context());
         assert!(recovered.raw_args.is_empty());
+    }
+
+    // ===== TE-M4：mode 感知的处置视图 =====
+
+    fn showdown_events(rake_mode: u8) -> Vec<TexasPokerEvent> {
+        use super::super::events::TexasPokerEvent;
+        vec![
+            TexasPokerEvent::SettlementPlanCommitted {
+                table_id: dummy_table("t").id,
+                plan_digest: [0x11; 32],
+                runout_count: 1,
+                gross_pot: 600,
+                rake: 25,
+                total_awards: 575,
+            },
+            TexasPokerEvent::RakeCollected {
+                table_id: dummy_table("t").id,
+                pot_before: 600,
+                rake_amount: 25,
+                pot_after: 575,
+                rake_mode,
+            },
+        ]
+    }
+
+    /// mode 2 桌：无 Treasury receipt（不铸现金输出），burn 视图给出销毁额。
+    #[test]
+    fn burn_mode_yields_burn_view_and_no_treasury_receipt() {
+        use super::super::constants::RAKE_MODE_FIXED_RAKE_BURN;
+        let output = L1DispatchOutput::events_only(showdown_events(RAKE_MODE_FIXED_RAKE_BURN));
+
+        let receipt = output.settlement_treasury_receipt().unwrap();
+        assert!(receipt.is_none(), "burn 桌不得产生 Treasury 现金输出");
+
+        let burn = output.settlement_rake_burn().unwrap().expect("burn view");
+        assert_eq!(burn.table_id, dummy_table("t").id);
+        assert_eq!(burn.amount, 25);
+        assert_eq!(burn.gross_pot, 600);
+        assert_eq!(burn.post_rake_pot, 575);
+        assert_eq!(burn.plan_digest, Some([0x11; 32]));
+    }
+
+    /// mode 1 桌零回退：Treasury receipt 语义逐点不变，burn 视图恒 None。
+    #[test]
+    fn percentage_mode_keeps_treasury_receipt_and_no_burn_view() {
+        use super::super::constants::RAKE_MODE_PERCENTAGE;
+        let output = L1DispatchOutput::events_only(showdown_events(RAKE_MODE_PERCENTAGE));
+
+        let receipt = output.settlement_treasury_receipt().unwrap().expect("receipt");
+        assert_eq!(receipt.amount, 25);
+        assert_eq!(receipt.plan_digest, Some([0x11; 32]));
+        assert_eq!(receipt.gross_pot, 600);
+        assert_eq!(receipt.post_rake_pot, 575);
+        assert!(output.settlement_rake_burn().unwrap().is_none());
+    }
+
+    /// mode 0 桌：零 rake 无事件 → 两视图均 None；none 模式带正 rake 的
+    /// receipt 是状态机 bug 信号（fail-closed）；未知 mode 同样 fail-closed。
+    #[test]
+    fn none_mode_is_quiet_and_inconsistent_or_unknown_modes_fail_closed() {
+        use super::super::constants::RAKE_MODE_NONE;
+        use super::super::events::TexasPokerEvent;
+        // 正常 none 桌：零 rake 不发 RakeCollected（两视图均安静）
+        let quiet = vec![TexasPokerEvent::SettlementPlanCommitted {
+            table_id: dummy_table("t").id,
+            plan_digest: [0x11; 32],
+            runout_count: 1,
+            gross_pot: 600,
+            rake: 0,
+            total_awards: 600,
+        }];
+        let output = L1DispatchOutput::events_only(quiet);
+        assert!(output.settlement_treasury_receipt().unwrap().is_none());
+        assert!(output.settlement_rake_burn().unwrap().is_none());
+
+        // none 模式带正 rake：处置判定拒绝（状态机 bug 信号，不产出打款视图）
+        let buggy = L1DispatchOutput::events_only(showdown_events(RAKE_MODE_NONE));
+        assert!(buggy.settlement_treasury_receipt().is_err());
+        assert!(buggy.settlement_rake_burn().is_err());
+
+        // 未知 rake_mode：处置判定 fail-closed（此前该字段被忽略——mode 2 的
+        // 引入使其成为承载处置语义的判别值，"不认识 ≠ 接受"）
+        for unknown in [3u8, u8::MAX] {
+            let output = L1DispatchOutput::events_only(showdown_events(unknown));
+            assert!(output.settlement_treasury_receipt().is_err());
+            assert!(output.settlement_rake_burn().is_err());
+        }
+    }
+
+    /// burn 桌 uncontested（无 showdown plan）终局：burn 视图同样成立，
+    /// 与 plan 锚的守恒检查保留。
+    #[test]
+    fn burn_mode_uncontested_settlement_burns_without_treasury_output() {
+        use super::super::constants::RAKE_MODE_FIXED_RAKE_BURN;
+        use super::super::events::TexasPokerEvent;
+        let output = L1DispatchOutput::events_only(vec![
+            TexasPokerEvent::HandEndedWithoutShowdown {
+                table_id: dummy_table("t").id,
+                winner_seat: 1,
+                winner_player: [0xAB; 20],
+                pot: 95,
+            },
+            TexasPokerEvent::RakeCollected {
+                table_id: dummy_table("t").id,
+                pot_before: 100,
+                rake_amount: 5,
+                pot_after: 95,
+                rake_mode: RAKE_MODE_FIXED_RAKE_BURN,
+            },
+        ]);
+        assert!(output.settlement_treasury_receipt().unwrap().is_none());
+        let burn = output.settlement_rake_burn().unwrap().expect("burn view");
+        assert_eq!(burn.amount, 5);
+        assert_eq!(burn.plan_digest, None, "uncontested 终局无 plan 摘要");
     }
 }

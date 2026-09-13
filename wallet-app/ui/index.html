@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ZChain Wallet — devnet</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <!-- 环境徽章（每个页面固定显示；§6.12.5 / §6.9 纪律） -->
+  <header id="topbar">
+    <div class="brand">
+      <span class="logo">Z</span>
+      <span class="brand-name">ZChain Wallet</span>
+      <span class="badge badge-net">devnet</span>
+      <span class="badge badge-asset">PLAY</span>
+      <span class="badge badge-custody">自托管密钥（keystore 在本机）</span>
+      <span class="badge badge-demo">本地演示数据 · 未连网</span>
+    </div>
+    <div class="top-right">
+      <span id="lock-countdown" class="countdown" title="自动锁屏倒计时"></span>
+      <button id="btn-lock" class="btn btn-small" title="立即锁定">锁定</button>
+    </div>
+  </header>
+
+  <!-- 未初始化：创建/导入 -->
+  <section id="setup-view" class="view hidden">
+    <div class="card narrow">
+      <h1>创建 / 导入 ZChain Account</h1>
+      <p class="muted">
+        网络：ZChain <strong>devnet</strong>（chain id <code>zchain-devnet-1</code>，本地 · 未连网）。
+        密钥经 Argon2id + ChaCha20-Poly1305 加密存于本机 keystore，绝不离开这台设备。
+      </p>
+      <label>口令（≥ 8 字符）
+        <input type="password" id="setup-password" autocomplete="new-password" />
+      </label>
+      <label>重复口令
+        <input type="password" id="setup-password2" autocomplete="new-password" />
+      </label>
+      <label>导入：owner 私钥（64 hex，可选；留空 = 新建）
+        <input type="text" id="setup-secret" placeholder="0x…（32 字节 secp256k1 私钥）" autocomplete="off" />
+      </label>
+      <button id="btn-create" class="btn btn-primary">创建钱包</button>
+      <div id="setup-error" class="error"></div>
+    </div>
+  </section>
+
+  <!-- 锁屏 -->
+  <section id="lock-view" class="view hidden">
+    <div class="card narrow lock-card">
+      <div class="lock-icon">🔒</div>
+      <h1>钱包已锁定</h1>
+      <p class="muted">devnet · PLAY · 自托管密钥（托管边界：本机 keystore）</p>
+      <label>口令
+        <input type="password" id="lock-password" autocomplete="current-password" />
+      </label>
+      <button id="btn-unlock" class="btn btn-primary">解锁</button>
+      <div id="lock-error" class="error"></div>
+    </div>
+  </section>
+
+  <!-- 主界面 -->
+  <main id="app-view" class="hidden">
+    <nav id="tabs">
+      <button class="tab active" data-tab="account">账户</button>
+      <button class="tab" data-tab="notes">PLAY Notes</button>
+      <button class="tab" data-tab="sign">签名确认</button>
+      <button class="tab" data-tab="backup">备份</button>
+      <button class="tab" data-tab="settings">设置</button>
+    </nav>
+
+    <!-- 账户 -->
+    <section id="tab-account" class="panel">
+      <div class="card">
+        <h2>网络与账户</h2>
+        <table class="kv">
+          <tr><th>网络</th><td id="acc-network"></td></tr>
+          <tr><th>chain id</th><td><code id="acc-chain"></code></td></tr>
+          <tr><th>域标签</th><td><code id="acc-domain"></code></td></tr>
+          <tr><th>Operation ABI</th><td><code id="acc-abi"></code></td></tr>
+          <tr><th>owner 公钥</th><td><code id="acc-owner" class="breakable"></code></td></tr>
+          <tr><th>数据目录</th><td><code id="acc-datadir" class="breakable"></code></td></tr>
+        </table>
+        <p class="muted small">
+          托管边界：owner 私钥只存在于本机加密 keystore（Argon2id + ChaCha20-Poly1305）；
+          签名只在结构化请求确认后发生，本钱包没有"签任意字节"的能力。
+        </p>
+      </div>
+      <div class="card">
+        <h2>余额总览</h2>
+        <div id="acc-balances" class="balance-grid"></div>
+        <div id="acc-real-gate" class="gate"></div>
+      </div>
+    </section>
+
+    <!-- PLAY notes -->
+    <section id="tab-notes" class="panel hidden">
+      <div class="notice notice-demo">
+        本地演示数据：以下 PLAY note 由本机 faucet 生成，<strong>未连任何链上网络</strong>，不代表链上余额。
+      </div>
+      <div class="card">
+        <h2>PLAY 余额</h2>
+        <div class="balance-row">
+          <div class="balance"><span class="muted">自由</span><strong id="notes-play-free"></strong></div>
+          <div class="balance"><span class="muted">桌内锁定</span><strong id="notes-play-locked"></strong></div>
+        </div>
+        <div class="faucet-row">
+          <input type="number" id="faucet-amount" min="1" placeholder="金额" />
+          <button id="btn-faucet" class="btn">本地铸造演示 PLAY（非链上）</button>
+        </div>
+        <div id="notes-error" class="error"></div>
+      </div>
+      <div class="card">
+        <h2>PLAY note 列表</h2>
+        <table class="table" id="notes-table">
+          <thead>
+            <tr><th>承诺 (commitment)</th><th>金额</th><th>桌</th><th>proof</th><th>已花费</th><th>nullifier</th></tr>
+          </thead>
+          <tbody id="notes-body"></tbody>
+        </table>
+        <p class="muted small">签名页的"输入 note"留空时自动 sweep 全部未花费 PLAY note（输出合计必须等于该总额）。</p>
+      </div>
+    </section>
+
+    <!-- 签名确认 -->
+    <section id="tab-sign" class="panel hidden">
+      <div class="card">
+        <h2>构造结构化请求</h2>
+        <p class="muted small">MVP 暴露面：transfer / buy_in（PLAY only）。withdraw、settle、REAL 操作未上线，不提供入口。</p>
+        <div class="form-grid">
+          <label>种类
+            <select id="sign-kind">
+              <option value="transfer">transfer（玩家间转账）</option>
+              <option value="buy_in">buy_in（买入上桌）</option>
+            </select>
+          </label>
+          <label>金额（单输出/buy_in 总额）
+            <input type="number" id="sign-amount" min="1" />
+          </label>
+          <label id="sign-recipient-label">收款 owner（66 hex；留空 = 自己）
+            <input type="text" id="sign-recipient" placeholder="0x…（压缩 secp256k1 公钥）" />
+          </label>
+          <label id="sign-table-label" class="hidden">桌 ID
+            <input type="number" id="sign-table" min="1" />
+          </label>
+          <label class="span2">输入 note 承诺（可选，逗号分隔 64 hex；留空 = sweep 全部未花费）
+            <input type="text" id="sign-inputs" placeholder="0x…, 0x…" />
+          </label>
+        </div>
+        <button id="btn-preview" class="btn btn-primary">① 生成预览</button>
+        <div id="sign-error" class="error"></div>
+      </div>
+      <div class="card hidden" id="preview-card">
+        <h2>逐字段签名确认 <span class="badge badge-net">devnet</span> <span class="badge badge-asset">PLAY</span></h2>
+        <table class="kv" id="preview-table"></table>
+        <div class="confirm-row">
+          <button id="btn-confirm" class="btn btn-danger">② 确认签名（摘要绑定以上全部字段）</button>
+          <button id="btn-cancel-sign" class="btn">取消</button>
+        </div>
+      </div>
+      <div class="card hidden" id="signed-card">
+        <h2>签名结果</h2>
+        <table class="kv" id="signed-table"></table>
+      </div>
+      <div class="card">
+        <h2>负例验证：任意字节签名</h2>
+        <p class="muted small">本钱包没有 signBytes 能力：任何非结构化字节签名请求必须被拒绝（WALLET-ACC-3）。点按钮验证。</p>
+        <div class="form-grid">
+          <label class="span2">模拟恶意 dapp 请求字节
+            <input type="text" id="raw-bytes" value="sign this arbitrary message" />
+          </label>
+        </div>
+        <button id="btn-raw-sign" class="btn">尝试签名字节（预期被拒绝）</button>
+        <div id="raw-result" class="mono-result"></div>
+      </div>
+    </section>
+
+    <!-- 备份 -->
+    <section id="tab-backup" class="panel hidden">
+      <div class="card">
+        <h2>加密备份导出</h2>
+        <p class="muted small">
+          wallet-core 全库加密备份（keystore + DEK 信封 + REAL/PLAY 双库快照 + 声明索引）。
+          口令即恢复凭据：<strong>错误口令导入会 fail-closed 拒绝</strong>，备份本身无法被暴力读取。
+        </p>
+        <label>备份口令（≥ 8 字符；可与钱包口令不同）
+          <input type="password" id="backup-password" autocomplete="new-password" />
+        </label>
+        <button id="btn-backup-export" class="btn btn-primary">导出加密备份（.zcbk）</button>
+        <div id="backup-export-result" class="mono-result"></div>
+      </div>
+      <div class="card">
+        <h2>从备份导入 / 恢复</h2>
+        <p class="muted small">
+          恢复执行全链路自检：口令 → DEK 信封 → 双库解密 → nullifier 索引重建与声明索引比对。
+          任何环节失败一律拒绝且<strong>不触碰</strong>当前数据目录。导入成功后钱包回到锁定态。
+        </p>
+        <label>备份口令
+          <input type="password" id="restore-password" autocomplete="off" />
+        </label>
+        <button id="btn-backup-import" class="btn">选择备份文件并导入</button>
+        <div id="backup-import-result" class="mono-result"></div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="tab-settings" class="panel hidden">
+      <div class="card">
+        <h2>应用锁</h2>
+        <p class="muted small">空闲超过该时长后自动回锁（secret 立即 zeroize）。每次解锁/操作都会重置计时。</p>
+        <div class="faucet-row">
+          <input type="number" id="autolock-secs" min="0" step="30" />
+          <span class="muted">秒</span>
+          <button id="btn-autolock" class="btn">保存</button>
+        </div>
+        <div id="settings-result" class="mono-result"></div>
+      </div>
+      <div class="card">
+        <h2>MVP 边界（如实标注）</h2>
+        <ul class="muted small">
+          <li>未连网：无 faucet 链上充值、无链上余额查询（PLAY notes 为本地演示数据）。</li>
+          <li>REAL 提现 / claim 未上线（vault/verifier/finality 离线），UI 无入口（§6.9 展示门）。</li>
+          <li>无生物识别 / 系统 Keychain 集成（keystore 为本地文件信封）。</li>
+          <li>无多设备同步（备份文件为唯一恢复途径）。</li>
+          <li>签名暴露面仅 transfer / buy_in（settle / withdraw / key_rotation 属后续里程碑）。</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+
+  <footer id="statusbar">
+    <span id="status-text">…</span>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

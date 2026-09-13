@@ -1,0 +1,45 @@
+[package]
+name = "poker-appchain"
+version = "0.1.0"
+edition = "2024"
+description = "Dedicated poker settlement L1 (appchain): note ledger, provable rake, soft-confirm sequencer, proof pipeline"
+license = "BUSL-1.1"
+
+# wallet-app vendor 快照（zchain 仓库 HEAD，见 wallet-app/README.md "vendor 快照"）：
+# 原 manifest 的 workspace 继承依赖改写为具象版本（与根 workspace 一致）；
+# poker-settlement-core 指向同目录 vendor 快照。
+[dependencies]
+# ===== Poseidon252 哈希（承诺/nullifier/状态根）=====
+starknet-ff = { version = "0.3", features = ["serde"] }
+starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
+# ===== P 层签名（每笔消耗 note 的动作）=====
+secp256k1 = { version = "0.29", features = ["recovery", "rand", "global-context"] }
+# ===== sequencer 软确认链签名 =====
+ed25519-dalek = { version = "2.1.1", features = ["rand_core"] }
+# ===== 稳定字节 ABI =====
+borsh = { version = "1.7", features = ["derive"] }
+# ===== 结算语义唯一事实源（plan-appchain §5.2-1：SettlementPlan/payout_root/side_pot_root）=====
+poker-settlement-core = { path = "../poker-settlement-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+# ===== 哈希与编码 =====
+blake2 = "0.10.6"
+hex = "0.4.3"
+thiserror = "1.0.61"
+# ===== 证明管道并行 =====
+rayon = "1"
+
+[dev-dependencies]
+proptest = "1"
+rand = "0.8.5"
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = []
+# 说明：poker_texas_air 手写约束 AIR 引擎适配器独立于本 crate
+# （../poker-appchain-texasair，自带 lockfile）——外部 poker_texas_air
+# 携带自己的 poker_l1，与本 workspace 的 poker_l1 同名不同源，无法
+# 共享依赖图（cargo lockfile collision）。

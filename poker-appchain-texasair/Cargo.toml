@@ -17,6 +17,14 @@ poker-appchain = { path = "../poker-appchain" }
 poker-settlement-core = { path = "../poker-settlement-core" }
 # ===== poker_texas_air 侧：手写约束 AIR 全量栈 =====
 poker_texas_air = { path = "../../poker_texas_air" }
+# ===== shuffle 链两侧对照测试（tests/shuffle_stage0_consume.rs）直连的
+# 上游子 crate：TableRules（poker_l1，与 poker_texas_air 同 path/版本）与
+# curve/标量类型（poker_protocol）。**版本与 poker_texas_air 的依赖完全
+# 同源**——Cargo.lock 零新包（同一 path/版本已在其依赖闭包内）。
+poker_l1 = { path = "../../poker_texas_air/poker_l1" }
+poker_protocol = { path = "../../poker_texas_air/poker_protocol", features = ["borsh"] }
+# ===== shuffle-chain 生产者 RNG（上游同版本 0.8，lock 内既有）=====
+rand = "0.8.5"
 # ===== 编码与签名 =====
 borsh = "1"
 hex = "0.4.3"

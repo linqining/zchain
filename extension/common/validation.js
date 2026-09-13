@@ -1,5 +1,6 @@
 // =============================================================================
-// extension/common/validation.js — ZChain 钱包插件安全校验层（Extension 0.1）
+// extension/common/validation.js — ZChain 钱包插件安全校验层（Extension 0.1，
+// 0.2 增量：多网络 switchNetwork 判定面 / REAL 分库视图透传）
 // plan-appchain §6.12.4："站点消息必须带 request nonce、origin、expiry 和
 // session id，后台校验来源、replay、ABI/domain/version 和用户取消状态。"
 //
@@ -18,7 +19,17 @@ export const SUPPORTED_ABI_VERSION = 1;
 /** 已知域标签（wallet-core operation_signer::parse_domain 只认 "zchain"）。 */
 export const SUPPORTED_DOMAINS = ['zchain'];
 
-/** Extension 0.1 唯一网络（多网络/换网是 0.2 交付）。 */
+/**
+ * Extension 0.2 网络（多网络/换网交付；注册表本体在 common/networks.js，
+ * 这里保留判定面所需的最小集合——chainId 列表供"换链重放"类检查使用）。
+ * mainnet **刻意不在表内**：devnet/testnet 不得误连 mainnet 配置（红线）。
+ */
+export const NETWORKS_02 = [
+  { chainId: 'zchain-devnet-1', kind: 'devnet' },
+  { chainId: 'zchain-testnet-1', kind: 'testnet' },
+];
+
+/** 0.1 的单网络表（保留为常量供测试引用；判定不再使用）。 */
 export const NETWORKS_01 = [{ chainId: 'zchain-devnet-1', kind: 'devnet' }];
 
 /** Extension 0.1 资产边界：只允许 PLAY（REAL/隔离与显示门是 0.2 交付）。 */
@@ -41,11 +52,13 @@ export const METHODS = [
   'zchain_lock',
 ];
 
-/** Extension 0.1 实际可用的方法（其余返回 NotSupportedIn01）。 */
-export const METHODS_01 = new Set([
+/** Extension 0.2 实际可用的方法（其余返回 NotSupportedIn01；0.2 起
+ *  zchain_switchNetwork 交付——完整语义见 validateRequest 换网分支）。 */
+export const METHODS_AVAILABLE = new Set([
   'zchain_requestAccounts',
   'zchain_getNetwork',
   'zchain_getCapabilities',
+  'zchain_switchNetwork',
   'zchain_getAccounts',
   'zchain_signOperation',
   'zchain_signSettlement',
@@ -255,7 +268,9 @@ export function validateAmount(v) {
  */
 export function validateRequest(method, params, ctx) {
   if (!METHODS.includes(method)) return reject('UnknownMethod', `${method} is not a zchain method`);
-  if (!METHODS_01.has(method)) return reject('NotSupportedIn01', `${method} ships in a later iteration (0.2+)`);
+  if (!METHODS_AVAILABLE.has(method)) {
+    return reject('NotSupportedIn01', `${method} is not available in this wallet version (0.4); session-key authorization ships via the wallet popup UI (0.3/0.4), provider methods follow with the dapp SDK`);
+  }
 
   const required = METHOD_PARAMS[method] ?? [];
   if (!isPlainObject(params)) return reject('InvalidParams', 'params must be an object');
@@ -268,10 +283,22 @@ export function validateRequest(method, params, ctx) {
   const network = ctx?.network;
   if (!network || typeof network.chainId !== 'string') return reject('NetworkInvalid', 'wallet has no network');
 
-  // 换网：0.1 只有 devnet，任何 switchNetwork 目标都必须等于当前网络，
-  // 否则拒绝（真换网是 0.2）。
+  // 换网（Extension 0.2 完整语义）：
+  // - 目标必须是注册表内网络（devnet/testnet）；mainnet 刻意不注册——
+  //   "devnet/testnet 不得误连 mainnet 配置"红线在这里与注册表双重钉死；
+  // - 目标 == 当前网络 → 幂等 no-op（无需弹窗确认，无状态变化）；
+  // - 目标 != 当前网络 → 通过（结构合法），但必须走显式二次确认流
+  //   （requiresExplicitConfirm 对 switchNetwork 恒 true；后台负责弹窗）。
   if (method === 'zchain_switchNetwork') {
-    if (params.chainId !== network.chainId) return reject('NetworkMismatch', `chain ${params.chainId} != current ${network.chainId}`);
+    const known = NETWORKS_02.some((n) => n.chainId === params.chainId);
+    if (!known) {
+      return reject(
+        'NetworkUnsupported',
+        params.chainId === 'zchain-mainnet-1'
+          ? 'mainnet is intentionally not configured in extension 0.2 (devnet/testnet only)'
+          : `unknown network ${String(params.chainId)}`,
+      );
+    }
     return OK;
   }
 
@@ -293,9 +320,11 @@ function validateSignOperation(operation, ctx) {
       : reject('UnknownKind', `unknown operation kind ${kind}`);
   }
   if (operation.assetClass !== 'PLAY') {
-    // REAL 是已知资产类但在 0.1 被禁用（0.2 交付 REAL/PLAY 隔离）；其余值非法。
+    // REAL 是已知资产类，但签名面在 0.2 仍关闭（0.2 交付的是 REAL/PLAY
+    // **隔离展示**：分库视图 + 托管风险提示；REAL 提现/签名随 Vault 上线
+    // 开放，绝不因展示而放开签名）。其余值非法。
     return operation.assetClass === 'REAL'
-      ? reject('AssetClassDisabledIn01', 'REAL ships in 0.2+; only PLAY in 0.1')
+      ? reject('AssetClassDisabledIn01', 'REAL signing stays closed in 0.2 (display-only isolation); only PLAY is signable')
       : reject('AssetClassInvalid', `unknown asset class ${String(operation.assetClass)}`);
   }
   const net = checkNetworkAbiDomain(operation, ctx);
@@ -470,7 +499,8 @@ export function sweepExpired(store, now) {
 // 6. 输出脱敏（plan §6.12.4 "只向页面暴露公钥、地址、签名结果和脱敏状态"）
 // ---------------------------------------------------------------------------
 
-/** note 列表脱敏：剥离 spend secret / nullifier / origin 帧 / 内部索引。 */
+/** note 列表脱敏：剥离 spend secret / nullifier / origin 帧 / 内部索引。
+ *  assetClass 仅在库侧显式提供时透传（REAL/PLAY 分库视图；绝不推断）。 */
 export function sanitizeNotesForPage(notes) {
   if (!Array.isArray(notes)) return [];
   return notes.map((n) => ({
@@ -479,6 +509,7 @@ export function sanitizeNotesForPage(notes) {
     tableId: n.table_id ?? n.tableId ?? null,
     proof: n.proof,
     spendable: Boolean(n.spendable),
+    assetClass: n.asset_class === 'REAL' || n.asset_class === 'PLAY' ? n.asset_class : undefined,
   }));
 }
 

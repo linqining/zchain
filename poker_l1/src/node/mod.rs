@@ -53,6 +53,14 @@ const MAX_NODE_TX_CACHE_SIZE: usize = 10_000;
 /// pending_tx 最大条目数（C-2 修复 — 防止内存 DoS）。
 const MAX_PENDING_TX_SIZE: usize = 10_000;
 
+/// 生产默认时钟来源：`SystemTime` UNIX 时间（毫秒）。
+fn system_time_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 // ===== SubTask 32.1 ~ 32.4: 节点角色 =====
 
 /// 节点角色（spec SubTask 32.1 ~ 32.4）。
@@ -140,6 +148,36 @@ pub struct NodeConfig {
     /// Resource-credit policy. Compute metering remains enabled when set to `Free`.
     #[serde(default)]
     pub fee_policy: FeePolicy,
+    /// M3-ACC-6：强制包含期限（毫秒）。
+    ///
+    /// 交易在 mempool 中停留超过该期限后，下一次出块 drain 会被强制提升到普通交易
+    /// 之前进块（§5.3 ForceInclude）。`0 = 禁用强制包含路径（行为与历史版本一致）`。
+    #[serde(default = "crate::force_include::default_inclusion_deadline_ms")]
+    pub inclusion_deadline_ms: u64,
+    /// M3-ACC-6：审查检测窗口（块数，§5.3 "近 K 个块"的 v1 块数近似）。
+    #[serde(default = "crate::force_include::default_censorship_window_blocks")]
+    pub censorship_window_blocks: u64,
+    /// v1.5-c：checkpoint 产出间隔（块数；`height % interval == 0` 的高度上
+    /// validator 发起/签署 checkpoint，2f+1 聚合 QC 后落盘）。`0 = 禁用`。
+    #[serde(default = "default_checkpoint_interval_blocks")]
+    pub checkpoint_interval_blocks: u64,
+    /// v1.5-e：checkpoint QC 阈值 t（真 t-of-n 阈值 BLS；密钥来自
+    /// `consensus::dkg` deal-sum）。`0 = 关闭，走既有聚合模式（零回退）`。
+    #[serde(default)]
+    pub qc_threshold_t: u32,
+    /// v1.5-e：DKG 群密钥集 JSON 文件路径（公开面；
+    /// `qc_threshold_t > 0` 时必填，`zchain dkg` 产出）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkg_keyset_path: Option<PathBuf>,
+    /// v1.5-e：本节点 DKG 群份额 JSON 文件路径（私密面；
+    /// `qc_threshold_t > 0` 时必填，载入时过 keyset Feldman 校验，fail-closed）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkg_share_path: Option<PathBuf>,
+}
+
+/// serde default：checkpoint 间隔默认 32 块。
+pub const fn default_checkpoint_interval_blocks() -> u64 {
+    crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS
 }
 
 impl NodeConfig {
@@ -155,6 +193,13 @@ impl NodeConfig {
             validator_key: None,
             genesis_validators: vec![],
             fee_policy: FeePolicy::Free,
+            inclusion_deadline_ms: crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
+            censorship_window_blocks: crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+            checkpoint_interval_blocks:
+                crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+            qc_threshold_t: 0,
+            dkg_keyset_path: None,
+            dkg_share_path: None,
         }
     }
 
@@ -170,6 +215,13 @@ impl NodeConfig {
             validator_key: Some(validator_key),
             genesis_validators: vec![],
             fee_policy: FeePolicy::Free,
+            inclusion_deadline_ms: crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
+            censorship_window_blocks: crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+            checkpoint_interval_blocks:
+                crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+            qc_threshold_t: 0,
+            dkg_keyset_path: None,
+            dkg_share_path: None,
         }
     }
 
@@ -185,6 +237,13 @@ impl NodeConfig {
             validator_key: None,
             genesis_validators: vec![],
             fee_policy: FeePolicy::Free,
+            inclusion_deadline_ms: crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
+            censorship_window_blocks: crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+            checkpoint_interval_blocks:
+                crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+            qc_threshold_t: 0,
+            dkg_keyset_path: None,
+            dkg_share_path: None,
         }
     }
 
@@ -200,6 +259,13 @@ impl NodeConfig {
             validator_key: None,
             genesis_validators: vec![],
             fee_policy: FeePolicy::Free,
+            inclusion_deadline_ms: crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
+            censorship_window_blocks: crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+            checkpoint_interval_blocks:
+                crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+            qc_threshold_t: 0,
+            dkg_keyset_path: None,
+            dkg_share_path: None,
         }
     }
 
@@ -214,6 +280,30 @@ impl NodeConfig {
     #[must_use]
     pub const fn with_fee_policy(mut self, fee_policy: FeePolicy) -> Self {
         self.fee_policy = fee_policy;
+        self
+    }
+
+    /// M3-ACC-6：设置强制包含期限（毫秒；`0 = 禁用强制包含路径`）。
+    #[must_use]
+    pub const fn with_inclusion_deadline_ms(mut self, inclusion_deadline_ms: u64) -> Self {
+        self.inclusion_deadline_ms = inclusion_deadline_ms;
+        self
+    }
+
+    /// M3-ACC-6：设置审查检测窗口（块数，v1 块数近似）。
+    #[must_use]
+    pub const fn with_censorship_window_blocks(mut self, censorship_window_blocks: u64) -> Self {
+        self.censorship_window_blocks = censorship_window_blocks;
+        self
+    }
+
+    /// v1.5-c：设置 checkpoint 产出间隔（块数；`0 = 禁用`）。
+    #[must_use]
+    pub const fn with_checkpoint_interval_blocks(
+        mut self,
+        checkpoint_interval_blocks: u64,
+    ) -> Self {
+        self.checkpoint_interval_blocks = checkpoint_interval_blocks;
         self
     }
 }
@@ -341,6 +431,12 @@ struct PendingTxEntry {
     caller: Address,
     /// Full transaction in FIFO arrival order.
     tx: Transaction,
+    /// M3-ACC-6：到达时间（进入 mempool 时的节点本地时钟，毫秒）。
+    ///
+    /// 交易本体无时间戳（块时间为确定性逻辑时钟），到达时间由接收 validator 记录，
+    /// 用于 ForceInclude 期限判定（§5.3-2）。requeue 回排时从 SeenReceipt 恢复原始
+    /// 到达时间，避免重复计时。
+    arrived_at_ms: u64,
 }
 
 /// Pending transaction queue and its RBF index.
@@ -380,24 +476,34 @@ impl PendingTxState {
             .find(|(_, entry)| entry.id == id)
     }
 
-    fn push(&mut self, caller: Address, tx: Transaction) {
+    fn push(&mut self, caller: Address, tx: Transaction, arrived_at_ms: u64) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.by_caller_nonce
             .entry((caller, tx.nonce))
             .or_default()
             .push_back(id);
-        self.queue.push_back(PendingTxEntry { id, caller, tx });
+        self.queue.push_back(PendingTxEntry {
+            id,
+            caller,
+            tx,
+            arrived_at_ms,
+        });
     }
 
-    fn push_front(&mut self, caller: Address, tx: Transaction) {
+    fn push_front(&mut self, caller: Address, tx: Transaction, arrived_at_ms: u64) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
         self.by_caller_nonce
             .entry((caller, tx.nonce))
             .or_default()
             .push_front(id);
-        self.queue.push_front(PendingTxEntry { id, caller, tx });
+        self.queue.push_front(PendingTxEntry {
+            id,
+            caller,
+            tx,
+            arrived_at_ms,
+        });
     }
 
     /// Remove an entry by its queue position and update the RBF index at the same time.
@@ -425,6 +531,402 @@ impl PendingTxState {
         self.by_caller_nonce.clear();
         std::mem::take(&mut self.queue)
     }
+}
+
+/// SeenReceipt 内存 map（M3-ACC-6，§5.3-1）。
+///
+/// **v1 边界：receipt 仅存内存，节点重启丢失；持久化 / P2P receipt 同步属 v2。**
+/// C-2 同款 FIFO 上限防内存 DoS。
+struct SeenReceiptsState {
+    map: std::collections::HashMap<Hash, crate::force_include::SeenReceipt>,
+    order: std::collections::VecDeque<Hash>,
+}
+
+impl SeenReceiptsState {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn insert(&mut self, receipt: crate::force_include::SeenReceipt, max_size: usize) {
+        if !self.map.contains_key(&receipt.tx_hash) {
+            self.order.push_back(receipt.tx_hash);
+        }
+        self.map.insert(receipt.tx_hash, receipt);
+        while self.map.len() > max_size {
+            if let Some(old) = self.order.pop_front() {
+                self.map.remove(&old);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get(&self, tx_hash: &Hash) -> Option<crate::force_include::SeenReceipt> {
+        self.map.get(tx_hash).cloned()
+    }
+}
+
+/// ForceInclude 已提升集合（M3-ACC-6 去重，§5.3-2 "已进过块的 hash 防重复包含"）。
+///
+/// v1 语义：drain 提升时即标记（把"已进入 vertex batch"视为"已进块"的最早保守点）。
+/// 同一 tx_hash 不会被二次强制提升；回排（requeue）后按普通排序随下一轮 drain 进块。
+struct ForceIncludeState {
+    included: std::collections::HashSet<Hash>,
+    order: std::collections::VecDeque<Hash>,
+}
+
+impl ForceIncludeState {
+    fn new() -> Self {
+        Self {
+            included: std::collections::HashSet::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    /// 标记提升；返回 false 表示此前已提升过（去重命中）。
+    fn mark_included(&mut self, tx_hash: Hash, max_size: usize) -> bool {
+        if !self.included.insert(tx_hash) {
+            return false;
+        }
+        self.order.push_back(tx_hash);
+        while self.order.len() > max_size {
+            if let Some(old) = self.order.pop_front() {
+                self.included.remove(&old);
+            } else {
+                break;
+            }
+        }
+        true
+    }
+
+    fn snapshot(&self) -> Vec<Hash> {
+        self.order.iter().copied().collect()
+    }
+}
+
+/// v1.5-c：checkpoint 投票收集与最新 QC 状态。
+///
+/// votes 按 `(epoch, height)` 分桶（有界：最多保留 4 个位点的票）；`latest_qc`
+/// 为已达成 2f+1 的最新 checkpoint（重启经 `checkpoints.jsonl` sidecar 恢复
+/// 最高高度一条）。
+struct CheckpointState {
+    votes: std::collections::HashMap<(crate::consensus::Epoch, u64), Vec<crate::consensus::checkpoint::CheckpointVote>>,
+    vote_sites_order: std::collections::VecDeque<(crate::consensus::Epoch, u64)>,
+    latest_qc: Option<crate::consensus::checkpoint::CheckpointQc>,
+    /// v1.5-e：阈值形态部分份额签名（按位点分桶，与 votes 同款有界）。
+    threshold_partials: std::collections::HashMap<
+        (crate::consensus::Epoch, u64),
+        Vec<crate::consensus::checkpoint::ThresholdQcPartial>,
+    >,
+    /// v1.5-e：阈值部分份额桶的 FIFO 驱逐序。
+    threshold_sites_order: std::collections::VecDeque<(crate::consensus::Epoch, u64)>,
+}
+
+/// checkpoint 投票桶上限（位点数）。
+const MAX_CHECKPOINT_VOTE_SITES: usize = 4;
+
+impl CheckpointState {
+    fn new() -> Self {
+        Self {
+            votes: std::collections::HashMap::new(),
+            vote_sites_order: std::collections::VecDeque::new(),
+            latest_qc: None,
+            threshold_partials: std::collections::HashMap::new(),
+            threshold_sites_order: std::collections::VecDeque::new(),
+        }
+    }
+}
+
+/// v1.5-d：DA 请求/回执状态（原型口径：内存态；凭证验证逻辑见
+/// `consensus::da`，重启不恢复 —— DA 请求是短生命周期对象）。
+struct DaState {
+    /// digest → 条目（请求 + 已收集回执）。
+    entries: std::collections::HashMap<Hash, DaEntry>,
+    /// FIFO 驱逐序（上限 [`MAX_DA_ENTRIES`]）。
+    order: std::collections::VecDeque<Hash>,
+    /// 待 gossip 的本节点回执（validator loop 每轮 drain 并广播）。
+    outbox: std::collections::VecDeque<crate::consensus::da::DaReceipt>,
+}
+
+/// DA 条目。
+struct DaEntry {
+    request: crate::consensus::da::DaRequest,
+    receipts: Vec<crate::consensus::da::DaReceipt>,
+    /// 已聚合的凭证（凑齐 2f+1 时生成）。
+    certificate: Option<crate::consensus::da::DaCertificate>,
+}
+
+/// DA 状态条目上限（内存 DoS 防护）。
+const MAX_DA_ENTRIES: usize = 256;
+
+impl DaState {
+    fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: std::collections::VecDeque::new(),
+            outbox: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn entry_mut(&mut self, request: crate::consensus::da::DaRequest) -> &mut DaEntry {
+        let digest = request.digest;
+        if !self.order.contains(&digest) {
+            self.order.push_back(digest);
+        }
+        while self.order.len() > MAX_DA_ENTRIES {
+            if let Some(old) = self.order.pop_front() {
+                self.entries.remove(&old);
+            }
+        }
+        self.entries.entry(digest).or_insert_with(|| DaEntry {
+            request,
+            receipts: Vec::new(),
+            certificate: None,
+        })
+    }
+}
+
+/// DA 状态视图（RPC `da_status` 返回；字节 hex）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaStatus {
+    /// 是否已有请求。
+    pub requested: bool,
+    /// 数据摘要（0x hex）。
+    pub digest: String,
+    /// 请求位点 epoch。
+    pub epoch: u64,
+    /// 请求位点高度。
+    pub height: u64,
+    /// 已收集回执数。
+    pub receipt_count: usize,
+    /// 是否已成凭证（≥2f+1）。
+    pub certified: bool,
+    /// 凭证签名者数（certified=true 时 ≥2f+1）。
+    pub cert_signers: usize,
+}
+
+/// checkpoint QC JSONL sidecar 文件名（相对 data_dir；域名冻结）。
+pub const CHECKPOINT_SIDECAR_FILE: &str = "checkpoints.jsonl";
+
+// ===== v1.5-e：DKG 密钥材料文件面（`zchain dkg` 产出 / Node 载入） =====
+
+/// DKG 群密钥集 JSON 文件形态（公开面；字节字段 0x hex，脚本友好）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgKeysetFile {
+    /// 参与者总数 n（分片 id ∈ 1..=n）。
+    pub n: u32,
+    /// 签名/重建阈值 t。
+    pub t: u32,
+    /// 群公钥 Q（G2 compressed，0x hex 96B）。
+    pub group_pubkey_g2: String,
+    /// 各 dealer 承诺集（外层按 dealer_id-1，内层 k = 0..=t-1；0x hex 96B）。
+    pub commitments_g2: Vec<Vec<String>>,
+}
+
+/// DKG 参与者群份额 JSON 文件形态（**私密面**；文件权限由部署层保证）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DkgShareFile {
+    /// 参与者 id（1..=n）。
+    pub participant_id: u64,
+    /// 群份额标量（0x hex 32B）。
+    pub scalar_hex: String,
+}
+
+/// [`GroupKeyset`] → JSON 字符串（文件写入面）。
+///
+/// # Errors
+/// 群公钥/承诺长度非法或 JSON 序列化失败。
+pub fn dkg_keyset_to_json(
+    keyset: &crate::consensus::dkg::GroupKeyset,
+) -> PokerL1Result<String> {
+    let hex_96 = |bytes: &[u8]| -> PokerL1Result<String> {
+        if bytes.len() != crate::crypto_precompiles::bls::G2_COMPRESSED_SIZE {
+            return Err(PokerL1Error::InvalidBlsPoint(format!(
+                "dkg keyset file: commitment size {} != {}",
+                bytes.len(),
+                crate::crypto_precompiles::bls::G2_COMPRESSED_SIZE
+            )));
+        }
+        Ok(format!("0x{}", hex::encode(bytes)))
+    };
+    let mut commitments = Vec::with_capacity(keyset.commitments_g2.len());
+    for dealer in &keyset.commitments_g2 {
+        commitments.push(
+            dealer
+                .iter()
+                .map(|c| hex_96(c))
+                .collect::<PokerL1Result<Vec<_>>>()?,
+        );
+    }
+    let file = DkgKeysetFile {
+        n: keyset.n,
+        t: keyset.t,
+        group_pubkey_g2: hex_96(&keyset.group_pubkey_g2)?,
+        commitments_g2: commitments,
+    };
+    serde_json::to_string_pretty(&file)
+        .map_err(|e| PokerL1Error::Serialization(format!("dkg keyset json: {e}")))
+}
+
+/// JSON 字符串 → [`GroupKeyset`]（文件载入面；逐字段尺寸校验，fail-closed）。
+///
+/// # Errors
+/// JSON 非法、hex 非法或承诺/群公钥尺寸非 96B。
+pub fn dkg_keyset_from_json(s: &str) -> PokerL1Result<crate::consensus::dkg::GroupKeyset> {
+    let file: DkgKeysetFile = serde_json::from_str(s)
+        .map_err(|e| PokerL1Error::Serialization(format!("dkg keyset json: {e}")))?;
+    let hex_96 = |s: &str| -> PokerL1Result<Vec<u8>> {
+        let stripped = s.strip_prefix("0x").unwrap_or(s);
+        let bytes = hex::decode(stripped)
+            .map_err(|e| PokerL1Error::Serialization(format!("dkg keyset hex: {e}")))?;
+        if bytes.len() != crate::crypto_precompiles::bls::G2_COMPRESSED_SIZE {
+            return Err(PokerL1Error::InvalidBlsPoint(format!(
+                "dkg keyset file: point size {} != {}",
+                bytes.len(),
+                crate::crypto_precompiles::bls::G2_COMPRESSED_SIZE
+            )));
+        }
+        Ok(bytes)
+    };
+    let mut commitments = Vec::with_capacity(file.commitments_g2.len());
+    for dealer in &file.commitments_g2 {
+        commitments.push(
+            dealer
+                .iter()
+                .map(|c| hex_96(c))
+                .collect::<PokerL1Result<Vec<_>>>()?,
+        );
+    }
+    Ok(crate::consensus::dkg::GroupKeyset {
+        n: file.n,
+        t: file.t,
+        group_pubkey_g2: hex_96(&file.group_pubkey_g2)?,
+        commitments_g2: commitments,
+    })
+}
+
+/// [`ParticipantShare`] → JSON 字符串（文件写入面）。
+///
+/// # Errors
+/// JSON 序列化失败。
+pub fn dkg_share_to_json(
+    share: &crate::consensus::dkg::ParticipantShare,
+) -> PokerL1Result<String> {
+    let file = DkgShareFile {
+        participant_id: share.id,
+        scalar_hex: format!("0x{}", hex::encode(share.scalar)),
+    };
+    serde_json::to_string_pretty(&file)
+        .map_err(|e| PokerL1Error::Serialization(format!("dkg share json: {e}")))
+}
+
+/// JSON 字符串 → [`ParticipantShare`]（文件载入面）。
+///
+/// # Errors
+/// JSON 非法、hex 非法或标量非 32B。
+pub fn dkg_share_from_json(s: &str) -> PokerL1Result<crate::consensus::dkg::ParticipantShare> {
+    let file: DkgShareFile = serde_json::from_str(s)
+        .map_err(|e| PokerL1Error::Serialization(format!("dkg share json: {e}")))?;
+    let stripped = file.scalar_hex.strip_prefix("0x").unwrap_or(&file.scalar_hex);
+    let bytes = hex::decode(stripped)
+        .map_err(|e| PokerL1Error::Serialization(format!("dkg share hex: {e}")))?;
+    let scalar: [u8; crate::crypto_precompiles::bls::SCALAR_SIZE] =
+        bytes.as_slice().try_into().map_err(|_| {
+            PokerL1Error::InvalidBlsScalar(format!(
+                "dkg share scalar size {} != {}",
+                bytes.len(),
+                crate::crypto_precompiles::bls::SCALAR_SIZE
+            ))
+        })?;
+    Ok(crate::consensus::dkg::ParticipantShare {
+        id: file.participant_id,
+        scalar,
+    })
+}
+
+/// 重放 checkpoint sidecar，返回最高高度的一条合法 QC（None = 无/全部损坏）。
+fn replay_latest_checkpoint_qc(
+    data_dir: &std::path::Path,
+) -> Option<crate::consensus::checkpoint::CheckpointQc> {
+    let content = std::fs::read_to_string(data_dir.join(CHECKPOINT_SIDECAR_FILE)).ok()?;
+    let mut best: Option<crate::consensus::checkpoint::CheckpointQc> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Ok(qc) = serde_json::from_str::<crate::consensus::checkpoint::CheckpointQc>(line) {
+            if best.as_ref().is_none_or(|b| qc.height >= b.height) {
+                best = Some(qc);
+            }
+        }
+    }
+    best
+}
+
+/// v1.5-e：从配置路径加载 DKG 密钥材料（keyset 公开面 + 本节点群份额私密面）。
+///
+/// fail-closed：
+/// - `qc_threshold_t == 0`（聚合模式）时配置了任何 dkg 路径 → 拒（材料与模式
+///   不一致，防误配后静默走聚合）；
+/// - `qc_threshold_t > 0` 缺任一路径 → 拒；
+/// - `keyset.t != qc_threshold_t` → 拒；
+/// - 本节点份额未过 `keyset.verify_participant_share`（Feldman 等式）→ 拒。
+///
+/// # Errors
+/// 上述任一拒绝条件或文件读取/解析失败。
+fn load_dkg_material(
+    config: &NodeConfig,
+) -> PokerL1Result<(
+    Option<crate::consensus::dkg::GroupKeyset>,
+    Option<crate::consensus::dkg::ParticipantShare>,
+)> {
+    if config.qc_threshold_t == 0 {
+        if config.dkg_keyset_path.is_some() || config.dkg_share_path.is_some() {
+            return Err(PokerL1Error::Other(
+                "dkg: 配置了 keyset/share 路径但 qc-threshold-t == 0（聚合模式不接受阈值材料）".into(),
+            ));
+        }
+        return Ok((None, None));
+    }
+    let Some(ks_path) = &config.dkg_keyset_path else {
+        return Err(PokerL1Error::Other(
+            "dkg: --qc-threshold-t > 0 需要 --dkg-keyset <path>".into(),
+        ));
+    };
+    let Some(share_path) = &config.dkg_share_path else {
+        return Err(PokerL1Error::Other(
+            "dkg: --qc-threshold-t > 0 需要 --dkg-share <path>".into(),
+        ));
+    };
+    let keyset = dkg_keyset_from_json(
+        &std::fs::read_to_string(ks_path).map_err(|e| {
+            PokerL1Error::Other(format!("dkg: keyset 文件读取失败（{}）：{e}", ks_path.display()))
+        })?,
+    )?;
+    if keyset.t != config.qc_threshold_t {
+        return Err(PokerL1Error::Other(format!(
+            "dkg: keyset.t {} != 配置 qc-threshold-t {}（fail-closed）",
+            keyset.t, config.qc_threshold_t
+        )));
+    }
+    let share = dkg_share_from_json(
+        &std::fs::read_to_string(share_path).map_err(|e| {
+            PokerL1Error::Other(format!(
+                "dkg: share 文件读取失败（{}）：{e}",
+                share_path.display()
+            ))
+        })?,
+    )?;
+    if !keyset.verify_participant_share(&share)? {
+        return Err(PokerL1Error::Other(
+            "dkg: 本节点群份额未通过 keyset Feldman 校验（fail-closed 拒载）".into(),
+        ));
+    }
+    Ok((Some(keyset), Some(share)))
 }
 
 /// 节点实例 — 持有存储后端与可选 validator 密钥。
@@ -482,6 +984,29 @@ pub struct Node {
     /// Light client header 缓存（缺口：subscribe_light_headers 完整实现）。
     /// validator 节点在 put_block 时生成并签名；light/full 节点可订阅获取。
     light_headers: std::sync::Mutex<Vec<crate::network::LightClientHeader>>,
+    /// M3-ACC-6：节点本地时钟来源（可注入；生产默认 SystemTime，测试注 fake clock）。
+    time_source: std::sync::Mutex<Box<dyn Fn() -> u64 + Send + Sync>>,
+    /// M3-ACC-6：已签发的 SeenReceipt（v1.5-a1：validator 节点经 JSONL sidecar
+    /// `<data_dir>/seen_receipts.jsonl` 持久化，重启重放恢复；内存节点无 sidecar）。
+    seen_receipts: std::sync::Mutex<SeenReceiptsState>,
+    /// v1.5-a1：SeenReceipt sidecar 写句柄（`Some` = 持久化路径；内存节点为 `None`）。
+    receipt_sidecar: std::sync::Mutex<Option<crate::force_include::ReceiptSidecar>>,
+    /// M3-ACC-6：已强制提升（视为已进块）的 tx_hash 去重集合。
+    force_include: std::sync::Mutex<ForceIncludeState>,
+    /// v1.5-b：真实罚没账本（append-only）。`check_censorship` 命中 Censored 时
+    /// 对 receipt 签发者执行 bond 扣减并记账（原型口径：单节点主观证据；生产
+    /// 语义见 `consensus::slash` 模块头边界说明）。
+    slash_ledger: std::sync::Mutex<crate::consensus::slash::SlashLedger>,
+    /// v1.5-c：checkpoint 投票收集与最新 QC（重启经 sidecar 恢复）。
+    checkpoint_state: std::sync::Mutex<CheckpointState>,
+    /// v1.5-c：checkpoint QC sidecar 写句柄（`Some` = 持久化路径；内存节点 None）。
+    checkpoint_sidecar: std::sync::Mutex<Option<std::fs::File>>,
+    /// v1.5-e：DKG 群密钥集（`qc_threshold_t > 0` 时载入；公开面）。
+    dkg_keyset: Option<crate::consensus::dkg::GroupKeyset>,
+    /// v1.5-e：本节点 DKG 群份额（私密面；载入时已过 Feldman 校验）。
+    dkg_share: Option<crate::consensus::dkg::ParticipantShare>,
+    /// v1.5-d：DA 请求/回执状态（内存态原型）。
+    da_state: std::sync::Mutex<DaState>,
 }
 
 /// 构造默认预编译合约注册表并注册内置预编译合约。
@@ -624,6 +1149,74 @@ impl Node {
             validator_staking_escrow(&validator_set)?,
         )?;
         let precompile_registry = build_default_precompile_registry();
+        // v1.5-a1：SeenReceipt sidecar（持久化 + 重启重放恢复）。
+        let (mut receipt_sidecar, replayed_receipts) =
+            if config.role.is_validator() && config.validator_key.is_some() {
+                let (sidecar, replayed) =
+                    crate::force_include::ReceiptSidecar::open(&config.data_dir).map_err(|e| {
+                        PokerL1Error::Other(format!(
+                            "seen_receipts sidecar 打开失败（{}）：{e}",
+                            config.data_dir.display()
+                        ))
+                    })?;
+                (Some(sidecar), replayed)
+            } else {
+                (None, Vec::new())
+            };
+        let mut seen_receipts_state = SeenReceiptsState::new();
+        for receipt in replayed_receipts {
+            seen_receipts_state.insert(receipt, MAX_PENDING_TX_SIZE);
+        }
+        if let Some(sidecar) = &receipt_sidecar
+            && sidecar.corrupt_lines() > 0
+        {
+            tracing::warn!(
+                "seen_receipts sidecar 重放跳过 {} 条损坏行（崩溃残留，append-only 语义不受影响）",
+                sidecar.corrupt_lines()
+            );
+        }
+        let receipt_sidecar = std::sync::Mutex::new(receipt_sidecar);
+        // v1.5-c：checkpoint QC sidecar（append 写句柄 + 重放最新 QC）。
+        let checkpoint_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(config.data_dir.join(CHECKPOINT_SIDECAR_FILE))
+            .map_err(|e| {
+                PokerL1Error::Other(format!(
+                    "checkpoint sidecar 打开失败（{}）：{e}",
+                    config.data_dir.display()
+                ))
+            })?;
+        let mut checkpoint_state = CheckpointState::new();
+        // v1.5-e：DKG 密钥材料（qc_threshold_t > 0 时载入；fail-closed 自检）。
+        let (dkg_keyset, dkg_share) = load_dkg_material(&config)?;
+        if let Some(ks) = &dkg_keyset {
+            tracing::info!(
+                "threshold QC: DKG keyset 已载入 n={} t={} digest=0x{} share_id={:?}",
+                ks.n,
+                ks.t,
+                hex::encode(ks.group_key_digest()),
+                dkg_share.as_ref().map(|s| s.id)
+            );
+        }
+        checkpoint_state.latest_qc = replay_latest_checkpoint_qc(&config.data_dir);
+        // v1.5-e：重启恢复 fail-closed 校验 —— sidecar 重放的 QC 必须通过
+        // 当前形态对应的密码学验证（阈值形态对本地 keyset 单配对；聚合形态
+        // 对活跃 validator 数 quorum 验证），损坏/挪群 QC 拒载（清为 None）。
+        if let Some(qc) = checkpoint_state.latest_qc.as_ref() {
+            let vc = validator_set.active_count().max(1);
+            match qc.verify_any(vc, dkg_keyset.as_ref()) {
+                Ok(()) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "checkpoint sidecar 重放的 QC 未通过恢复校验，拒载（fail-closed）：{e}"
+                    );
+                    checkpoint_state.latest_qc = None;
+                }
+            }
+        }
+        let checkpoint_state = std::sync::Mutex::new(checkpoint_state);
+        let checkpoint_sidecar = std::sync::Mutex::new(Some(checkpoint_file));
         Ok(Self {
             config,
             block_store,
@@ -641,6 +1234,16 @@ impl Node {
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
             zk_verifier,
             light_headers: std::sync::Mutex::new(Vec::new()),
+            time_source: std::sync::Mutex::new(Box::new(system_time_ms)),
+            seen_receipts: std::sync::Mutex::new(seen_receipts_state),
+            receipt_sidecar,
+            force_include: std::sync::Mutex::new(ForceIncludeState::new()),
+            slash_ledger: std::sync::Mutex::new(crate::consensus::slash::SlashLedger::new()),
+            checkpoint_state,
+            checkpoint_sidecar,
+            dkg_keyset,
+            dkg_share,
+            da_state: std::sync::Mutex::new(DaState::new()),
         })
     }
 
@@ -681,10 +1284,18 @@ impl Node {
             native_allocs.push((addr, *amount));
         }
         let validator_set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        // 对拍对象的 version 必须沿用持久化系统对象的当前 version（重启后
+        // 运行期会推进 version），否则 genesis 幂等对拍在"对象内容一致、
+        // 仅 version 不同"上误报 differs-after-closure。首启（无持久化
+        // 对象）用 0。
+        let persisted_version = object_db
+            .read(&crate::consensus::validator_set::VALIDATOR_SET_OBJECT_ID)
+            .map(|o| o.version)
+            .unwrap_or(0);
         let validator_set_object = crate::consensus::validator_set::validator_set_object(
             self.config.chain_id,
             &validator_set,
-            0,
+            persisted_version,
         )?;
         let minted = crate::economics::genesis_mint_with_system_objects(
             &mut object_db,
@@ -728,6 +1339,14 @@ impl Node {
                 validator_key: None,
                 genesis_validators,
                 fee_policy: FeePolicy::Free,
+                inclusion_deadline_ms: crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
+                censorship_window_blocks:
+                    crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+                checkpoint_interval_blocks:
+                    crate::consensus::checkpoint::DEFAULT_CHECKPOINT_INTERVAL_BLOCKS,
+                qc_threshold_t: 0,
+                dkg_keyset_path: None,
+                dkg_share_path: None,
             },
             block_store: BlockStore::open_inmemory()?,
             block_commit_lock: std::sync::Mutex::new(()),
@@ -746,6 +1365,56 @@ impl Node {
             metrics: Arc::new(crate::metrics::MetricsCollector::new()),
             zk_verifier: None,
             light_headers: std::sync::Mutex::new(Vec::new()),
+            time_source: std::sync::Mutex::new(Box::new(system_time_ms)),
+            seen_receipts: std::sync::Mutex::new(SeenReceiptsState::new()),
+            receipt_sidecar: std::sync::Mutex::new(None),
+            force_include: std::sync::Mutex::new(ForceIncludeState::new()),
+            slash_ledger: std::sync::Mutex::new(crate::consensus::slash::SlashLedger::new()),
+            checkpoint_state: std::sync::Mutex::new(CheckpointState::new()),
+            checkpoint_sidecar: std::sync::Mutex::new(None),
+            dkg_keyset: None,
+            dkg_share: None,
+            da_state: std::sync::Mutex::new(DaState::new()),
+        })
+    }
+
+    /// 创建内存节点并直接指定完整配置（M3-ACC-6 集成测试用）。
+    ///
+    /// 与 [`Self::open_inmemory_with_validators`] 同一内存构造路径，但允许测试注入
+    /// validator 密钥、强制包含期限等配置。`allow_empty_consensus_for_tests` 同内存
+    /// 构造（仅适合聚焦执行而非共识成员的测试）。
+    pub fn open_inmemory_with_config(config: NodeConfig) -> PokerL1Result<Self> {
+        let validator_set = build_genesis_validator_set(config.genesis_validators.clone())?;
+        // v1.5-e：与持久化路径同一 DKG 材料载入纪律（fail-closed 自检）。
+        let (dkg_keyset, dkg_share) = load_dkg_material(&config)?;
+        let precompile_registry = build_default_precompile_registry();
+        Ok(Self {
+            config,
+            block_store: BlockStore::open_inmemory()?,
+            block_commit_lock: std::sync::Mutex::new(()),
+            object_db: std::sync::Mutex::new(ObjectDb::open_inmemory()?),
+            vertex_store: DagVertexStore::open_inmemory()?,
+            account_store: std::sync::Mutex::new(AccountStore::new()),
+            tx_cache: std::sync::Mutex::new(TxCacheState::new()),
+            pending_tx: std::sync::Mutex::new(PendingTxState::new()),
+            pending_tx_condvar: std::sync::Condvar::new(),
+            validator_set: std::sync::Mutex::new(validator_set),
+            allow_empty_consensus_for_tests: true,
+            precompile_registry,
+            bridge_registry_store: None,
+            metrics: Arc::new(crate::metrics::MetricsCollector::new()),
+            zk_verifier: None,
+            light_headers: std::sync::Mutex::new(Vec::new()),
+            time_source: std::sync::Mutex::new(Box::new(system_time_ms)),
+            seen_receipts: std::sync::Mutex::new(SeenReceiptsState::new()),
+            receipt_sidecar: std::sync::Mutex::new(None),
+            force_include: std::sync::Mutex::new(ForceIncludeState::new()),
+            slash_ledger: std::sync::Mutex::new(crate::consensus::slash::SlashLedger::new()),
+            checkpoint_state: std::sync::Mutex::new(CheckpointState::new()),
+            checkpoint_sidecar: std::sync::Mutex::new(None),
+            dkg_keyset,
+            dkg_share,
+            da_state: std::sync::Mutex::new(DaState::new()),
         })
     }
 
@@ -1433,6 +2102,28 @@ impl Node {
                 if existing_hash == candidate_hash {
                     return Ok(candidate_hash);
                 }
+                // 恰 quorum 存活修复 · 语句级去重：同一高度、同一签名对象
+                //（cert signing_hash 不含 signature_list/signer_bitmap）的两个 block
+                // 仅仅是同一 finalize 决议的不同签名子集 —— 并发装配的各节点收集到
+                // 的投票子集不同，块字节（乃至 block hash）随之不同，但链语义完全
+                // 一致。按语句去重：保留先入库的变体，后到的当重复接受，避免
+                // 「同一语句的不同签名变体」被误判为分叉、把节点永久冻结在自己的
+                // 变体上。不同语句（真正的分叉企图）仍然 fail-closed 拒绝。
+                // 去重条件附加 timestamp 一致：并发装配的 timestamp 由同一个已存储
+                // 父块确定性推导，必然相同；不同 timestamp 意味着伪造/冲突块。
+                let existing_statement = existing
+                    .header
+                    .dag_commit_certificate
+                    .signing_hash(self.config.chain_id);
+                let candidate_statement = block
+                    .header
+                    .dag_commit_certificate
+                    .signing_hash(self.config.chain_id);
+                if existing_statement == candidate_statement
+                    && existing.header.timestamp_ms == block.header.timestamp_ms
+                {
+                    return Ok(existing_hash);
+                }
                 return Err(PokerL1Error::Other(format!(
                     "block height {} is already committed to a different hash",
                     block.header.height
@@ -1690,6 +2381,12 @@ impl Node {
         // 4. Bind the certificate to both this header and the previous finalized certificate.
         // The signature alone proves only that validators signed a self-contained statement; it
         // does not establish that the statement belongs at this point in the local chain.
+        //
+        // 恰 quorum 存活修复：prev_commit_hash 链改用 **signing_hash**（不含签名的
+        // 语句哈希）。cert_hash 含 signature_list —— 并发装配的签名子集差异会让
+        // 同一语句的不同变体持有不同 cert_hash，下一个高度的歌 prev_commit_hash
+        // 随之分叉，投票语句无法跨节点收敛。语句链仍保持 hash-linked（防
+        // long-range attack），且与投票对象（signing_hash）严格一致。
         let cert = &header.dag_commit_certificate;
         let expected_prev_commit_hash = previous_block
             .as_ref()
@@ -1697,7 +2394,7 @@ impl Node {
                 previous
                     .header
                     .dag_commit_certificate
-                    .cert_hash(self.config.chain_id)
+                    .signing_hash(self.config.chain_id)
             })
             .unwrap_or([0u8; 32]);
         match previous_block.as_ref() {
@@ -2026,11 +2723,46 @@ impl Node {
     /// M-6 修复：tx_cache + order 合并到单个 Mutex，消除多锁死锁风险。
     pub fn submit_tx(&self, tx: Transaction) -> PokerL1Result<Hash> {
         let tx_hash = tx.tx_hash();
+        // M3-ACC-6：到达时间戳（节点本地可注入时钟；交易本体无时间戳）。
+        let now_ms = self.now_ms();
 
         // M-6 修复：单次 lock 即可完成 cache + order 操作
         {
             let mut cache = self.tx_cache.lock().unwrap_or_else(|e| e.into_inner());
             cache.insert(tx_hash, tx.clone(), MAX_NODE_TX_CACHE_SIZE);
+        }
+
+        // M3-ACC-6（§5.3-1）：validator 收到合法 submit_tx 后立即签发 SeenReceipt。
+        // 仅 validator 角色且配置了签名密钥时签发（与 vertex / commit cert 同一密钥、
+        // 同一 secp256k1 recoverable 方案，不新造密码学）。
+        if self.config.role.is_validator()
+            && let Some(vkey) = &self.config.validator_key
+            && let Ok(secret_key) = secp256k1::SecretKey::from_slice(&vkey.secret_key_bytes)
+        {
+            let receipt = crate::force_include::SeenReceipt::issue(
+                self.config.chain_id,
+                tx_hash,
+                now_ms,
+                &secret_key,
+            )?;
+            let mut receipts = self.seen_receipts.lock().unwrap_or_else(|e| e.into_inner());
+            receipts.insert(receipt.clone(), MAX_PENDING_TX_SIZE);
+            drop(receipts);
+            // v1.5-a1：同步追加落盘（JSONL sidecar，append-only；重启重放恢复）。
+            // 落盘失败不阻断 tx 提交（receipt 仍在内存），仅记告警 —— 持久化是
+            // 尽力而为的副作用，签名验证与内存查询能力不受影响。
+            let sidecar_result = self
+                .receipt_sidecar
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_mut()
+                .map(|sidecar| sidecar.append(&receipt));
+            if let Some(Err(e)) = sidecar_result {
+                tracing::warn!(
+                    "seen_receipts sidecar 追加失败（tx_hash={}）：{e}",
+                    hex::encode(tx_hash)
+                );
+            }
         }
 
         if self.config.role.is_validator() {
@@ -2059,7 +2791,7 @@ impl Node {
                     }
                 }
             }
-            pending.push(caller, tx);
+            pending.push(caller, tx, now_ms);
             while pending.len() > MAX_PENDING_TX_SIZE {
                 // 溢出时丢弃 gas_price 最低的（而非 FIFO 最旧）。
                 if pending.len() > 1 {
@@ -2126,6 +2858,14 @@ impl Node {
             .into_iter()
             .map(|entry| entry.tx)
             .collect();
+        Self::order_txs_legacy(txs)
+    }
+
+    /// 既有通道排序（GameTurn/CheckpointAnchor → Public → ForceSync）。
+    ///
+    /// 从 [`Self::drain_pending_tx`] 与 [`Self::drain_pending_tx_for_block`] 共用，
+    /// 保证 `inclusion_deadline_ms = 0`（禁用强制包含）时两条路径产出完全同序。
+    fn order_txs_legacy(txs: Vec<Transaction>) -> Vec<Transaction> {
         // 分通道排序：GameTurn/CheckpointAnchor 优先 → Public 中 → ForceSync 后。
         // Public/ForceSync 内部按 gas_price 降序；GameTurn 按 arrival 顺序。
         let mut gameturn: Vec<&Transaction> = Vec::new();
@@ -2150,6 +2890,89 @@ impl Node {
         result
     }
 
+    /// 出块 drain（M3-ACC-6，§5.3-2/3）：先扫描强制包含队列，再按既有通道排序。
+    ///
+    /// 1. `now > arrived_at_ms + inclusion_deadline_ms` 且尚未提升过的交易进入
+    ///    强制包含队列（`included` 去重集合防二次强制包含）；
+    /// 2. 强制包含队列按 `tx_hash` 字节序升序，**先于**普通交易返回；
+    /// 3. 普通交易保持 [`Self::drain_pending_tx`] 的既有通道排序；
+    /// 4. `inclusion_deadline_ms == 0` 时完全等价于 [`Self::drain_pending_tx`]
+    ///    （禁用路径回归测试覆盖：同输入序列两法同序）。
+    pub fn drain_pending_tx_for_block(&self) -> Vec<Transaction> {
+        self.drain_pending_tx_for_block_with_forced().0
+    }
+
+    /// v1.5-a2：出块 drain 的载荷版 —— 同时返回本轮被强制提升的 tx_hash 集合
+    /// （已按字节序升序、去重），供 validator 写入 vertex 的 `forced_tx_hashes`
+    /// 载荷字段（强制包含集进共识承诺）。
+    ///
+    /// 返回 `(排序后 tx 列表, 本轮 forced hash 升序列表)`。
+    pub fn drain_pending_tx_for_block_with_forced(&self) -> (Vec<Transaction>, Vec<Hash>) {
+        let now_ms = self.now_ms();
+        let deadline_ms = self.config.inclusion_deadline_ms;
+        let drained: Vec<PendingTxEntry> = self
+            .pending_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .into_iter()
+            .collect();
+        if drained.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
+        if deadline_ms == 0 {
+            // 禁用路径：与历史行为完全一致（不扫描、不标记去重集合）。
+            let txs: Vec<Transaction> = drained.into_iter().map(|entry| entry.tx).collect();
+            return (Self::order_txs_legacy(txs), Vec::new());
+        }
+        let mut forced: Vec<crate::force_include::ForceIncludeTx> = Vec::new();
+        let mut normal: Vec<Transaction> = Vec::new();
+        {
+            let mut included = self.force_include.lock().unwrap_or_else(|e| e.into_inner());
+            for entry in drained {
+                let tx_hash = entry.tx.tx_hash();
+                if included.included.contains(&tx_hash)
+                    || !crate::force_include::is_past_inclusion_deadline(
+                        entry.arrived_at_ms,
+                        now_ms,
+                        deadline_ms,
+                    )
+                {
+                    normal.push(entry.tx);
+                    continue;
+                }
+                included.mark_included(tx_hash, MAX_PENDING_TX_SIZE);
+                tracing::info!(
+                    "force_include: tx_hash={} 超过期限 {}ms（arrived_at={} now={}），本块强制包含",
+                    hex::encode(tx_hash),
+                    deadline_ms,
+                    entry.arrived_at_ms,
+                    now_ms
+                );
+                forced.push(crate::force_include::ForceIncludeTx {
+                    tx: entry.tx,
+                    tx_hash,
+                    arrived_at_ms: entry.arrived_at_ms,
+                });
+            }
+        }
+        if !forced.is_empty() {
+            tracing::info!(
+                "force_include: 本轮共强制包含 {} 笔，普通交易 {} 笔按通道排序跟随",
+                forced.len(),
+                normal.len()
+            );
+        }
+        // v1.5-a2：本轮 forced hash 升序快照（写入 vertex 载荷的承诺集合）。
+        let mut forced_hashes: Vec<Hash> = forced.iter().map(|f| f.tx_hash).collect();
+        forced_hashes.sort();
+        forced_hashes.dedup();
+        // 强制包含（tx_hash 升序）在前，普通交易按既有通道排序在后。
+        let txs =
+            crate::force_include::order_force_include_first(forced, Self::order_txs_legacy(normal));
+        (txs, forced_hashes)
+    }
+
     /// Return transactions drained by the validator loop to the front of the mempool.
     ///
     /// This is used when a multi-validator node cannot yet assemble a valid previous-round
@@ -2161,10 +2984,18 @@ impl Node {
             return;
         }
 
+        // M3-ACC-6：回排交易从 SeenReceipt 恢复原始到达时间（若存在），
+        // 避免强制包含期限被回排重置重新计时。
+        let now_ms = self.now_ms();
+        let receipts = self.seen_receipts.lock().unwrap_or_else(|e| e.into_inner());
         let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
         for tx in txs.into_iter().rev() {
             let caller = crate::account::derive_address(&tx.tagged_pubkey);
-            pending.push_front(caller, tx);
+            let arrived_at_ms = receipts
+                .get(&tx.tx_hash())
+                .map(|receipt| receipt.seen_at_ms)
+                .unwrap_or(now_ms);
+            pending.push_front(caller, tx, arrived_at_ms);
         }
         while pending.len() > MAX_PENDING_TX_SIZE {
             let min_index = pending
@@ -2194,6 +3025,493 @@ impl Node {
             .wait_timeout(guard, timeout)
             .unwrap_or_else(|e| e.into_inner());
         !result.0.is_empty()
+    }
+
+    // ===== M3-ACC-6：ForceInclude 抗审查机制（plan §5.3 v1 子集） =====
+
+    /// 节点本地时钟（毫秒）。来源可注入（[`Self::set_time_source`]），生产默认
+    /// `SystemTime`。
+    fn now_ms(&self) -> u64 {
+        let source = self.time_source.lock().unwrap_or_else(|e| e.into_inner());
+        (source)()
+    }
+
+    /// 注入时钟来源（测试用 fake clock；生产无需调用）。
+    pub fn set_time_source(&self, source: Box<dyn Fn() -> u64 + Send + Sync>) {
+        let mut guard = self.time_source.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = source;
+    }
+
+    /// 强制包含期限（毫秒；`0 = 禁用`）。
+    #[must_use]
+    pub const fn inclusion_deadline_ms(&self) -> u64 {
+        self.config.inclusion_deadline_ms
+    }
+
+    /// 按 hash 查询 SeenReceipt（§5.3-1；v1.5-a1：validator 节点持久化于
+    /// JSONL sidecar，重启后重放恢复，RPC 仍可答）。
+    ///
+    /// 仅 validator 角色且配置了签名密钥的节点会在 `submit_tx` 时签发。
+    pub fn get_seen_receipt(
+        &self,
+        tx_hash: &Hash,
+    ) -> PokerL1Result<Option<crate::force_include::SeenReceipt>> {
+        let receipts = self.seen_receipts.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(receipts.get(tx_hash))
+    }
+
+    /// 已强制提升（视为已进块）的 tx_hash 快照（出块排序集成用）。
+    ///
+    /// 返回提升顺序快照；[`sort_commit_txs_r4m4_with_force_include`] 消费前会按
+    /// hash 排序，故快照顺序不影响结果确定性。
+    pub fn force_included_hashes(&self) -> Vec<Hash> {
+        let included = self.force_include.lock().unwrap_or_else(|e| e.into_inner());
+        included.snapshot()
+    }
+
+    /// 从 block store 提取近 `window_blocks` 个块的 tx_hash 全集（§5.3-4 v1 块数近似）。
+    ///
+    /// 高度从 tip 向下扫描；缺失高度跳过。仅用于 `check_censorship`（低频 RPC）。
+    fn recent_window_tx_hashes(&self, window_blocks: u64) -> PokerL1Result<Vec<Hash>> {
+        let mut out = Vec::new();
+        let tip = match self.block_store.get_tip_height()? {
+            Some(tip) => tip,
+            None => return Ok(out),
+        };
+        let start = tip.saturating_sub(window_blocks.saturating_sub(1));
+        for height in (start..=tip).rev() {
+            if let Ok(block) = self.block_store.get_by_height(height) {
+                for tx in block.public_txs.iter().chain(block.gameturn_txs.iter()) {
+                    out.push(tx.tx_hash());
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// 审查检测（§5.3-4）：验证 [`crate::force_include::CensorshipProof`]。
+    ///
+    /// 返回 [`crate::force_include::CensorshipCheckOutcome`] 三态：
+    /// - `Included`：tx 已包含（近 K 个块内），指控不成立；
+    /// - `NotYetDue`：未超过 `seen_at_ms + deadline_ms`；
+    /// - `Censored`：证据成立 —— v1.5-b 起对 receipt 签发者执行**真实罚没**
+    ///   （[`crate::consensus::slash::SlashLedger`] 记账 + 本地 ValidatorSet
+    ///   bond 扣减；stake 归零即 Slashed、失去出块资格）。证据幂等键 =
+    ///   `censorship_evidence_digest(chain_id, tx_hash, seen_at_ms, 签发者)`，
+    ///   同一证据不重复罚没。
+    ///
+    /// 边界（原型口径）：罚没在本节点共享 ValidatorSet 上执行，属单节点主观
+    /// 证据结算；QC 背书证据 + epoch 边界统一结算的生产语义见
+    /// `consensus::slash` 模块头。罚没失败（validator 不在集合/已 Slashed）
+    /// 只记日志，不影响三态返回。
+    pub fn check_censorship(
+        &self,
+        proof: &crate::force_include::CensorshipProof,
+    ) -> PokerL1Result<crate::force_include::CensorshipCheckOutcome> {
+        let now_ms = self.now_ms();
+        let recent = self.recent_window_tx_hashes(self.config.censorship_window_blocks)?;
+        let outcome = proof.verify(self.config.chain_id, now_ms, &recent)?;
+        if outcome == crate::force_include::CensorshipCheckOutcome::Censored {
+            self.metrics().inc_censorship_detected();
+            tracing::warn!(
+                "CENSORSHIP DETECTED: tx_hash={} seen_at_ms={} deadline_ms={} height_hint={} — v1.5 真实罚没触发",
+                hex::encode(proof.receipt.tx_hash),
+                proof.receipt.seen_at_ms,
+                proof.deadline_ms,
+                proof.current_height_hint,
+            );
+            // v1.5-b：对 receipt 签发者执行罚没（幂等；tip height 作证据链高）。
+            let tip_height = self.block_store.get_tip_height()?.unwrap_or(0);
+            let evidence_digest = crate::consensus::slash::censorship_evidence_digest(
+                self.config.chain_id,
+                &proof.receipt.tx_hash,
+                proof.receipt.seen_at_ms,
+                &proof.receipt.validator_pubkey,
+            );
+            let mut ledger = self.slash_ledger.lock().unwrap_or_else(|e| e.into_inner());
+            let mut set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+            match ledger.apply_slash_from_censorship(
+                &mut set,
+                &proof.receipt.validator_pubkey,
+                evidence_digest,
+                crate::consensus::slash::DEFAULT_SLASH_AMOUNT_FULL,
+                now_ms,
+                tip_height,
+            ) {
+                Ok(Some(event)) => tracing::warn!(
+                    "SLASH APPLIED (censorship_proof): validator={:?} deducted={} stake_now={} height={}",
+                    event.validator_pubkey,
+                    event.amount,
+                    set.find_validator(&event.validator_pubkey)
+                        .map(|v| v.stake)
+                        .unwrap_or(0),
+                    tip_height
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!("SLASH 未执行（censorship_proof）：{e}"),
+            }
+        }
+        Ok(outcome)
+    }
+
+    /// v1.5-b：罚没账本只读快照（append-only 事件序列）。
+    #[must_use]
+    pub fn slash_events(&self) -> Vec<crate::consensus::slash::SlashEvent> {
+        self.slash_ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .events()
+            .to_vec()
+    }
+
+    // ===== v1.5-c：checkpoint + BLS 聚合 QC（原型） =====
+
+    /// v1.5-c：checkpoint 产出间隔（块数；0 = 禁用）。
+    #[must_use]
+    pub const fn checkpoint_interval_blocks(&self) -> u64 {
+        self.config.checkpoint_interval_blocks
+    }
+
+    /// 当前 tip 已覆盖的最新 checkpoint 边界 → 返回待签署位点
+    /// `(epoch, height, state_root)`。
+    ///
+    /// 语义：取 `height = tip - (tip % interval)`（≤ tip 的最新间隔边界）。
+    /// 这样即使 validator loop 的 tick 落在边界高度之后（200ms 出块间隔下
+    /// 边界高度可能仅存在一个 tick），也不漏签；重复签署由调用方以
+    /// 「本节点已签位点集合」去重。本地缺失边界块（import 未达）→ None，
+    /// 待 import 后补签。
+    #[must_use]
+    pub fn checkpoint_target(&self) -> Option<(crate::consensus::Epoch, u64, Hash)> {
+        if self.config.checkpoint_interval_blocks == 0 {
+            return None;
+        }
+        let tip = self.block_store.get_tip_height().ok().flatten()?;
+        let interval = self.config.checkpoint_interval_blocks;
+        let target = tip - (tip % interval);
+        if target == 0 {
+            return None;
+        }
+        let block = self.block_store.get_by_height(target).ok()?;
+        let cert = &block.header.dag_commit_certificate;
+        Some((cert.epoch, target, block.header.state_root))
+    }
+
+    /// 记录一条 checkpoint 投票（已验证签名）并在凑齐 2f+1 时聚合 QC。
+    ///
+    /// 返回 `(该位点当前票数, 若凑齐则返回新形成的 QC)`。同签名者重复投票去重。
+    ///
+    /// 边界（原型口径，如实）：BLS 公钥尚无 validator 集注册表，收集端只能做
+    /// **签名有效性**（possession）验证 + 2f+1 计数，不能验证"签名者属于当前
+    /// validator 集"——公钥注册表（ValidatorEntry 增加 bls_pubkey 字段或独立
+    /// registry）属后续接线点。多节点部署中投票源自 gossip 的 validator 连接，
+    /// 攻击面可接受于原型。
+    pub fn record_checkpoint_vote(
+        &self,
+        vote: crate::consensus::checkpoint::CheckpointVote,
+    ) -> PokerL1Result<(usize, Option<crate::consensus::checkpoint::CheckpointQc>)> {
+        use crate::consensus::checkpoint::CheckpointQc;
+        vote.verify()?;
+        let vc = self.active_validator_count().max(1);
+        let mut state = self
+            .checkpoint_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (vote.epoch, vote.height);
+        if !state.vote_sites_order.contains(&key) {
+            state.vote_sites_order.push_back(key);
+            while state.vote_sites_order.len() > MAX_CHECKPOINT_VOTE_SITES {
+                if let Some(old) = state.vote_sites_order.pop_front() {
+                    state.votes.remove(&old);
+                }
+            }
+        }
+        let entry = state.votes.entry(key).or_default();
+        if entry
+            .iter()
+            .any(|v| v.signer_pubkey_g2 == vote.signer_pubkey_g2)
+        {
+            return Ok((entry.len(), None));
+        }
+        entry.push(vote);
+        let collected = entry.len();
+        let required = crate::consensus::required_quorum(vc);
+        if collected < required {
+            return Ok((collected, None));
+        }
+        let votes = entry.clone();
+        let qc = CheckpointQc::form_from_votes(&votes, vc)?;
+        self.append_checkpoint_qc(&qc)?;
+        state.latest_qc = Some(qc.clone());
+        Ok((collected, Some(qc)))
+    }
+
+    /// 当前已收集票数（诊断/测试用）。
+    #[must_use]
+    pub fn checkpoint_vote_count(&self, epoch: crate::consensus::Epoch, height: u64) -> usize {
+        self.checkpoint_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .votes
+            .get(&(epoch, height))
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    /// 最新已验证 checkpoint QC（重启后由 sidecar 恢复）。
+    #[must_use]
+    pub fn latest_checkpoint_qc(&self) -> Option<crate::consensus::checkpoint::CheckpointQc> {
+        self.checkpoint_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .latest_qc
+            .clone()
+    }
+
+    // ===== v1.5-e：阈值 QC 形态（真 t-of-n；密钥来自 consensus::dkg） =====
+
+    /// checkpoint QC 阈值 t（`0 = 聚合模式，零回退；> 0 = 阈值形态`）。
+    #[must_use]
+    pub const fn qc_threshold_t(&self) -> u32 {
+        self.config.qc_threshold_t
+    }
+
+    /// 本节点 DKG 群份额 id（阈值模式；`None` = 未配置/聚合模式）。
+    #[must_use]
+    pub fn dkg_share_id(&self) -> Option<u64> {
+        self.dkg_share.as_ref().map(|s| s.id)
+    }
+
+    /// 本节点 DKG 群份额克隆（validator loop 阈值签名输入；与节点同信任域）。
+    #[must_use]
+    pub fn dkg_share(&self) -> Option<crate::consensus::dkg::ParticipantShare> {
+        self.dkg_share
+    }
+
+    /// 记录一条阈值部分份额签名（已验证）并在凑齐 t 时装配阈值 QC。
+    ///
+    /// 返回 `(该位点当前份额数, 若凑齐则返回新形成的阈值形态 QC)`。
+    /// 同参与者重复份额去重。**无 keyset 的节点拒绝（fail-closed）**——聚合
+    /// 模式节点走 [`Self::record_checkpoint_vote`]（零回退路径）。
+    ///
+    /// # Errors
+    /// 节点无 DKG keyset、份额签名验证失败（尺寸/点/配对）、位点异构或装配
+    /// 失败（见 [`CheckpointQc::form_threshold_from_partials`]）。
+    pub fn record_threshold_partial(
+        &self,
+        partial: crate::consensus::checkpoint::ThresholdQcPartial,
+    ) -> PokerL1Result<(usize, Option<crate::consensus::checkpoint::CheckpointQc>)> {
+        use crate::consensus::checkpoint::CheckpointQc;
+        let Some(keyset) = self.dkg_keyset.as_ref() else {
+            return Err(PokerL1Error::Other(
+                "threshold partial: 节点未配置 DKG keyset（聚合模式不接受阈值份额）".into(),
+            ));
+        };
+        partial.verify(keyset)?;
+        let mut state = self
+            .checkpoint_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let key = (partial.epoch, partial.height);
+        if !state.threshold_sites_order.contains(&key) {
+            state.threshold_sites_order.push_back(key);
+            while state.threshold_sites_order.len() > MAX_CHECKPOINT_VOTE_SITES {
+                if let Some(old) = state.threshold_sites_order.pop_front() {
+                    state.threshold_partials.remove(&old);
+                }
+            }
+        }
+        let entry = state.threshold_partials.entry(key).or_default();
+        if entry
+            .iter()
+            .any(|p| p.participant_id == partial.participant_id)
+        {
+            return Ok((entry.len(), None));
+        }
+        entry.push(partial);
+        let collected = entry.len();
+        // 仅在恰好凑齐 t 时装配一次（此后到位的份额只计数：QC 签名者数
+        // 确定为 t，避免每个超额份额都重做 Lagrange 重构）。
+        if collected != keyset.t as usize {
+            return Ok((collected, None));
+        }
+        let partials = entry.clone();
+        let qc = CheckpointQc::form_threshold_from_partials(&partials, keyset)?;
+        self.append_checkpoint_qc(&qc)?;
+        state.latest_qc = Some(qc.clone());
+        Ok((collected, Some(qc)))
+    }
+
+    /// 当前已收集阈值部分份额数（诊断/测试用）。
+    #[must_use]
+    pub fn threshold_partial_count(
+        &self,
+        epoch: crate::consensus::Epoch,
+        height: u64,
+    ) -> usize {
+        self.checkpoint_state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .threshold_partials
+            .get(&(epoch, height))
+            .map(|v| v.len())
+            .unwrap_or(0)
+    }
+
+    // ===== v1.5-d：DA 原语（请求/回执/聚合凭证，原型闭环） =====
+
+    /// 发起 DA 请求并签发本节点回执（validator 角色且配置密钥时）。
+    ///
+    /// 位点取 `(当前 epoch, tip height)`；本节点回执入站内收集并进入 outbox
+    /// （由 validator loop gossip 给 peers）。非 validator 节点请求会被拒绝
+    /// （无签名能力，DA 回执必须由 validator 签发）。
+    pub fn submit_da_request(&self, digest: Hash) -> PokerL1Result<DaStatus> {
+        let vkey = self.config.validator_key.as_ref().ok_or_else(|| {
+            PokerL1Error::Other("da_request: 本节点非 validator（无签名密钥）".into())
+        })?;
+        let epoch = self.current_epoch();
+        let height = self.block_store.get_tip_height()?.unwrap_or(0);
+        let sk = crate::consensus::checkpoint::bls_derive_secret_key(&vkey.secret_key_bytes);
+        let receipt = crate::consensus::da::DaReceipt::sign(digest, epoch, height, &sk)?;
+        let request = crate::consensus::da::DaRequest {
+            digest,
+            epoch,
+            height,
+            requester: vkey.tagged_pubkey.clone(),
+        };
+        let vc = self.active_validator_count().max(1);
+        let mut state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        let status = {
+            let entry = state.entry_mut(request);
+            if !entry
+                .receipts
+                .iter()
+                .any(|r| r.signer_pubkey_g2 == receipt.signer_pubkey_g2)
+            {
+                entry.receipts.push(receipt.clone());
+            }
+            // 尝试聚合凭证
+            if entry.certificate.is_none() {
+                let required = crate::consensus::required_quorum(vc);
+                if entry.receipts.len() >= required {
+                    let receipts = entry.receipts.clone();
+                    entry.certificate =
+                        Some(crate::consensus::da::DaCertificate::form_from_receipts(
+                            &receipts, vc,
+                        )?);
+                }
+            }
+            Self::da_status_of(entry)
+        };
+        state.outbox.push_back(receipt);
+        Ok(status)
+    }
+
+    /// 记录 peer 的 DA 回执（P2P 入口；凑齐 2f+1 时聚合凭证）。
+    ///
+    /// 未请求过的 digest：接受为"被动见证"（validator gossip 的回执本身就
+    /// 说明了该 digest 的可用性动议）——与请求路径共用条目结构。
+    pub fn record_da_receipt(
+        &self,
+        receipt: crate::consensus::da::DaReceipt,
+    ) -> PokerL1Result<DaStatus> {
+        receipt.verify()?;
+        let vc = self.active_validator_count().max(1);
+        let request = crate::consensus::da::DaRequest {
+            digest: receipt.digest,
+            epoch: receipt.epoch,
+            height: receipt.height,
+            requester: crate::signature::TaggedPubkey {
+                tag: crate::signature::tagged_pubkey::encode_tag(
+                    crate::signature::SignatureScheme::Secp256k1,
+                    crate::signature::CURRENT_VERSION,
+                ),
+                raw: vec![],
+            },
+        };
+        let mut state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = state.entry_mut(request);
+        if !entry
+            .receipts
+            .iter()
+            .any(|r| r.signer_pubkey_g2 == receipt.signer_pubkey_g2)
+        {
+            entry.receipts.push(receipt);
+        }
+        if entry.certificate.is_none() {
+            let required = crate::consensus::required_quorum(vc);
+            if entry.receipts.len() >= required {
+                let receipts = entry.receipts.clone();
+                entry.certificate =
+                    Some(crate::consensus::da::DaCertificate::form_from_receipts(
+                        &receipts, vc,
+                    )?);
+            }
+        }
+        Ok(Self::da_status_of(entry))
+    }
+
+    /// 查询 DA 状态（RPC `da_status`）。
+    #[must_use]
+    pub fn da_status(&self, digest: &Hash) -> DaStatus {
+        let state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.entries.get(digest) {
+            Some(entry) => Self::da_status_of(entry),
+            None => DaStatus {
+                requested: false,
+                digest: format!("0x{}", hex::encode(digest)),
+                epoch: 0,
+                height: 0,
+                receipt_count: 0,
+                certified: false,
+                cert_signers: 0,
+            },
+        }
+    }
+
+    fn da_status_of(entry: &DaEntry) -> DaStatus {
+        DaStatus {
+            requested: true,
+            digest: format!("0x{}", hex::encode(entry.request.digest)),
+            epoch: entry.request.epoch,
+            height: entry.request.height,
+            receipt_count: entry.receipts.len(),
+            certified: entry.certificate.is_some(),
+            cert_signers: entry
+                .certificate
+                .as_ref()
+                .map(crate::consensus::da::DaCertificate::signer_count)
+                .unwrap_or(0),
+        }
+    }
+
+    /// 取出待广播的本地 DA 回执（validator loop 每轮调用）。
+    #[must_use]
+    pub fn drain_da_outbox(&self) -> Vec<crate::consensus::da::DaReceipt> {
+        let mut state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        state.outbox.drain(..).collect()
+    }
+
+    /// QC 落盘（JSONL sidecar，一行一条 JSON；失败仅记日志 —— QC 仍保留内存态）。
+    fn append_checkpoint_qc(
+        &self,
+        qc: &crate::consensus::checkpoint::CheckpointQc,
+    ) -> PokerL1Result<()> {
+        use std::io::Write as _;
+        let mut guard = self
+            .checkpoint_sidecar
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let Some(file) = guard.as_mut() else {
+            return Ok(());
+        };
+        let mut line = serde_json::to_string(qc)
+            .map_err(|e| PokerL1Error::Serialization(format!("checkpoint qc json: {e}")))?;
+        line.push('\n');
+        file.write_all(line.as_bytes())
+            .and_then(|_| file.flush())
+            .map_err(|e| {
+                PokerL1Error::Other(format!("checkpoint sidecar 追加失败: {e}"))
+            })
     }
 
     /// 是否提供历史数据 RPC（仅 Archive 节点）。
@@ -2431,6 +3749,34 @@ impl crate::rpc::RpcBackend for NodeRpcBackend {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         crate::economics::list_owned_native_coins(&object_db, *owner)
+    }
+
+    /// M3-ACC-6（§5.3-1）：SeenReceipt 查询。
+    fn get_seen_receipt(
+        &self,
+        tx_hash: &Hash,
+    ) -> PokerL1Result<Option<crate::force_include::SeenReceipt>> {
+        self.node.get_seen_receipt(tx_hash)
+    }
+
+    fn latest_checkpoint(&self) -> Option<crate::consensus::checkpoint::CheckpointQc> {
+        self.node.latest_checkpoint_qc()
+    }
+
+    fn submit_da_request(&self, digest: Hash) -> PokerL1Result<crate::node::DaStatus> {
+        self.node.submit_da_request(digest)
+    }
+
+    fn da_status(&self, digest: &Hash) -> crate::node::DaStatus {
+        self.node.da_status(digest)
+    }
+
+    /// M3-ACC-6（§5.3-4）：审查检测三态。
+    fn check_censorship(
+        &self,
+        proof: &crate::force_include::CensorshipProof,
+    ) -> PokerL1Result<crate::force_include::CensorshipCheckOutcome> {
+        self.node.check_censorship(proof)
     }
 
     fn chain_id(&self) -> ChainId {
@@ -2913,6 +4259,7 @@ mod tests {
             }],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(
@@ -2932,6 +4279,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0xFF; 65], // 无效签名
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(result.is_err(), "无效签名应被拒绝: {:?}", result);
@@ -2977,6 +4325,7 @@ mod tests {
             ],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(result.is_err(), "S9 排序违规应被拒绝: {:?}", result);
@@ -2992,6 +4341,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![[0xAA; 32]], // 不存在的 parent
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(result.is_err(), "不存在的 parent 应被拒绝: {:?}", result);
@@ -3008,6 +4358,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         // parent 入库前不需要验证签名（测试中跳过）
         let parent_hash = node.vertex_store.put(&parent).unwrap();
@@ -3032,6 +4383,7 @@ mod tests {
             }],
             parent_hashes: vec![parent_hash],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         // 注意：签名是 dummy，验证会失败。这里只验证 parent 存在性路径
         let result = node.validate_vertex(&vertex);
@@ -3106,7 +4458,7 @@ mod tests {
         let first_cert_hash = first
             .header
             .dag_commit_certificate
-            .cert_hash(DEFAULT_CHAIN_ID);
+            .signing_hash(DEFAULT_CHAIN_ID);
         let second = empty_consensus_block(&node, 2, 2_000, first_hash, 1, 2, first_cert_hash);
 
         let mut backwards = second.clone();
@@ -3464,6 +4816,7 @@ mod tests {
                 tx_list: vec![],
                 parent_hashes,
                 author_sig: vec![],
+                forced_tx_hashes: vec![],
             },
         )
     }
@@ -3513,6 +4866,7 @@ mod tests {
                 tx_list: vec![invalid_tx],
                 parent_hashes: vec![],
                 author_sig: vec![],
+                forced_tx_hashes: vec![],
             },
         );
 
@@ -3885,6 +5239,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(
@@ -3910,6 +5265,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let result = node.validate_vertex(&vertex);
         assert!(
@@ -4343,6 +5699,739 @@ mod tests {
         assert_eq!(drained[0].tagged_pubkey.raw[0], 0x20, "arrival 顺序保持");
         assert_eq!(drained[1].tagged_pubkey.raw[0], 0x21);
         assert_eq!(drained[2].tagged_pubkey.raw[0], 0x22);
+    }
+
+    // ===== M3-ACC-6：ForceInclude 抗审查测试 =====
+
+    /// 带 validator 密钥与 fake clock 的内存 validator 节点。
+    fn force_include_validator_node(deadline_ms: u64) -> (Node, Arc<std::sync::Mutex<u64>>) {
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_fi_test"), vkey);
+        config.inclusion_deadline_ms = deadline_ms;
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let clock = Arc::new(std::sync::Mutex::new(1_000u64));
+        let clock_handle = Arc::clone(&clock);
+        node.set_time_source(Box::new(move || *clock_handle.lock().unwrap()));
+        (node, clock)
+    }
+
+    #[test]
+    fn force_include_validator_issues_seen_receipt_on_submit() {
+        // §5.3-1：validator 收到合法 submit_tx 后签发 SeenReceipt（可验证）。
+        let (node, clock) = force_include_validator_node(10_000);
+        *clock.lock().unwrap() = 1_234;
+        let tx = make_pub_tx(0x31, 1, 1);
+        let tx_hash = tx.tx_hash();
+        node.submit_tx(tx).unwrap();
+
+        let receipt = node
+            .get_seen_receipt(&tx_hash)
+            .expect("查询 receipt 不应报错")
+            .expect("validator submit 后应有 receipt");
+        assert_eq!(receipt.tx_hash, tx_hash);
+        assert_eq!(receipt.chain_id, DEFAULT_CHAIN_ID);
+        assert_eq!(receipt.seen_at_ms, 1_234);
+        receipt
+            .verify()
+            .expect("validator 密钥签发的 receipt 必须通过验证");
+
+        // 未命中 → None
+        let missing = node.get_seen_receipt(&[0u8; 32]).unwrap();
+        assert!(missing.is_none(), "未提交过的 tx 不应有 receipt");
+    }
+
+    #[test]
+    fn force_include_non_validator_does_not_issue_receipt() {
+        let config = NodeConfig::default_full(PathBuf::from("/tmp/poker_l1_fi_full"));
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let clock = Arc::new(std::sync::Mutex::new(1_000u64));
+        let clock_handle = Arc::clone(&clock);
+        node.set_time_source(Box::new(move || *clock_handle.lock().unwrap()));
+        let tx = make_pub_tx(0x33, 1, 1);
+        let tx_hash = tx.tx_hash();
+        node.submit_tx(tx).unwrap();
+        assert!(
+            node.get_seen_receipt(&tx_hash).unwrap().is_none(),
+            "非 validator 不签发 receipt"
+        );
+    }
+
+    // ===== v1.5-a1：receipt JSONL sidecar 持久化（重启恢复） =====
+
+    #[test]
+    fn receipt_sidecar_persists_across_node_restart() {
+        let dir = std::env::temp_dir().join(format!(
+            "pokerl1_receipt_restart_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tx = make_pub_tx(0x81, 1, 1);
+        let tx_hash = tx.tx_hash();
+        {
+            let vkey = ValidatorKey::from_secret_bytes([0x77u8; 32]).unwrap();
+            let mut config = NodeConfig::validator(dir.clone(), vkey);
+            config.inclusion_deadline_ms = 10_000;
+            let node = Node::open(config).unwrap();
+            let clock = Arc::new(std::sync::Mutex::new(4_321u64));
+            let clock_handle = Arc::clone(&clock);
+            node.set_time_source(Box::new(move || *clock_handle.lock().unwrap()));
+            node.submit_tx(tx.clone()).unwrap();
+            let receipt = node.get_seen_receipt(&tx_hash).unwrap().expect("运行期可查");
+            receipt.verify().expect("运行期 receipt 有效");
+            // Node drop（模拟进程退出）
+        }
+        {
+            // 重启：同一 data-dir、同一密钥 → sidecar 重放恢复内存 map
+            let vkey = ValidatorKey::from_secret_bytes([0x77u8; 32]).unwrap();
+            let config = NodeConfig::validator(dir.clone(), vkey);
+            let node = Node::open(config).unwrap();
+            let receipt = node
+                .get_seen_receipt(&tx_hash)
+                .expect("查询不应报错")
+                .expect("重启后 get_seen_receipt 必须仍可答（v1.5-a1）");
+            assert_eq!(receipt.tx_hash, tx_hash);
+            assert_eq!(receipt.seen_at_ms, 4_321);
+            receipt.verify().expect("重放 receipt 签名必须仍有效");
+            // 未提交过的 hash 仍为 None
+            assert!(node.get_seen_receipt(&[0xEEu8; 32]).unwrap().is_none());
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // ===== v1.5-a2：drain 返回 forced 载荷集 =====
+
+    #[test]
+    fn drain_for_block_with_forced_returns_sorted_payload_set() {
+        let (node, clock) = force_include_validator_node(1_000);
+        let mut txs: Vec<Transaction> = (0..3)
+            .map(|k| make_pub_tx(0x82 + k as u8, k + 1, 1))
+            .collect();
+        for tx in &txs {
+            node.submit_tx(tx.clone()).unwrap();
+        }
+        *clock.lock().unwrap() = 5_000; // 全部越期限（arrived=1000, deadline=1000）
+        let (drained, forced) = node.drain_pending_tx_for_block_with_forced();
+        assert_eq!(drained.len(), 3);
+        let mut expected: Vec<Hash> = txs.iter().map(|t| t.tx_hash()).collect();
+        expected.sort();
+        assert_eq!(forced, expected, "载荷 forced 集必须去重升序");
+        // vertex 场景：批次交集 —— 只有真实进 vertex 的 tx 才进承诺
+        txs.clear();
+        assert!(node.drain_pending_tx_for_block_with_forced().1.is_empty());
+    }
+
+    // ===== v1.5-b：check_censorship → 真实罚没 =====
+
+    #[test]
+    fn check_censorship_applies_slash_and_halts_zero_bond_validator() {
+        // genesis validator stake 必须为 0（build_genesis_validator_set 约束），
+        // 测试经内存 validator_set 直接注入 bond 余额（同模块私有访问）。
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let issuer_entry = crate::consensus::validator_set::ValidatorEntry::new(
+            vkey.tagged_pubkey.clone(),
+            [0x33u8; crate::consensus::validator_set::VRF_PUBKEY_SIZE],
+            0,
+            0,
+        );
+        let mut config =
+            NodeConfig::validator(PathBuf::from("/tmp/poker_l1_slash_test"), vkey);
+        config.genesis_validators = vec![issuer_entry];
+        config.inclusion_deadline_ms = 1_000;
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let clock = Arc::new(std::sync::Mutex::new(0u64));
+        let clock_handle = Arc::clone(&clock);
+        node.set_time_source(Box::new(move || *clock_handle.lock().unwrap()));
+        // 注入 bond 余额 1_000 并设 Active
+        {
+            let mut set = node.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+            set.validators[0].stake = 1_000;
+            set.validators[0].status = crate::consensus::validator_set::ValidatorStatus::Active;
+            set.validator_set_hash = set.compute_hash();
+        }
+        let issuer_pubkey = node.validator_set.lock().unwrap().validators[0].pubkey.clone();
+
+        // 构造 Censored 证据：receipt 由本节点 validator 密钥（= set 成员 issuer）
+        // 签发，deadline=1_000，now=2_000 → 超时；近窗块为空 → 未包含。
+        let vk = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        assert_eq!(
+            vk.tagged_pubkey, issuer_pubkey,
+            "同种子重建的 validator 密钥必须一致"
+        );
+        let secret = secp256k1::SecretKey::from_slice(&vk.secret_key_bytes).unwrap();
+        let placeholder_tx = make_pub_tx(0x91, 1, 1);
+        let receipt = crate::force_include::SeenReceipt::issue(
+            DEFAULT_CHAIN_ID,
+            placeholder_tx.tx_hash(),
+            0,
+            &secret,
+        )
+        .unwrap();
+        let proof = crate::force_include::CensorshipProof {
+            receipt,
+            tx_bytes: placeholder_tx.to_bcs().unwrap(),
+            deadline_ms: 1_000,
+            current_height_hint: 0,
+        };
+
+        // 第一次：Censored → 全额罚没 1000 → stake=0 → Slashed
+        *clock.lock().unwrap() = 2_000;
+        let outcome = node.check_censorship(&proof).unwrap();
+        assert_eq!(
+            outcome,
+            crate::force_include::CensorshipCheckOutcome::Censored
+        );
+        {
+            let set = node.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(set.validators[0].stake, 0, "bond 必须被扣减到 0");
+            assert_eq!(
+                set.validators[0].status,
+                crate::consensus::validator_set::ValidatorStatus::Slashed,
+                "归零必须停出块资格"
+            );
+            assert!(!set.validators[0].can_participate_consensus());
+        }
+        let events = node.slash_events();
+        assert_eq!(events.len(), 1, "必须恰好记一条罚没事件");
+        assert_eq!(events[0].amount, 1_000);
+        assert_eq!(
+            events[0].reason,
+            crate::consensus::slash::SlashReason::CensorshipProof
+        );
+
+        // 第二次（同证据）：幂等 → 无新事件
+        let outcome2 = node.check_censorship(&proof).unwrap();
+        assert_eq!(outcome2, crate::force_include::CensorshipCheckOutcome::Censored);
+        assert_eq!(node.slash_events().len(), 1, "同证据不得重复罚没");
+    }
+
+    // ===== v1.5-c：checkpoint + BLS 聚合 QC（Node 接线） =====
+
+    #[test]
+    fn checkpoint_vote_collection_forms_qc_and_persists_sidecar() {
+        use crate::consensus::checkpoint::{CheckpointQc, CheckpointVote, bls_derive_secret_key};
+        let dir = std::env::temp_dir().join(format!(
+            "pokerl1_ckpt_node_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(dir.clone(), vkey);
+        config.checkpoint_interval_blocks = 32;
+        let node = Node::open(config).unwrap();
+
+        // 禁用路径：interval=0 → checkpoint_target 恒 None
+        let votes: Vec<CheckpointVote> = (0..5)
+            .map(|i| CheckpointVote::sign(1, 64, [0xAu8; 32], &bls_derive_secret_key(&[0xA0 + i as u8; 32])).unwrap())
+            .collect();
+        // 直接经 record 路径收集 5 票（位点是测试构造的，Node 侧不要求 tip 一致 ——
+        // 投票位点真实性由签名者自律与 gossip 来源保证，见方法边界说明）
+        let mut formed_qc: Option<CheckpointQc> = None;
+        for (i, vote) in votes.iter().enumerate() {
+            let (count, formed) = node.record_checkpoint_vote(vote.clone()).unwrap();
+            assert_eq!(count, i + 1, "票数必须随收集递增");
+            if let Some(qc) = formed {
+                formed_qc = Some(qc);
+            }
+        }
+        let qc = formed_qc.expect("5 票必须成 QC");
+        qc.verify(5).unwrap();
+        assert_eq!(node.latest_checkpoint_qc().as_ref().map(|q| q.height), Some(64));
+
+        // 重复投票去重：同签名者再投不增加计数、不重复成 QC
+        let (count, none) = node.record_checkpoint_vote(votes[0].clone()).unwrap();
+        assert_eq!(count, 5);
+        assert!(none.is_none());
+
+        // 侧车已落盘：重开节点重放恢复最新 QC
+        drop(node);
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let config = NodeConfig::validator(dir.clone(), vkey);
+        let node2 = Node::open(config).unwrap();
+        let restored = node2.latest_checkpoint_qc().expect("重启必须恢复最新 QC");
+        assert_eq!(restored, qc, "sidecar 重放的 QC 必须与落盘一致");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn checkpoint_interval_trigger_requires_configured_height() {
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_ckpt_interval"), vkey);
+        config.checkpoint_interval_blocks = 32;
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        // tip 为空（无块）→ 无位点
+        assert!(node.checkpoint_target().is_none());
+        // 间隔 0 禁用
+        let vkey = ValidatorKey::from_secret_bytes([0x43u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_ckpt_off"), vkey);
+        config.checkpoint_interval_blocks = 0;
+        let node_off = Node::open_inmemory_with_config(config).unwrap();
+        assert!(node_off.checkpoint_target().is_none(), "interval=0 必须禁用");
+        let _ = node; // 保留变量以示对照
+    }
+
+    #[test]
+    fn checkpoint_vote_rejects_bad_signature_and_counts_collect() {
+        use crate::consensus::checkpoint::{CheckpointVote, bls_derive_secret_key};
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_ckpt_bad"), vkey);
+        config.checkpoint_interval_blocks = 32;
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let mut vote =
+            CheckpointVote::sign(1, 32, [7u8; 32], &bls_derive_secret_key(&[0xB1u8; 32])).unwrap();
+        vote.signature_g1 = vec![0u8; 48]; // 伪签名（非曲线点）
+        assert!(node.record_checkpoint_vote(vote).is_err(), "伪签名必须被拒");
+        // 合法票：计数递增
+        for i in 0..3u8 {
+            let v = CheckpointVote::sign(1, 32, [7u8; 32], &bls_derive_secret_key(&[0xC0 + i; 32])).unwrap();
+            let (count, _) = node.record_checkpoint_vote(v).unwrap();
+            assert_eq!(count, (i + 1) as usize);
+        }
+        assert_eq!(node.checkpoint_vote_count(1, 32), 3);
+        assert_eq!(node.checkpoint_vote_count(1, 64), 0);
+    }
+
+    // ===== v1.5-e：阈值 QC（Node 接线） =====
+
+    /// 阈值 QC 端到端（Node 层）：DKG 7-of-5 材料落盘 → 节点载入（fail-closed
+    /// 自检）→ 收集 ≥t 份额装配阈值 QC → sidecar 落盘 → 重启恢复且可验。
+    #[test]
+    fn threshold_qc_collection_forms_qc_persists_and_restores() {
+        use crate::consensus::checkpoint::{ThresholdQcPartial, checkpoint_qc_signing_hash};
+        use crate::consensus::dkg::{assemble_group_keyset, dealer_deal};
+        let dir = std::env::temp_dir().join(format!(
+            "pokerl1_thr_node_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // DKG 演练：7 dealer / t=5
+        let n = 7u32;
+        let t = 5u32;
+        let deals: Vec<_> = (1..=u64::from(n))
+            .map(|j| dealer_deal(&[0x90; 32], j, n, t).unwrap())
+            .collect();
+        let (keyset, shares) = assemble_group_keyset(&deals, n, t).unwrap();
+        let keyset_path = dir.join("keyset.json");
+        std::fs::write(&keyset_path, dkg_keyset_to_json(&keyset).unwrap()).unwrap();
+        for s in &shares {
+            std::fs::write(
+                dir.join(format!("share-{}.json", s.id)),
+                dkg_share_to_json(s).unwrap(),
+            )
+            .unwrap();
+        }
+        // 节点 1（参与者 id 3）：t>0 + 材料 → 载入自检通过
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(dir.clone(), vkey);
+        config.checkpoint_interval_blocks = 32;
+        config.qc_threshold_t = t;
+        config.dkg_keyset_path = Some(keyset_path.clone());
+        config.dkg_share_path = Some(dir.join("share-3.json"));
+        let node = Node::open(config).unwrap();
+        assert_eq!(node.qc_threshold_t(), 5);
+        assert_eq!(node.dkg_share_id(), Some(3));
+        // 收集 5 份（含本节点 id 3）→ 装配阈值 QC + 落盘
+        let (epoch, height, root) = (1u64, 64u64, [0xAu8; 32]);
+        let signing = checkpoint_qc_signing_hash(epoch, height, root);
+        let partials: Vec<ThresholdQcPartial> = [1u64, 2, 3, 5, 7]
+            .iter()
+            .map(|id| {
+                let share = shares.iter().find(|s| s.id == *id).unwrap();
+                ThresholdQcPartial {
+                    epoch,
+                    height,
+                    state_root: root,
+                    participant_id: *id,
+                    sig_g1: share.partial_sign(&signing).unwrap().to_vec(),
+                }
+            })
+            .collect();
+        let mut formed = None;
+        for (i, p) in partials.iter().enumerate() {
+            let (count, qc) = node.record_threshold_partial(p.clone()).unwrap();
+            assert_eq!(count, i + 1);
+            if qc.is_some() {
+                formed = qc;
+            }
+        }
+        let qc = formed.expect("t=5 份额必须装配阈值 QC");
+        assert_eq!(qc.signer_count(), 5);
+        qc.verify_threshold(&keyset).unwrap();
+        assert_eq!(
+            node.latest_checkpoint_qc().as_ref().map(|q| q.height),
+            Some(64)
+        );
+        // 重复参与者去重
+        let (count, none) = node.record_threshold_partial(partials[0].clone()).unwrap();
+        assert_eq!(count, 5);
+        assert!(none.is_none());
+        // sidecar 已落盘（阈值形态 JSON 行）
+        let sidecar = std::fs::read_to_string(dir.join(CHECKPOINT_SIDECAR_FILE)).unwrap();
+        assert!(sidecar.contains("\"threshold\""), "阈值形态必须落盘");
+        // 重启：恢复 + 恢复期 fail-closed 验证
+        drop(node);
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config2 = NodeConfig::validator(dir.clone(), vkey);
+        config2.checkpoint_interval_blocks = 32;
+        config2.qc_threshold_t = t;
+        config2.dkg_keyset_path = Some(keyset_path);
+        config2.dkg_share_path = Some(dir.join("share-4.json"));
+        let node2 = Node::open(config2).unwrap();
+        let restored = node2.latest_checkpoint_qc().expect("重启必须恢复阈值 QC");
+        assert_eq!(restored, qc, "sidecar 重放的阈值 QC 必须与落盘一致");
+        restored.verify_threshold(&keyset).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 阈值路径 fail-closed 面：伪/越界份额拒；<t 不产 QC；无 keyset 节点拒
+    /// 阈值份额（聚合模式零回退：同节点聚合投票路径仍可用）；材料与配置不
+    /// 一致（t 不符 / 坏份额 / 缺路径）拒绝启动。
+    #[test]
+    fn threshold_qc_fail_closed_rejections_and_aggregate_fallback() {
+        use crate::consensus::checkpoint::{ThresholdQcPartial, bls_derive_secret_key, checkpoint_qc_signing_hash};
+        use crate::consensus::dkg::{assemble_group_keyset, dealer_deal};
+        let dir = std::env::temp_dir().join(format!(
+            "pokerl1_thr_bad_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = 7u32;
+        let t = 5u32;
+        let deals: Vec<_> = (1..=u64::from(n))
+            .map(|j| dealer_deal(&[0x91; 32], j, n, t).unwrap())
+            .collect();
+        let (keyset, shares) = assemble_group_keyset(&deals, n, t).unwrap();
+        let keyset_path = dir.join("keyset.json");
+        std::fs::write(&keyset_path, dkg_keyset_to_json(&keyset).unwrap()).unwrap();
+        for s in &shares {
+            std::fs::write(
+                dir.join(format!("share-{}.json", s.id)),
+                dkg_share_to_json(s).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut config = NodeConfig::validator(
+            PathBuf::from("/tmp/poker_l1_thr_inmem"),
+            ValidatorKey::from_secret_bytes([0x43u8; 32]).unwrap(),
+        );
+        config.qc_threshold_t = t;
+        // fail-closed：t>0 缺路径 → 拒启动
+        assert!(Node::open_inmemory_with_config(config.clone()).is_err());
+        // fail-closed：keyset.t 与配置不符 → 拒启动
+        config.dkg_keyset_path = Some(keyset_path.clone());
+        config.dkg_share_path = Some(dir.join("share-1.json"));
+        config.qc_threshold_t = 4;
+        assert!(Node::open_inmemory_with_config(config.clone()).is_err());
+        // fail-closed：坏份额（非本群成员）→ 拒启动
+        let (other_keyset, other_shares) = {
+            let d2: Vec<_> = (1..=u64::from(n))
+                .map(|j| dealer_deal(&[0x99; 32], j, n, t).unwrap())
+                .collect();
+            assemble_group_keyset(&d2, n, t).unwrap()
+        };
+        std::fs::write(
+            dir.join("rogue.json"),
+            dkg_share_to_json(&other_shares[0]).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("rogue_keyset.json"),
+            dkg_keyset_to_json(&other_keyset).unwrap(),
+        )
+        .unwrap();
+        config.qc_threshold_t = t;
+        config.dkg_keyset_path = Some(keyset_path.clone());
+        config.dkg_share_path = Some(dir.join("rogue.json"));
+        assert!(
+            Node::open_inmemory_with_config(config.clone()).is_err(),
+            "非本群份额必须 fail-closed 拒载"
+        );
+        // 正常载入（参与者 id 2）
+        config.dkg_share_path = Some(dir.join("share-2.json"));
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let (epoch, height, root) = (1u64, 32u64, [7u8; 32]);
+        let signing = checkpoint_qc_signing_hash(epoch, height, root);
+        let mk = |id: u64, sig: [u8; 48]| ThresholdQcPartial {
+            epoch,
+            height,
+            state_root: root,
+            participant_id: id,
+            sig_g1: sig.to_vec(),
+        };
+        // 伪签名（非曲线点）拒
+        let bogus = mk(1, [0u8; 48]);
+        assert!(node.record_threshold_partial(bogus).is_err());
+        // 越界参与者 id 拒
+        let sig1 = shares[0].partial_sign(&signing).unwrap();
+        assert!(node.record_threshold_partial(mk(u64::from(n) + 1, sig1)).is_err());
+        // 冒名（份额 6 的签名贴 id 5）拒
+        let sig6 = shares[5].partial_sign(&signing).unwrap();
+        assert!(node.record_threshold_partial(mk(5, sig6)).is_err());
+        // <t 不产 QC
+        for id in [1u64, 2, 3, 4] {
+            let share = shares.iter().find(|s| s.id == id).unwrap();
+            let p = mk(id, share.partial_sign(&signing).unwrap());
+            let (count, qc) = node.record_threshold_partial(p).unwrap();
+            assert_eq!(count, id as usize);
+            assert!(qc.is_none(), "<t 不得产 QC");
+        }
+        assert_eq!(node.threshold_partial_count(epoch, height), 4);
+        assert!(node.latest_checkpoint_qc().is_none());
+        // 零回退：无 keyset 节点（t=0）拒阈值份额，聚合投票路径仍可用
+        let agg_config = NodeConfig::validator(
+            PathBuf::from("/tmp/poker_l1_thr_agg"),
+            ValidatorKey::from_secret_bytes([0x44u8; 32]).unwrap(),
+        );
+        let agg_node = Node::open_inmemory_with_config(agg_config).unwrap();
+        assert_eq!(agg_node.qc_threshold_t(), 0);
+        assert!(agg_node.dkg_share_id().is_none());
+        let share = shares.iter().find(|s| s.id == 1).unwrap();
+        let p = mk(1, share.partial_sign(&signing).unwrap());
+        assert!(
+            agg_node.record_threshold_partial(p).is_err(),
+            "无 keyset 节点必须拒阈值份额（fail-closed）"
+        );
+        use crate::consensus::checkpoint::CheckpointVote;
+        let vote = CheckpointVote::sign(epoch, height, root, &bls_derive_secret_key(&[0xC5; 32]))
+            .unwrap();
+        let (_, agg_qc) = agg_node.record_checkpoint_vote(vote).unwrap();
+        assert!(
+            agg_qc.is_some(),
+            "聚合模式（t=0）路径必须零回退可用"
+        );
+        assert!(agg_qc.unwrap().threshold.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn da_request_and_peer_receipts_form_certificate() {
+        use crate::consensus::checkpoint::bls_derive_secret_key;
+        use crate::consensus::da::DaReceipt;
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_da_test"), vkey);
+        config.checkpoint_interval_blocks = 32;
+        // 5 validator 集（Active）→ 2f+1 = 4
+        config.genesis_validators = (0..5usize)
+            .map(|i| {
+                let mut entry = crate::consensus::validator_set::ValidatorEntry::new(
+                    TaggedPubkey {
+                        tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                        raw: vec![0x20 + i as u8; 33],
+                    },
+                    [0x30u8; crate::consensus::validator_set::VRF_PUBKEY_SIZE],
+                    0,
+                    0,
+                );
+                entry.status = crate::consensus::validator_set::ValidatorStatus::Active;
+                entry
+            })
+            .collect();
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let digest = [0xD1u8; 32];
+
+        // 未请求 → requested=false
+        let before = node.da_status(&digest);
+        assert!(!before.requested);
+
+        // da_request：本节点（validator）签回执
+        let status = node.submit_da_request(digest).expect("validator 可发起 DA 请求");
+        assert!(status.requested);
+        assert_eq!(status.receipt_count, 1);
+        assert!(!status.certified, "单回执不足 2f+1");
+        // outbox 有本地回执（供 gossip）
+        assert_eq!(node.drain_da_outbox().len(), 1);
+        assert!(node.drain_da_outbox().is_empty(), "outbox 应被 drain 清空");
+
+        // peer 回执（模拟 5 validator 集，2f+1 = 4）：再收 3 票 → 成凭证
+        let mut last_status = None;
+        for i in 0..3u8 {
+            let receipt =
+                DaReceipt::sign(digest, status.epoch, status.height, &bls_derive_secret_key(&[0xF0 + i; 32])).unwrap();
+            last_status = Some(node.record_da_receipt(receipt).unwrap());
+        }
+        let final_status = last_status.expect("应有最终状态");
+        assert_eq!(final_status.receipt_count, 4);
+        assert!(final_status.certified, "4/5（2f+1）回执必须成凭证");
+        assert_eq!(final_status.cert_signers, 4);
+        assert!(node.da_status(&digest).certified);
+
+        // 伪回执拒：篡改 height → signing_hash 与 (epoch,height,digest) 不一致
+        let mut forged = DaReceipt::sign(digest, status.epoch, status.height, &bls_derive_secret_key(&[0xFfu8; 32])).unwrap();
+        forged.height = forged.height.wrapping_add(1);
+        assert!(node.record_da_receipt(forged).is_err(), "位点被篡改的回执必须拒绝");
+        // 篡改签名（非曲线点）→ 拒
+        let mut forged2 = DaReceipt::sign(digest, status.epoch, status.height, &bls_derive_secret_key(&[0xFEu8; 32])).unwrap();
+        forged2.signature_g1 = vec![0u8; 48];
+        assert!(node.record_da_receipt(forged2).is_err(), "伪签名必须拒绝");
+    }
+
+    #[test]
+    fn da_request_rejects_non_validator_node() {
+        let config = NodeConfig::default_full(PathBuf::from("/tmp/poker_l1_da_full"));
+        let node = Node::open_inmemory_with_config(config).unwrap();
+        let err = node.submit_da_request([1u8; 32]).unwrap_err();
+        assert!(err.to_string().contains("非 validator"));
+    }
+
+    #[test]
+    fn check_censorship_slash_skips_issuer_outside_validator_set() {
+        // 签发者不在本地 validator set → Censored 照常返回，但不产生罚没事件。
+        let (node, clock) = force_include_validator_node(1_000);
+        let outsider = secp256k1::SecretKey::from_slice(&[0xAAu8; 32]).unwrap();
+        let placeholder_tx = make_pub_tx(0x92, 1, 1);
+        let receipt = crate::force_include::SeenReceipt::issue(
+            DEFAULT_CHAIN_ID,
+            placeholder_tx.tx_hash(),
+            0,
+            &outsider,
+        )
+        .unwrap();
+        let proof = crate::force_include::CensorshipProof {
+            receipt,
+            tx_bytes: placeholder_tx.to_bcs().unwrap(),
+            deadline_ms: 1_000,
+            current_height_hint: 0,
+        };
+        *clock.lock().unwrap() = 2_000;
+        let outcome = node.check_censorship(&proof).unwrap();
+        assert_eq!(outcome, crate::force_include::CensorshipCheckOutcome::Censored);
+        assert!(
+            node.slash_events().is_empty(),
+            "set 外签发者不得触发罚没事件"
+        );
+    }
+
+    #[test]
+    fn force_include_deadline_triggers_and_orders_by_tx_hash() {
+        // §5.3-2/3：超过期限的交易强制包含，且乱序到达 → 块序按 tx_hash 字节序升序。
+        let (node, clock) = force_include_validator_node(10_000);
+        // t=1000 提交 5 笔（不同 caller/nonce → hash 各异）
+        let mut txs: Vec<Transaction> = (0..5)
+            .map(|k| make_pub_tx(0x40 + k as u8, k + 1, 1))
+            .collect();
+        // 乱序提交：按 hash 降序提交
+        txs.sort_by(|a, b| b.tx_hash().cmp(&a.tx_hash()));
+        for tx in &txs {
+            node.submit_tx(tx.clone()).unwrap();
+        }
+
+        // 未到期：不出强制包含（此时 drain 走普通通道序，Public 同价 → arrival 序）
+        *clock.lock().unwrap() = 11_000; // 恰好 = arrived + deadline，严格大于才触发
+        let not_yet = node.drain_pending_tx_for_block();
+        assert_eq!(not_yet.len(), 5);
+        let expected_arrival: Vec<Hash> = txs.iter().map(|t| t.tx_hash()).collect();
+        let got_arrival: Vec<Hash> = not_yet.iter().map(|t| t.tx_hash()).collect();
+        assert_eq!(got_arrival, expected_arrival, "未到期时保持 arrival 顺序");
+
+        // 重新提交（mem池已被 drain 清空；本轮 arrived_at = 当前时钟 11000），
+        // 推进时钟越期限（> 11000 + 10000）。
+        for tx in &txs {
+            node.submit_tx(tx.clone()).unwrap();
+        }
+        *clock.lock().unwrap() = 21_001;
+        let forced = node.drain_pending_tx_for_block();
+        assert_eq!(forced.len(), 5);
+        let mut expected_hash_order: Vec<Hash> =
+            txs.iter().map(|t| t.tx_hash()).collect();
+        expected_hash_order.sort();
+        let got_hash_order: Vec<Hash> = forced.iter().map(|t| t.tx_hash()).collect();
+        assert_eq!(
+            got_hash_order, expected_hash_order,
+            "强制包含队列必须按 tx_hash 字节序升序（与到达顺序无关）"
+        );
+    }
+
+    #[test]
+    fn force_include_dedup_prevents_second_promotion() {
+        // 已提升过的 tx 重复进入 mempool（回排/重复提交）→ 不二次强制包含。
+        let (node, clock) = force_include_validator_node(1_000);
+        let first = make_pub_tx(0x51, 1, 1);
+        node.submit_tx(first.clone()).unwrap();
+
+        // 越期限 → drain 强制提升 first
+        *clock.lock().unwrap() = 2_001;
+        let drained = node.drain_pending_tx_for_block();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].tx_hash(), first.tx_hash());
+
+        // first（已提升过）+ 新过期 tx second 一起在 mempool（本轮 arrived_at=2001）
+        let second = make_pub_tx(0x52, 1, 1);
+        node.submit_tx(first.clone()).unwrap();
+        node.submit_tx(second.clone()).unwrap();
+        // 推进时钟使 second 也过期（> 2001 + 1000）
+        *clock.lock().unwrap() = 3_002;
+        let drained = node.drain_pending_tx_for_block();
+        assert_eq!(drained.len(), 2);
+        // second 进入强制包含组（最前）；first 不再二次强制包含，落到普通组
+        assert_eq!(drained[0].tx_hash(), second.tx_hash());
+        assert_eq!(drained[1].tx_hash(), first.tx_hash());
+    }
+
+    #[test]
+    fn force_include_disabled_deadline_zero_matches_legacy_drain() {
+        // 禁用路径（deadline=0）与历史 drain_pending_tx 完全同序（对拍）。
+        let (node_a, _clock_a) = force_include_validator_node(0);
+        let (node_b, _clock_b) = force_include_validator_node(0);
+        // 混合序列：GameTurn / Public（不同 gas price）/ ForceSync，乱序提交。
+        // 注意 submit_tx 不验签（签名在 RPC/block 层校验），测试 tx 用 dummy 签名即可。
+        let sequence: Vec<Transaction> = vec![
+            {
+                let mut tx = make_pub_tx(0x61, 1, 10);
+                tx.lane_hint = crate::transaction::TxLane::GameTurn;
+                tx.gameturn_nonce = Some(1);
+                tx.gas = crate::transaction::Gas::zero();
+                tx
+            },
+            make_pub_tx(0x62, 1, 50),
+            {
+                let mut tx = make_pub_tx(0x63, 1, 30);
+                tx.lane_hint = crate::transaction::TxLane::ForceSync;
+                tx
+            },
+            make_pub_tx(0x64, 2, 20),
+        ];
+        for tx in &sequence {
+            node_a.submit_tx(tx.clone()).unwrap();
+            node_b.submit_tx(tx.clone()).unwrap();
+        }
+        let legacy = node_a.drain_pending_tx();
+        let for_block = node_b.drain_pending_tx_for_block();
+        let legacy_hashes: Vec<Hash> = legacy.iter().map(|t| t.tx_hash()).collect();
+        let for_block_hashes: Vec<Hash> = for_block.iter().map(|t| t.tx_hash()).collect();
+        assert_eq!(
+            legacy_hashes, for_block_hashes,
+            "deadline=0 禁用时 drain_pending_tx_for_block 必须与历史路径完全同序"
+        );
+    }
+
+    #[test]
+    fn force_include_enabled_but_not_expired_matches_legacy_drain() {
+        // 期限启用但无过期交易时，两条路径同样同序。
+        let (node_a, _clock_a) = force_include_validator_node(10_000);
+        let (node_b, clock_b) = force_include_validator_node(10_000);
+        let sequence: Vec<Transaction> = vec![
+            make_pub_tx(0x71, 1, 50),
+            make_pub_tx(0x72, 2, 20),
+            make_pub_tx(0x73, 3, 20),
+        ];
+        for tx in &sequence {
+            node_a.submit_tx(tx.clone()).unwrap();
+            node_b.submit_tx(tx.clone()).unwrap();
+        }
+        assert_eq!(*clock_b.lock().unwrap(), 1_000, "未越期限");
+        let legacy = node_a.drain_pending_tx();
+        let for_block = node_b.drain_pending_tx_for_block();
+        let legacy_hashes: Vec<Hash> = legacy.iter().map(|t| t.tx_hash()).collect();
+        let for_block_hashes: Vec<Hash> = for_block.iter().map(|t| t.tx_hash()).collect();
+        assert_eq!(legacy_hashes, for_block_hashes);
     }
 
     #[test]

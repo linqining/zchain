@@ -1,0 +1,16 @@
+[package]
+name = "stwo-verify-core"
+version = "0.1.0"
+edition = "2021"
+description = "Path A crate A：poker_texas_air canonical 真证明（borsh 归档）的完整 STARK 验证；native/wasm32 同源。stwo 经 [patch.crates-io] 取 vendored wasm-poseidon 副本"
+
+[dependencies]
+# poker_texas_air 只读 path 依赖（与 poker-appchain-texasair 的接入方式同模式）。
+# 其 stwo = "2.3" 依赖被本 workspace 的 [patch.crates-io] 重定向到 vendored 副本。
+poker_texas_air = { path = "../../../../poker_texas_air" }
+# 归档信封解码（poker_texas_air 已在用 borsh 1.x，非新增依赖族）
+borsh = { version = "1", default-features = false, features = ["std"] }
+
+[lib]
+name = "stwo_verify_core"
+crate-type = ["rlib"]

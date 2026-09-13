@@ -181,6 +181,57 @@ pub struct SubmitTxResult {
     pub tx_hash: Hash,
 }
 
+/// `get_latest_checkpoint` 返回视图（v1.5-c；字节字段 hex，脚本友好）。
+///
+/// v1.5-e additive：新增 `mode` / `signer_bitmap` / `group_key_digest` /
+/// `threshold_t` 字段 —— 聚合形态（既有）输出 `mode="aggregate"` 且新增字段
+/// 取空值/0；阈值形态输出 `mode="threshold"` 并携带 bitmap/摘要/t。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatestCheckpointView {
+    /// epoch。
+    pub epoch: u64,
+    /// 被锚定的 commit 高度。
+    pub height: u64,
+    /// state_root（0x hex）。
+    pub state_root: String,
+    /// proposer BLS 公钥（0x hex，96 字节；阈值形态为空串 —— 无 proposer）。
+    pub proposer: String,
+    /// 签名者数量（聚合形态 ≥2f+1；阈值形态 ≥ t）。
+    pub signer_count: usize,
+    /// 聚合签名（0x hex，48 字节；阈值形态为 Lagrange 重构的群签名）。
+    pub aggregate_signature: String,
+    /// QC 形态（v1.5-e）：`"aggregate"`（聚合，零回退默认）或 `"threshold"`
+    /// （真 t-of-n 阈值）。
+    pub mode: String,
+    /// 阈值形态：签名者 bitmap（0x hex；聚合形态为空串）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signer_bitmap: String,
+    /// 阈值形态：DKG keyset 内容摘要（0x hex；聚合形态为空串）。
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub group_key_digest: String,
+    /// 阈值形态：阈值 t（聚合形态为 0）。
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub threshold_t: u32,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
+}
+
+/// `get_seen_receipt` 参数（M3-ACC-6 §5.3-1）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GetSeenReceiptParams {
+    /// tx hash。
+    pub tx_hash: Hash,
+}
+
+/// `check_censorship` 参数（M3-ACC-6 §5.3-4）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckCensorshipParams {
+    /// 用户构造的审查证明。
+    pub proof: crate::force_include::CensorshipProof,
+}
+
 /// `get_account` 参数（按 address 或 tagged pubkey 查询）。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -680,6 +731,56 @@ pub trait RpcBackend: Send + Sync {
             "native coin queries are not supported by this RPC backend".into(),
         ))
     }
+    /// M3-ACC-6（§5.3-1）：按 tx_hash 查询 validator 签发的 SeenReceipt。
+    ///
+    /// 默认返回 `Ok(None)` 保持既有外部后端源码兼容；生产节点后端（NodeRpcBackend）
+    /// 必须覆写。
+    fn get_seen_receipt(
+        &self,
+        _tx_hash: &Hash,
+    ) -> PokerL1Result<Option<crate::force_include::SeenReceipt>> {
+        Ok(None)
+    }
+    /// v1.5-c：最新已验证 checkpoint QC（2f+1 BLS 聚签）。
+    ///
+    /// 默认返回 `None` 保持既有外部后端源码兼容；生产节点后端
+    /// （NodeRpcBackend）必须覆写。
+    fn latest_checkpoint(&self) -> Option<crate::consensus::checkpoint::CheckpointQc> {
+        None
+    }
+    /// v1.5-d：发起 DA 请求并签发本节点回执。
+    ///
+    /// 默认不支持，保持既有外部后端源码兼容。
+    fn submit_da_request(&self, _digest: Hash) -> PokerL1Result<crate::node::DaStatus> {
+        Err(PokerL1Error::Other(
+            "da_request is not supported by this RPC backend".into(),
+        ))
+    }
+    /// v1.5-d：查询 DA 状态（请求/回执/凭证）。
+    ///
+    /// 默认返回未请求状态，保持既有外部后端源码兼容。
+    fn da_status(&self, digest: &Hash) -> crate::node::DaStatus {
+        crate::node::DaStatus {
+            requested: false,
+            digest: format!("0x{}", hex::encode(digest)),
+            epoch: 0,
+            height: 0,
+            receipt_count: 0,
+            certified: false,
+            cert_signers: 0,
+        }
+    }
+    /// M3-ACC-6（§5.3-4）：审查检测（三态）。
+    ///
+    /// 默认不支持，保持既有外部后端源码兼容。
+    fn check_censorship(
+        &self,
+        _proof: &crate::force_include::CensorshipProof,
+    ) -> PokerL1Result<crate::force_include::CensorshipCheckOutcome> {
+        Err(PokerL1Error::Other(
+            "censorship checks are not supported by this RPC backend".into(),
+        ))
+    }
     /// 当前 chain_id。
     fn chain_id(&self) -> ChainId;
     /// ZK verifier registry（用于 zk_verify RPC）。
@@ -779,6 +880,11 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             "get_object" => self.handle_get_object(&req.params),
             "get_tx" => self.handle_get_tx(&req.params),
             "submit_tx" => self.handle_submit_tx(&req.params),
+            "get_seen_receipt" => self.handle_get_seen_receipt(&req.params),
+            "get_latest_checkpoint" => self.handle_get_latest_checkpoint(&req.params),
+            "da_request" => self.handle_da_request(&req.params),
+            "da_status" => self.handle_da_status(&req.params),
+            "check_censorship" => self.handle_check_censorship(&req.params),
             "get_account" => self.handle_get_account(&req.params),
             "get_dag_vertex" => self.handle_get_dag_vertex(&req.params),
             "get_native_balance" => self.handle_get_native_balance(&req.params),
@@ -914,6 +1020,127 @@ impl<'a, B: RpcBackend> RpcHandler<'a, B> {
             .submit_tx(tx)
             .map_err(RpcHandlerError::from_poker_error)?;
         serde_json::to_value(SubmitTxResult { tx_hash }).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `get_seen_receipt`（M3-ACC-6 §5.3-1）：返回 SeenReceipt 或 null。
+    fn handle_get_seen_receipt(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let p: GetSeenReceiptParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let receipt = self
+            .backend
+            .get_seen_receipt(&p.tx_hash)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(receipt).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `get_latest_checkpoint`（v1.5-c）：最新 checkpoint QC 摘要（hex 视图）。
+    ///
+    /// 返回 `null`（尚无 QC）或
+    /// `{epoch, height, state_root, proposer, signer_count, aggregate_signature, mode, ...}`，
+    /// 字节字段以 0x 前缀 hex 输出（脚本/轻客户端友好）。
+    /// v1.5-e 双形态分派：`mode="threshold"` 时 `signer_count` 为 signer
+    /// bitmap 置位数（≥ t），`aggregate_signature` 为 Lagrange 重构群签名；
+    /// `mode="aggregate"`（默认/零回退）时字段语义与 v1.5-c 完全一致。
+    fn handle_get_latest_checkpoint(
+        &self,
+        _params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let qc = self.backend.latest_checkpoint();
+        let Some(qc) = qc else {
+            return Ok(serde_json::Value::Null);
+        };
+        let (mode, signer_count, sig, bitmap, digest, t) = match &qc.threshold {
+            Some(tqc) => (
+                "threshold",
+                tqc.signer_count(),
+                tqc.sig_g1.clone(),
+                format!("0x{}", hex::encode(&tqc.signer_bitmap)),
+                format!("0x{}", hex::encode(tqc.group_key_digest)),
+                tqc.t,
+            ),
+            None => (
+                "aggregate",
+                qc.signer_pubkeys_g2.len(),
+                qc.agg_signature_g1.clone(),
+                String::new(),
+                String::new(),
+                0,
+            ),
+        };
+        let view = LatestCheckpointView {
+            epoch: qc.epoch,
+            height: qc.height,
+            state_root: format!("0x{}", hex::encode(qc.state_root)),
+            proposer: format!("0x{}", hex::encode(&qc.proposer_g2)),
+            signer_count,
+            aggregate_signature: format!("0x{}", hex::encode(sig)),
+            mode: mode.to_string(),
+            signer_bitmap: bitmap,
+            group_key_digest: digest,
+            threshold_t: t,
+        };
+        serde_json::to_value(view).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// 解析 `{"digest": "0x.."}` 形式的 digest 参数（32 字节 hex）。
+    fn parse_digest_param(params: &serde_json::Value) -> Result<Hash, RpcHandlerError> {
+        #[derive(serde::Deserialize)]
+        struct DigestParam {
+            digest: String,
+        }
+        let p: DigestParam =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let hex_str = p.digest.strip_prefix("0x").unwrap_or(&p.digest);
+        if hex_str.len() != 64 {
+            return Err(RpcHandlerError::Client(
+                "digest 必须为 32 字节（64 个 hex 字符）".into(),
+            ));
+        }
+        let bytes = hex::decode(hex_str)
+            .map_err(|e| RpcHandlerError::Client(format!("digest hex 解码失败: {e}")))?;
+        let mut digest = [0u8; 32];
+        digest.copy_from_slice(&bytes);
+        Ok(digest)
+    }
+
+    /// `da_request`（v1.5-d）：发起 DA 请求 + 本节点签回执。
+    fn handle_da_request(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let digest = Self::parse_digest_param(params)?;
+        let status = self
+            .backend
+            .submit_da_request(digest)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(status).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `da_status`（v1.5-d）：查询 DA 请求状态。
+    fn handle_da_status(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let digest = Self::parse_digest_param(params)?;
+        let status = self.backend.da_status(&digest);
+        serde_json::to_value(status).map_err(RpcHandlerError::from_serde_error)
+    }
+
+    /// `check_censorship`（M3-ACC-6 §5.3-4）：三态审查检测结果。
+    fn handle_check_censorship(
+        &self,
+        params: &serde_json::Value,
+    ) -> Result<serde_json::Value, RpcHandlerError> {
+        let p: CheckCensorshipParams =
+            serde_json::from_value(params.clone()).map_err(RpcHandlerError::from_serde_error)?;
+        let outcome = self
+            .backend
+            .check_censorship(&p.proof)
+            .map_err(RpcHandlerError::from_poker_error)?;
+        serde_json::to_value(outcome).map_err(RpcHandlerError::from_serde_error)
     }
 
     fn handle_get_account(
@@ -1161,6 +1388,15 @@ pub struct MemoryBackend {
     pending_tx: std::sync::Mutex<std::collections::VecDeque<Transaction>>,
     /// ZK verifier registry（可选）。
     zk_registry: Option<ZkVerifierRegistry>,
+    /// M3-ACC-6：已签发的 SeenReceipt（测试后端同样内存态）。
+    seen_receipts:
+        std::sync::Mutex<HashMap<Hash, crate::force_include::SeenReceipt>>,
+    /// M3-ACC-6： SeenReceipt 签发密钥（测试注入；None = 不签发）。
+    seen_receipt_signer: Option<secp256k1::SecretKey>,
+    /// M3-ACC-6：测试时钟（submit 时作为 seen_at_ms；check_censorship 时作为 now）。
+    now_ms: std::sync::atomic::AtomicU64,
+    /// M3-ACC-6：审查检测窗口（块数，v1 近似）。
+    censorship_window_blocks: u64,
 }
 
 impl MemoryBackend {
@@ -1175,12 +1411,38 @@ impl MemoryBackend {
             tx_cache: std::sync::Mutex::new(RpcTxCacheState::new()),
             pending_tx: std::sync::Mutex::new(std::collections::VecDeque::new()),
             zk_registry: None,
+            seen_receipts: std::sync::Mutex::new(HashMap::new()),
+            seen_receipt_signer: None,
+            now_ms: std::sync::atomic::AtomicU64::new(0),
+            censorship_window_blocks:
+                crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
         })
     }
 
     /// 设置 ZK verifier registry。
     pub fn set_zk_registry(&mut self, registry: ZkVerifierRegistry) {
         self.zk_registry = Some(registry);
+    }
+
+    /// M3-ACC-6：注入 SeenReceipt 签发密钥（测试 submit_tx 后自动签发 receipt）。
+    pub fn set_seen_receipt_signer(&mut self, secret_key: secp256k1::SecretKey) {
+        self.seen_receipt_signer = Some(secret_key);
+    }
+
+    /// M3-ACC-6：设置测试时钟（毫秒）。
+    pub fn set_now_ms(&self, now_ms: u64) {
+        self.now_ms
+            .store(now_ms, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// M3-ACC-6：设置审查检测窗口（块数）。
+    pub fn set_censorship_window_blocks(&mut self, window_blocks: u64) {
+        self.censorship_window_blocks = window_blocks;
+    }
+
+    fn current_now_ms(&self) -> u64 {
+        self.now_ms
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// 注入 block（测试辅助）。
@@ -1271,6 +1533,21 @@ impl RpcBackend for MemoryBackend {
             cache.insert(tx_hash, tx.clone(), MAX_RPC_TX_CACHE_SIZE);
         }
 
+        // M3-ACC-6（§5.3-1）：注入了签发密钥时，submit 成功即签发 SeenReceipt
+        //（与 Node::submit_tx 同一 `SeenReceipt::issue` 路径，不新造密码学）。
+        if let Some(secret_key) = &self.seen_receipt_signer {
+            let receipt = crate::force_include::SeenReceipt::issue(
+                self.chain_id,
+                tx_hash,
+                self.current_now_ms(),
+                secret_key,
+            )?;
+            self.seen_receipts
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(tx_hash, receipt);
+        }
+
         let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
         pending.push_back(tx);
         while pending.len() > MAX_RPC_PENDING_TX_SIZE {
@@ -1299,6 +1576,36 @@ impl RpcBackend for MemoryBackend {
     fn get_native_coins(&self, owner: &Address) -> PokerL1Result<Vec<OwnedNativeCoin>> {
         let object_db = self.object_db.lock().unwrap_or_else(|e| e.into_inner());
         list_owned_native_coins(&object_db, *owner)
+    }
+
+    fn get_seen_receipt(
+        &self,
+        tx_hash: &Hash,
+    ) -> PokerL1Result<Option<crate::force_include::SeenReceipt>> {
+        Ok(self
+            .seen_receipts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tx_hash)
+            .cloned())
+    }
+
+    fn check_censorship(
+        &self,
+        proof: &crate::force_include::CensorshipProof,
+    ) -> PokerL1Result<crate::force_include::CensorshipCheckOutcome> {
+        // 近 K 个块窗口的 tx_hash 全集（v1 块数近似，与 Node 后端同语义）。
+        let tip = self.get_tip_height()?.unwrap_or(0);
+        let start = tip.saturating_sub(self.censorship_window_blocks.saturating_sub(1));
+        let mut recent = Vec::new();
+        for height in (start..=tip).rev() {
+            if let Some(block) = self.get_block_by_height(height)? {
+                for tx in block.public_txs.iter().chain(block.gameturn_txs.iter()) {
+                    recent.push(tx.tx_hash());
+                }
+            }
+        }
+        proof.verify(self.chain_id, self.current_now_ms(), &recent)
     }
 
     fn chain_id(&self) -> ChainId {
@@ -1665,6 +1972,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let hash = backend.insert_vertex(&vertex).unwrap();
 
@@ -1839,6 +2147,180 @@ mod tests {
         assert!(resp.error.is_none());
         let tx_resp: Transaction = serde_json::from_value(resp.result.unwrap()).unwrap();
         assert_eq!(tx_resp.tx_hash(), tx_hash);
+    }
+
+    // ===== M3-ACC-6：get_seen_receipt / check_censorship RPC 测试 =====
+
+    /// 构造注入了 SeenReceipt 签发密钥（确定性测试密钥）的 MemoryBackend。
+    fn receipt_backend() -> MemoryBackend {
+        let mut backend = MemoryBackend::new(DEFAULT_CHAIN_ID).unwrap();
+        backend.set_seen_receipt_signer(
+            secp256k1::SecretKey::from_slice(&[0x77u8; 32]).unwrap(),
+        );
+        backend
+    }
+
+    #[test]
+    fn get_seen_receipt_returns_receipt_after_submit_and_null_for_unknown() {
+        let backend = receipt_backend();
+        let tx = signed_dummy_tx();
+        let tx_hash = tx.tx_hash();
+        let tx_bytes = tx.to_bcs().unwrap();
+
+        let handler = RpcHandler::new(&backend);
+        let submit = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": tx_bytes}),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle(&submit);
+        assert!(resp.error.is_none(), "submit_tx 应成功");
+
+        // 命中：返回可验证的 receipt
+        let get = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_seen_receipt".to_string(),
+            params: serde_json::json!({"tx_hash": tx_hash}),
+            id: serde_json::json!(2),
+        };
+        let resp = handler.handle(&get);
+        assert!(resp.error.is_none(), "get_seen_receipt 应成功");
+        let receipt: crate::force_include::SeenReceipt =
+            serde_json::from_value(resp.result.unwrap()).unwrap();
+        assert_eq!(receipt.tx_hash, tx_hash);
+        assert_eq!(receipt.chain_id, DEFAULT_CHAIN_ID);
+        receipt
+            .verify()
+            .expect("后端签发的 receipt 必须通过签名验证");
+
+        // 未命中：result 为 null
+        let zero_hash: Hash = [0u8; 32];
+        let get_unknown = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "get_seen_receipt".to_string(),
+            params: serde_json::json!({"tx_hash": zero_hash}),
+            id: serde_json::json!(3),
+        };
+        let resp = handler.handle(&get_unknown);
+        assert!(resp.error.is_none());
+        assert!(resp.result.unwrap().is_null(), "未知 tx_hash 应返回 null");
+    }
+
+    #[test]
+    fn check_censorship_rpc_three_states() {
+        let backend = receipt_backend();
+        backend.set_now_ms(1_000);
+        let tx = signed_dummy_tx();
+        let tx_hash = tx.tx_hash();
+        let tx_bytes = tx.to_bcs().unwrap();
+
+        let handler = RpcHandler::new(&backend);
+        let submit = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": tx_bytes.clone()}),
+            id: serde_json::json!(1),
+        };
+        assert!(handler.handle(&submit).error.is_none());
+
+        // 取 receipt
+        let receipt: crate::force_include::SeenReceipt = {
+            let get = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "get_seen_receipt".to_string(),
+                params: serde_json::json!({"tx_hash": tx_hash}),
+                id: serde_json::json!(2),
+            };
+            let resp = handler.handle(&get);
+            serde_json::from_value(resp.result.unwrap()).unwrap()
+        };
+
+        let proof = crate::force_include::CensorshipProof {
+            receipt,
+            tx_bytes,
+            deadline_ms: 10_000,
+            current_height_hint: 0,
+        };
+        let check = |now_ms: u64| {
+            backend.set_now_ms(now_ms);
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_string(),
+                method: "check_censorship".to_string(),
+                params: serde_json::json!({ "proof": proof }),
+                id: serde_json::json!(9),
+            };
+            handler.handle(&req)
+        };
+
+        // 1) 未超时 → not_yet_due
+        let resp = check(5_000);
+        assert!(resp.error.is_none(), "check_censorship 应成功");
+        assert_eq!(resp.result.unwrap(), serde_json::json!("not_yet_due"));
+
+        // 2) 超时且未包含 → censored（证据成立）
+        let resp = check(11_001);
+        assert_eq!(resp.result.unwrap(), serde_json::json!("censored"));
+
+        // 3) 已包含 → included（指控不成立；即使已过 deadline）
+        let header = crate::block::BlockHeader {
+            height: 1,
+            timestamp_ms: 1_000,
+            prev_hash: [0u8; 32],
+            state_root: [0u8; 32],
+            public_tx_root: crate::block::compute_tx_merkle_root(&[tx.clone()]),
+            gameturn_tx_root: crate::block::compute_tx_merkle_root(&[]),
+            dag_commit_certificate: dummy_commit_certificate(),
+        };
+        let block = Block::new(header, vec![tx], vec![]);
+        backend.insert_block(block).unwrap();
+        let resp = check(11_001);
+        assert_eq!(resp.result.unwrap(), serde_json::json!("included"));
+    }
+
+    #[test]
+    fn check_censorship_rpc_rejects_tampered_proof() {
+        let backend = receipt_backend();
+        backend.set_now_ms(1_000);
+        let tx = signed_dummy_tx();
+        let tx_bytes = tx.to_bcs().unwrap();
+        let handler = RpcHandler::new(&backend);
+        let submit = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "submit_tx".to_string(),
+            params: serde_json::json!({"tx_bytes": tx_bytes}),
+            id: serde_json::json!(1),
+        };
+        assert!(handler.handle(&submit).error.is_none());
+
+        // 用另一个 tx 的字节伪造证明 → tx_hash 不一致 → 客户端错误
+        let other = signed_dummy_tx();
+        let proof = crate::force_include::CensorshipProof {
+            receipt: crate::force_include::SeenReceipt {
+                chain_id: DEFAULT_CHAIN_ID,
+                tx_hash: other.tx_hash(),
+                seen_at_ms: 1_000,
+                validator_pubkey: dummy_tagged_pubkey(),
+                signature: vec![0u8; 65],
+            },
+            tx_bytes: tx.to_bcs().unwrap(),
+            deadline_ms: 10,
+            current_height_hint: 0,
+        };
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "check_censorship".to_string(),
+            params: serde_json::json!({ "proof": proof }),
+            id: serde_json::json!(1),
+        };
+        let resp = handler.handle(&req);
+        assert!(resp.error.is_some(), "tx_bytes 与 receipt 不一致应返回错误");
+        // M-5 政策：PokerL1Error::Other 属内部错误类 → 脱敏为 INTERNAL_ERROR，
+        // 具体原因（tx_hash 不一致）仅记录日志。
+        assert_eq!(
+            resp.error.unwrap().code,
+            JsonRpcError::INTERNAL_ERROR
+        );
     }
 
     // ===== H-1 修复测试：RPC 认证与限流 =====

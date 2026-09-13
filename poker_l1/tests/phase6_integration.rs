@@ -279,6 +279,7 @@ mod subtask_43_6_rpc {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         };
         let vertex_hash = backend.insert_vertex(&vertex).unwrap();
 
@@ -619,6 +620,7 @@ mod subtask_43_7_node {
             tx_list: vec![],
             parent_hashes: vec![],
             author_sig: vec![],
+            forced_tx_hashes: vec![],
         });
         let parent_hash = node.put_vertex(&parent).unwrap();
         let vertex = sign(DagVertex {
@@ -628,6 +630,7 @@ mod subtask_43_7_node {
             tx_list: vec![],
             parent_hashes: vec![parent_hash],
             author_sig: vec![],
+            forced_tx_hashes: vec![],
         });
 
         let hash = node.put_vertex(&vertex).unwrap();
@@ -846,6 +849,7 @@ mod subtask_43_10_fuzz {
                 tx_list: txs,
                 parent_hashes: vec![[0u8; 32]; 5],
                 author_sig: vec![0u8; 65],
+                forced_tx_hashes: vec![],
             };
             // validate_vertex_size 不能 panic
             let _ = validate_vertex_size(&vertex);

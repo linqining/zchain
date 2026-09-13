@@ -1,14 +1,49 @@
 // =============================================================================
-// extension/background/service_worker.js — ZChain 钱包后台（Extension 0.1）
+// extension/background/service_worker.js — ZChain 钱包后台（Extension 0.4）
 //
-// 职责（plan-appchain §6.12.4）：
+// 0.2 交付（plan §6.12.4 表行：testnet、多账户、REAL/PLAY 隔离、proof portal、
+// 备份恢复、网络切换）：
 // 1. 内部 RPC 路由：页面消息（经 content bridge）→ 安全校验层 → wallet-core
-//    WASM → 结构化响应；popup 消息（解锁/创建/批准/拒绝）→ 同一校验层。
+//    WASM → 结构化响应；popup 消息（解锁/创建/批准/拒绝/换网/备份/回执）→
+//    同一校验层。
 // 2. 会话/锁屏状态机：解锁会话只存在于 SW 内存（SW 被回收即自动锁定——
 //    fail-closed）；密文 keystore 落 chrome.storage.local；nonce 账本落
-//    chrome.storage.session（浏览器会话内单调）。
-// 3. 页面桥接校验：origin 绑定、nonce 防重放、expiry、sessionId、ABI/domain/
-//    version、预览摘要绑定、取消/超时状态（全部委托 common/validation.js）。
+//    chrome.storage.session。**wasm 会话是单槽**：同一时刻至多一个账户处于
+//    解锁态；锁定/切换当前账户不影响其他账户（它们本来就是密文态，无共享
+//    解锁状态可被影响）。
+// 3. 多账户账本（common/accounts.js）：每账户独立保存 {keystore 密文，
+//    origin 授权簿，网络选择}（§6.12.4 "每个 origin 的权限、网络和账户选择
+//    单独保存"）；0.1 单账户首次启动时无损迁移。
+// 4. 网络切换（common/networks.js）：zchain_switchNetwork 完整语义——目标
+//    必须在注册表内（mainnet 刻意不注册，红线），异网切换必须弹窗二次确认，
+//    确认后持久化到**当前账户**；chain_id 参与签名摘要域由 wallet-core 保证
+//    （operation_signer::preview_digest 绑定 chain_id）。
+// 5. 交易回执（common/receipts.js）：签名成功后登记 inclusion 状态位
+//    （signed → seen → included；超协议 deadline 提示 ForceInclude——仅展示
+//    协议状态，不实现提交路径）。
+// 6. 备份恢复：经 wallet-core backup（ZCBK v1）导出/导入，错口令/篡改文件
+//    fail-closed。
+//
+// 0.3 交付（本轮）：
+// 7. SNIP-12 会话密钥授权（popup"会话密钥"页）：delegated key 生成走
+//    wallet-core（`wallet_session_key_create`，私钥只活在 wasm 会话）；授权
+//    请求草稿与 SNIP-12 规范校验复用 adapters/starknet.js；授权确认页展示
+//    wallet-core `wallet_snip12_authorize_digest` 计算的 SNIP-12 摘要；
+//    devnet 入口形态 = 扩展侧登记约束记录（链侧 admission 登记未接，evidence
+//    如实标注）；撤销粘滞。
+// 8. REAL 提现预览（展示态）：common/withdraw_preview.js 逐字段预览 +
+//    finality 聚合；canSubmit 恒 false（wallet-core 展示门 + finality 合取），
+//    不开放真实提现提交。
+//
+// 0.4 交付（本轮）：
+// 9. 授权簿/registry（popup 授权簿页）：origin 授权的列出/撤销；会话密钥
+//    列表（scope/限额/桌白名单/到期/撤销）；撤销后签名路径 fail-closed。
+// 10. 单笔/每日限额执行：origin 有 governing binding 时，签名请求先过 JS 层
+//     准入（common/sessions.js，与 wallet-core session_admission 同序）再过
+//     wallet-core wasm（`wallet_session_admit`）——wasm/JS 双层 fail-closed；
+//     签名成功后记账日限聚合（recordSpend）。
+// 11. capability matrix（common/capability_matrix.js）：EIP-1193/WC/Starknet
+//     能力探测结果的结构化展示。
 //
 // 日志纪律（WALLET-ACC-4）：只允许 logSafe()——字段白名单（method/requestId/
 // code/origin 级状态）；任何参数、keystore、预览金额、口令、密钥材料一律不入
@@ -20,13 +55,49 @@ import {
   grantOrigin,
   openPendingRequest,
   requiresExplicitConfirm,
-  reject as vReject,
+  revokeOrigin as revokeOriginGrant,
   sanitizeNotesForPage,
   sweepExpired,
   transitionRequest,
   validateRequest,
 } from '../common/validation.js';
 import { callCore, initWalletCore } from '../common/wallet_core.js';
+import {
+  DEFAULT_NETWORK_ID,
+  canonicalHttpUrl,
+  effectiveGatewayUrl,
+  resolveNetwork,
+} from '../common/networks.js';
+import {
+  activeAccount,
+  createAccount,
+  emptyLedger,
+  migrateLegacySingle,
+  selectAccount,
+  setAccountGrants,
+  setAccountNetwork,
+} from '../common/accounts.js';
+import {
+  applySeenReceipt,
+  inclusionView,
+  markIncluded,
+  openReceipt,
+} from '../common/receipts.js';
+import {
+  admitOperation,
+  bindingView,
+  deleteBinding,
+  draftAuthorization,
+  emptyBindingStore,
+  governingBinding,
+  recordSpend,
+  revokeBinding,
+  upsertBinding,
+  validateDraft,
+} from '../common/sessions.js';
+import { buildAuthorizeTypedData } from '../adapters/starknet.js';
+import { buildWithdrawPreview } from '../common/withdraw_preview.js';
+import { buildCapabilityMatrix, detectExternalWallets } from '../common/capability_matrix.js';
 import { initAdapters } from '../adapters/index.js';
 
 // ---------------------------------------------------------------------------
@@ -35,9 +106,10 @@ import { initAdapters } from '../adapters/index.js';
 
 const AUTO_LOCK_MS = 15 * 60 * 1000;
 const PAGE_TIMEOUT_MS = 45_000;
+export const PROVIDER_VERSION = '0.4.0-alpha';
 
 const mem = {
-  session: null,             // {id, expiresAt, locked:false} | null（null = 锁定）
+  session: null,             // {id, accountId, expiresAt, locked:false} | null（null = 锁定）
   pending: {},               // requestId -> {state, payload, openedAt, expiresAt}
   pageWaiters: new Map(),    // requestId -> {resolve}
   lastActivity: 0,
@@ -48,20 +120,39 @@ const storage = {
   session: chrome.storage.session,
 };
 
-async function getGrants() {
-  const { grants } = await storage.local.get('grants');
-  return grants ?? {};
+// ---------------------------------------------------------------------------
+// 账本存储（多账户；0.1 单账户无损迁移）
+// ---------------------------------------------------------------------------
+
+async function getLedger() {
+  const { ledger } = await storage.local.get('ledger');
+  if (ledger && ledger.accounts) return ledger;
+  // 迁移：0.1 的 `keystore`（+全局 `grants`）→ 首账户。
+  const legacy = await storage.local.get(['keystore', 'grants', 'publicKey']);
+  const migrated = migrateLegacySingle(emptyLedger(), legacy.keystore ? { ...legacy, chainId: undefined } : null, Date.now());
+  if (migrated.migrated) {
+    await storage.local.set({ ledger: migrated.ledger });
+    await storage.local.remove(['keystore']);
+    logSafe('ledger_migrated', { kind: 'single-to-multi' });
+    return migrated.ledger;
+  }
+  return emptyLedger();
 }
-async function setGrants(grants) {
-  await storage.local.set({ grants });
+
+async function setLedger(ledger) {
+  await storage.local.set({ ledger });
 }
-async function getKeystore() {
-  const { keystore } = await storage.local.get('keystore');
-  return keystore ?? null;
+
+/** 当前选中账户（无 → null）。 */
+async function getActiveAccount() {
+  return activeAccount(await getLedger());
 }
-async function setKeystore(keystore) {
-  await storage.local.set({ keystore });
+
+/** 当前解锁会话的账户 id（锁定 → null）。 */
+function sessionAccountId() {
+  return isUnlocked() ? mem.session.accountId : null;
 }
+
 async function getNonceLedger() {
   const { nonceLedger } = await storage.session.get('nonceLedger');
   return nonceLedger ?? {};
@@ -71,9 +162,10 @@ async function setNonceLedger(nonceLedger) {
 }
 
 /** 会话句柄：unlock 后生成；页面消息的 sessionId 必须与之相等。 */
-function newSession() {
+function newSession(accountId) {
   const s = {
     id: crypto.randomUUID(),
+    accountId,
     // 会话自身有效期与自动锁屏对齐；超过即 SessionInvalid。
     expiresAt: Date.now() + AUTO_LOCK_MS,
     locked: false,
@@ -101,29 +193,33 @@ function logSafe(event, fields = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 网络状态（0.1：固定 devnet；换网是 0.2）
+// 网络状态（0.2：注册表 devnet/testnet；mainnet 刻意不注册——红线）
+// 当前网络 = 当前账户的选择；无账户时缺省 devnet。
 // ---------------------------------------------------------------------------
 
-function currentNetwork() {
-  return { chainId: 'zchain-devnet-1', kind: 'devnet' };
+function currentNetwork(ledgerAccount) {
+  const net = resolveNetwork(ledgerAccount?.networkId ?? DEFAULT_NETWORK_ID);
+  return { chainId: net.chainId, kind: net.kind, label: net.label };
 }
 
-function capabilities() {
+function capabilities(ledgerAccount) {
+  const net = currentNetwork(ledgerAccount);
   return {
     provider: 'zchain',
-    providerVersion: '0.1.0',
+    providerVersion: PROVIDER_VERSION,
     abiVersion: 1,
-    networks: [currentNetwork().chainId],
-    assetClasses: ['PLAY'],
+    networks: [DEFAULT_NETWORK_ID, 'zchain-testnet-1'],
+    currentNetwork: net.chainId,
+    assetClasses: ['PLAY'], // REAL：0.2 仅隔离展示，签名面关闭
     methods: [
       'zchain_requestAccounts', 'zchain_getNetwork', 'zchain_getCapabilities',
-      'zchain_getAccounts', 'zchain_signOperation', 'zchain_signSettlement',
-      'zchain_getNotes', 'zchain_lock',
+      'zchain_switchNetwork', 'zchain_getAccounts', 'zchain_signOperation',
+      'zchain_signSettlement', 'zchain_getNotes', 'zchain_lock',
     ],
     laterIterations: {
-      '0.2': ['zchain_switchNetwork(多网络)', 'REAL/PLAY 隔离', 'zchain_verifyProof/watchProof（proof portal）', '备份恢复'],
-      '0.3': ['zchain_authorizeSessionKey/revokeSessionKey', 'WalletConnect Vault adapter', '提现预览'],
-      '0.4': ['account binding registry', '会话密钥限额/撤销'],
+      '0.3（已交付 popup 面）': ['SNIP-12 会话密钥授权（delegated key 生成/授权摘要/devnet 登记入口形态/撤销）', 'REAL 提现预览（展示态）'],
+      '0.4（已交付）': ['授权簿/registry UI', '会话密钥撤销/限额 fail-closed 执行（wasm/JS 双层）', 'capability matrix'],
+      '未交付（如实）': ['provider 授权方法面（zchain_authorizeSessionKey 随 dapp SDK）', 'WalletConnect 生产 relay（B5 外部依赖：projectId 注册）', '真实提现提交（Vault 未上线）'],
     },
   };
 }
@@ -214,13 +310,14 @@ async function handlePageMessage(msg, sender) {
   const now = Date.now();
   const senderOrigin = sender.origin ?? '';
   const requestId = msg?.envelope?.requestId;
+  const account = await getActiveAccount();
 
   // ---- (1) 信封校验：伪造 origin / 重放 / 过期 / session 绑定 ----
   // requireGrant 仅对 zchain_requestAccounts 关闭：未授权 origin 必须能到达
-  // 弹窗"显式确认"（批准后写入授权簿）；其余方法一律要求已授权。
+  // 弹窗"显式确认"（批准后写入**当前账户**的授权簿）；其余方法一律要求已授权。
   const state = { nonceLedger: await getNonceLedger(), session: mem.session };
   const requireGrant = msg?.method !== 'zchain_requestAccounts';
-  const env = checkEnvelope(msg, senderOrigin, state, { now, grants: await getGrants(), requireGrant });
+  const env = checkEnvelope(msg, senderOrigin, state, { now, grants: account?.grants ?? {}, requireGrant });
   if (!env.ok) {
     logSafe('page_rejected', { code: env.code, method: msg?.method, requestId });
     return pageError(env.code, env.reason);
@@ -229,7 +326,7 @@ async function handlePageMessage(msg, sender) {
   mem.lastActivity = now;
 
   // ---- (2) 请求结构校验：未知 method / 缺参 / 金额 / 网络 / ABI / domain ----
-  const vr = validateRequest(msg.method, msg.params ?? {}, { network: currentNetwork() });
+  const vr = validateRequest(msg.method, msg.params ?? {}, { network: currentNetwork(account) });
   if (!vr.ok) {
     logSafe('page_rejected', { code: vr.code, method: msg.method, requestId });
     return pageError(vr.code, vr.reason);
@@ -237,7 +334,7 @@ async function handlePageMessage(msg, sender) {
 
   // ---- (3) 路由 ----
   try {
-    return await routePageMethod(msg, senderOrigin, requestId);
+    return await routePageMethod(msg, senderOrigin, requestId, account);
   } catch (e) {
     const code = e?.code ?? 'InternalError';
     logSafe('page_method_error', { code, method: msg.method, requestId });
@@ -245,33 +342,41 @@ async function handlePageMessage(msg, sender) {
   }
 }
 
-async function routePageMethod(msg, origin, requestId) {
+async function routePageMethod(msg, origin, requestId, account) {
   const method = msg.method;
   const params = msg.params ?? {};
 
   switch (method) {
     case 'zchain_requestAccounts': {
-      // 首连：强制显式确认（popup）；批准后 origin 入授权簿。
+      // 首连：强制显式确认（popup）；批准后 origin 入**当前账户**授权簿。
       const decision = await openAndAwait({ requestId, origin, method, kind: 'connect' });
       if (!decision.ok) return pageError(decision.code, decision.reason);
-      const grants = grantOrigin(origin, await getGrants(), Math.floor(Date.now() / 1000));
-      await setGrants(grants);
-      const ks = await getKeystore();
-      const accounts = ks && isUnlocked() ? [await publicKeyHex()] : [];
-      return { accounts, chainId: currentNetwork().chainId, granted: true };
+      const accountId = sessionAccountId() ?? account?.id;
+      if (accountId) {
+        const grants = grantOrigin(origin, account.grants ?? {}, Math.floor(Date.now() / 1000));
+        const g = setAccountGrants(await getLedger(), accountId, grants);
+        if (g.ok) await setLedger(g.ledger);
+      }
+      const accounts = account && isUnlocked() ? [await publicKeyHex()] : [];
+      return { accounts, chainId: currentNetwork(account).chainId, granted: true };
     }
     case 'zchain_getNetwork':
-      return { ...currentNetwork(), abiVersion: 1 };
+      return { ...currentNetwork(account), abiVersion: 1 };
     case 'zchain_getCapabilities':
-      return capabilities();
+      return capabilities(account);
     case 'zchain_getAccounts': {
       if (!isUnlocked()) return { accounts: [], locked: true };
       return { accounts: [await publicKeyHex()], locked: false };
     }
     case 'zchain_getNotes': {
       if (!isUnlocked()) return pageError('SessionInvalid', 'wallet locked');
+      // provider 面（dapp 可见）只出 PLAY note（脱敏）；REAL 侧数据仅在
+      // 扩展 UI（popup）经内部通道展示——dapp 与 REAL 操作面无关。
       const notes = await callCore('wallet_get_notes');
       return { notes: sanitizeNotesForPage(notes.notes) }; // 脱敏输出（无 secret/nullifier）
+    }
+    case 'zchain_switchNetwork': {
+      return await handleSwitchNetwork(msg, origin, requestId, account);
     }
     case 'zchain_lock': {
       await lockWallet('page_request');
@@ -279,7 +384,7 @@ async function routePageMethod(msg, origin, requestId) {
     }
     case 'zchain_signOperation':
     case 'zchain_signSettlement': {
-      return await handleSign(msg, origin, requestId);
+      return await handleSign(msg, origin, requestId, account);
     }
     default:
       // validateRequest 已过滤；这里兜底。
@@ -287,8 +392,39 @@ async function routePageMethod(msg, origin, requestId) {
   }
 }
 
+/**
+ * 换网（0.2 完整语义）：同网幂等 no-op；异网必须弹窗二次确认（显示
+ * from → to），批准后持久化到**当前账户**（账户元数据网络隔离）。切换不
+ * 改签名材料——chain_id 参与签名摘要域由 wallet-core 保证。
+ */
+async function handleSwitchNetwork(msg, origin, requestId, account) {
+  const target = resolveNetwork(msg.params.chainId);
+  const from = currentNetwork(account);
+  if (target.chainId === from.chainId) {
+    // 幂等：已是目标网络，无状态变化（无需确认）。
+    return { ...target, abiVersion: 1, previousChainId: from.chainId, changed: false };
+  }
+  // 未解锁时禁止换网（换网要写入账户元数据；锁定态无"当前账户会话"概念，
+  // 且不允许页面在锁定态推动状态变化）。
+  if (!isUnlocked()) return pageError('SessionInvalid', 'wallet locked');
+  const decision = await openAndAwait({
+    requestId,
+    origin,
+    method: msg.method,
+    kind: 'switch_network',
+    preview: { fromChainId: from.chainId, fromKind: from.kind, toChainId: target.chainId, toKind: target.kind },
+  });
+  if (!decision.ok) return pageError(decision.code, decision.reason);
+  const accountId = sessionAccountId();
+  const res = setAccountNetwork(await getLedger(), accountId, target.chainId, Date.now());
+  if (!res.ok) return pageError(res.code, res.reason);
+  await setLedger(res.ledger);
+  logSafe('network_switched', { kind: target.kind });
+  return { ...target, abiVersion: 1, previousChainId: from.chainId, changed: true };
+}
+
 /** 签名管线：预览（真实 wallet-core 摘要）→ 显式确认 → 摘要绑定校验 → 签名。 */
-async function handleSign(msg, origin, requestId) {
+async function handleSign(msg, origin, requestId, account) {
   if (!isUnlocked()) return pageError('SessionInvalid', 'wallet locked');
 
   const op = msg.params.operation ?? msg.params.settlement;
@@ -297,9 +433,16 @@ async function handleSign(msg, origin, requestId) {
   const preview = previewRes.preview;
 
   // (b) 显式确认判定（签名类恒为 true；维持纵深防御）。
-  if (!requiresExplicitConfirm({ method: msg.method, params: msg.params, origin }, { grants: await getGrants(), network: currentNetwork() })) {
+  if (!requiresExplicitConfirm({ method: msg.method, params: msg.params, origin }, { grants: account.grants ?? {}, network: currentNetwork(account) })) {
     return pageError('ExplicitConfirmRequired', 'signing requires explicit confirm');
   }
+
+  // (b2) 会话密钥约束执行（Extension 0.4）：origin 有 governing binding 时
+  //      逐条强制（撤销粘滞 / 换网 / 时间窗 / scope / 桌白名单 / 单笔限额 /
+  //      日限额；wasm/JS 双层，见 enforceSessionBinding）。金额口径 =
+  //      预览 amount_in（限额从严方向）。拒在弹窗之前（fail fast）。
+  const admission = await enforceSessionBinding(origin, preview, account);
+  if (!admission.ok) return pageError(admission.code, admission.reason);
 
   // (c) 打开待签名请求并等待 popup 决定（批准/拒绝/超时）。
   const opened = await openSignRequest(requestId, origin, msg.method, msg.params, preview);
@@ -315,8 +458,8 @@ async function handleSign(msg, origin, requestId) {
   }
 
   // (d) 预览摘要绑定：页面传入的 previewHash 若非空，必须与 wallet-core
-  //     重算一致（展示-签名一致性；不一致 → PreviewMismatch）。空值允许于
-  //     0.1（dapp 侧摘要计算随 0.2 dapp SDK 交付），此时弹窗预览是唯一确认面。
+  //     重算一致（展示-签名一致性；不一致 → PreviewMismatch）。空值允许
+  //     （dapp 侧摘要计算随 dapp SDK 交付），此时弹窗预览是唯一确认面。
   const claimed = String(msg.params.previewHash ?? '').trim().toLowerCase();
   if (claimed !== '' && claimed !== preview.digest.toLowerCase()) {
     logSafe('preview_mismatch', { requestId, method: msg.method });
@@ -324,14 +467,25 @@ async function handleSign(msg, origin, requestId) {
   }
 
   // (e) 签名（owner 路径；占用 (chain, nonce)；全部 wallet-core 拒绝面生效）。
+  //     chain_id 参与摘要域（wallet-core preview_digest），跨网重放必换摘要。
   const signed = await callCore('wallet_sign', toCoreRequest(op), String(Math.floor(Date.now() / 1000)));
   logSafe('operation_signed', { requestId, kind: preview.kind });
   // 持久化 note 库变化（密文）。
   try {
-    const ks = await callCore('wallet_persist');
-    await setKeystore(ks);
+    await persistActiveKeystore();
   } catch (e) {
     logSafe('persist_failed', { code: e.code ?? 'Unknown' });
+  }
+  // (f) 回执登记（inclusion 状态位；仅展示协议状态——0.2 无提交路径）。
+  await recordReceipt(signed.digest, preview.kind, currentNetwork(account).chainId);
+  // (g) 会话密钥日限记账（Extension 0.4；governing binding 存在时把本笔
+  //     amount_in 记入当日窗口——否则日限额永不累积）。
+  if (admission.enforced) {
+    const accountId = sessionAccountId() ?? account.id;
+    const store = await getBindingStore(accountId);
+    const spend = recordSpend(store, admission.binding.bindingId, String(preview.amount_in ?? '0'), Math.floor(Date.now() / 1000));
+    if (spend.ok) await setBindingStore(accountId, spend.store);
+    else logSafe('session_spend_record_failed', { code: spend.code });
   }
   return {
     digest: signed.digest,
@@ -345,16 +499,134 @@ async function publicKeyHex() {
   return publicKey ?? null;
 }
 
-/** 连接类请求：popup 内联确认（不走签名预览页）。 */
-async function openAndAwait({ requestId, origin, method, kind }) {
-  const opened = openPendingRequest(mem.pending, requestId, { origin, method, kind, preview: null }, Date.now());
+/** 把当前 wasm 会话的密文快照写回账本中该账户的 keystore。 */
+async function persistActiveKeystore() {
+  const accountId = sessionAccountId();
+  const ksNow = await callCore('wallet_persist');
+  if (!accountId) return;
+  const ledger = await getLedger();
+  const account = ledger.accounts[accountId];
+  if (!account) return;
+  // wallet_persist 返回完整 keystore 形状（含 real_store）。
+  const next = {
+    ...ledger,
+    accounts: { ...ledger.accounts, [accountId]: { ...account, keystore: ksNow } },
+  };
+  await setLedger(next);
+}
+
+// ---------------------------------------------------------------------------
+// 交易回执（ForceInclude 展示面；common/receipts.js 状态机）
+// ---------------------------------------------------------------------------
+
+async function getReceipts() {
+  const { receipts } = await storage.local.get('receipts');
+  return receipts ?? {};
+}
+
+async function recordReceipt(digest, kind, chainId) {
+  const store = await getReceipts();
+  const r = openReceipt(store, { digest, kind, chainId, signedAtMs: Date.now() }, Date.now());
+  if (!r.ok) return; // 重复 digest：幂等跳过（回执登记不影响签名结果）。
+  await storage.local.set({ receipts: r.store });
+}
+
+// ---------------------------------------------------------------------------
+// 会话密钥授权簿（Extension 0.3/0.4；common/sessions.js 纯逻辑）
+// 存储：storage.local.sessionRegistry = { [accountId]: { [bindingId]: binding } }
+// ---------------------------------------------------------------------------
+
+async function getBindingStore(accountId) {
+  if (!accountId) return emptyBindingStore();
+  const { sessionRegistry } = await storage.local.get('sessionRegistry');
+  return sessionRegistry?.[accountId] ?? emptyBindingStore();
+}
+
+async function setBindingStore(accountId, store) {
+  if (!accountId) return;
+  const { sessionRegistry } = await storage.local.get('sessionRegistry');
+  await storage.local.set({ sessionRegistry: { ...(sessionRegistry ?? {}), [accountId]: store } });
+}
+
+/** 当前账户的授权簿视图（registry UI + E2E 消费；无密钥材料）。 */
+async function registryView() {
+  const ledger = await getLedger();
+  const account = activeAccount(ledger);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const store = await getBindingStore(account?.id);
+  return {
+    accountId: account?.id ?? null,
+    chainId: currentNetwork(account).chainId,
+    origins: Object.entries(account?.grants ?? {})
+      .map(([origin, g]) => ({ origin, grantedAt: g?.grantedAt ?? null }))
+      .sort((a, b) => (a.origin < b.origin ? -1 : 1)),
+    sessionKeys: Object.values(store)
+      .map((b) => bindingView(b, nowSec))
+      .sort((a, b) => (b.registeredAt ?? 0) - (a.registeredAt ?? 0)),
+  };
+}
+
+/**
+ * 签名路径的会话密钥约束执行（Extension 0.4，wasm/JS 双层 fail-closed）。
+ * origin 无 governing binding → 不约束（常规 owner 路径不变）；有 → 先过
+ * JS 层（common/sessions.js，与 wallet-core session_admission 同序），再过
+ * wallet-core wasm（`wallet_session_admit`，同一约束单实现的第二层）。
+ *
+ * @returns {{ok:true, enforced:boolean, binding?}} | {{ok:false, code, reason}}
+ */
+async function enforceSessionBinding(origin, preview, account) {
+  const accountId = sessionAccountId() ?? account?.id;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const chainId = currentNetwork(account).chainId;
+  const store = await getBindingStore(accountId);
+  const binding = governingBinding(store, origin, chainId, nowSec);
+  if (!binding) return { ok: true, enforced: false };
+
+  // (1) JS 第一层（稳定码面向 UI/测试；错误码 = Session* 族）。
+  const op = {
+    kind: preview.kind,
+    tableId: preview.table_id ?? null,
+    amountIn: String(preview.amount_in ?? '0'),
+  };
+  const js = admitOperation(binding, op, { chainId, nowSec });
+  if (!js.ok) {
+    logSafe('session_binding_rejected', { code: js.code, origin });
+    return js;
+  }
+  // (2) wasm 第二层（wallet-core binding_admission；拒绝/异常一律 fail-closed）。
+  const req = {
+    scope: js.scope,
+    table_id: op.tableId != null && /^[0-9]+$/.test(String(op.tableId)) ? Number(op.tableId) : null,
+    amount: js.amount,
+    chain_id: chainId,
+  };
+  let core;
+  try {
+    core = await callCore('wallet_session_admit', JSON.stringify(binding), JSON.stringify(req), String(nowSec));
+  } catch (e) {
+    logSafe('session_binding_core_error', { code: e.code ?? 'Unknown' });
+    return { ok: false, code: 'SessionRejected', reason: `wallet-core admission unavailable（fail-closed）: ${e.code ?? ''}` };
+  }
+  if (core?.admitted !== true) {
+    logSafe('session_binding_core_rejected', { code: core?.rejected_reason ?? 'Unknown' });
+    return { ok: false, code: 'SessionRejected', reason: `wallet-core 准入拒绝：${core?.rejected_reason ?? 'unknown'}` };
+  }
+  return { ok: true, enforced: true, binding };
+}
+
+// ---------------------------------------------------------------------------
+// 连接/换网类请求：popup 内联确认（不走签名预览页）。
+// ---------------------------------------------------------------------------
+
+async function openAndAwait({ requestId, origin, method, kind, preview = null }) {
+  const opened = openPendingRequest(mem.pending, requestId, { origin, method, kind, preview }, Date.now());
   if (!opened.ok) return { ok: false, code: opened.code, reason: opened.reason };
   mem.pending = opened.store;
-  chrome.action.setBadgeText({ text: '1' });
+  updateBadge();
   const decisionPromise = new Promise((resolve) => {
     const timer = setTimeout(() => {
       mem.pageWaiters.delete(requestId);
-      resolve({ ok: false, code: 'RequestExpired', reason: 'connect request timed out' });
+      resolve({ ok: false, code: 'RequestExpired', reason: 'request timed out' });
     }, PAGE_TIMEOUT_MS);
     mem.pageWaiters.set(requestId, {
       resolve: (outcome) => {
@@ -369,7 +641,7 @@ async function openAndAwait({ requestId, origin, method, kind }) {
 }
 
 // ---------------------------------------------------------------------------
-// 锁定（自动/手动/页面请求共用）
+// 锁定（自动/手动/页面请求共用；只影响当前会话，其他账户不受影响）
 // ---------------------------------------------------------------------------
 
 async function lockWallet(reason) {
@@ -395,53 +667,131 @@ async function handlePopupMessage(m) {
     case 'bridge:getSession': {
       // content bridge 专用：只下发会话令牌与公开状态（无密钥/无 note 明文）。
       // 锁定后令牌为 null（页面旧令牌全部失效）；签名类操作另需解锁态。
-      return { sessionId: mem.session?.id ?? null, unlocked: isUnlocked(), chainId: currentNetwork().chainId };
+      const account = await getActiveAccount();
+      return { sessionId: mem.session?.id ?? null, unlocked: isUnlocked(), chainId: currentNetwork(account).chainId };
     }
     case 'popup:getState': {
-      const ks = await getKeystore();
-      const grants = await getGrants();
+      const ledger = await getLedger();
+      const account = activeAccount(ledger);
+      const net = currentNetwork(account);
+      const receipts = await getReceipts();
       return {
-        hasKeystore: ks != null,
+        hasKeystore: Object.keys(ledger.accounts).length > 0,
         unlocked: isUnlocked(),
         publicKey: isUnlocked() ? (await storage.session.get('publicKey')).publicKey ?? null : null,
-        chainId: currentNetwork().chainId,
-        networkKind: currentNetwork().kind,
-        grantedOrigins: Object.keys(grants),
-        pending: pendingSummaries(),
+        chainId: net.chainId,
+        networkKind: net.kind,
+        networkLabel: net.label,
+        networks: [DEFAULT_NETWORK_ID, 'zchain-testnet-1'],
+        activeAccountId: ledger.activeAccountId,
+        accounts: Object.values(ledger.accounts)
+          .map((a) => ({
+            id: a.id,
+            label: a.label,
+            publicKey: a.publicKey ?? null,
+            networkId: a.networkId,
+            createdAt: a.createdAt,
+            lastSelectedAt: a.lastSelectedAt,
+            originCount: Object.keys(a.grants ?? {}).length,
+            active: a.id === ledger.activeAccountId,
+            unlocked: isUnlocked() && mem.session?.accountId === a.id,
+          }))
+          .sort((a, b) => (b.lastSelectedAt ?? 0) - (a.lastSelectedAt ?? 0)),
+        grantedOrigins: Object.keys(account?.grants ?? {}),
+        receipts: Object.values(receipts)
+          .map((r) => ({ ...r, view: inclusionView(r, Date.now()) }))
+          .sort((a, b) => (b.signedAtMs ?? 0) - (a.signedAtMs ?? 0)),
+        gatewayUrl: effectiveGatewayUrl(net.chainId, await getNetworkSettings()),
       };
     }
     case 'popup:create': {
+      // 创建即新增账户并切换（wasm 会话单槽：新账户解锁态替换当前会话——
+      // 既有账户保持密文态，随后可经口令解锁切换回来）。
+      const ledger0 = await getLedger();
       const res = await callCore('wallet_create', m.password, 'interactive');
-      await setKeystore({ version: 1, chain_id: res.keystore.chain_id, owner_envelope: res.keystore.owner_envelope, dek_envelope: res.keystore.dek_envelope, play_store: res.keystore.play_store });
-      newSession();
+      const accountId = crypto.randomUUID();
+      const created = createAccount(ledger0, {
+        id: accountId,
+        label: m.label,
+        keystore: res.keystore,
+        publicKey: res.public_key,
+        networkId: DEFAULT_NETWORK_ID,
+        now: Date.now(),
+      });
+      if (!created.ok) return { error: { code: created.code, reason: created.reason } };
+      await setLedger(created.ledger);
+      newSession(accountId);
       await storage.session.set({ publicKey: res.public_key });
-      logSafe('wallet_created');
-      return { publicKey: res.public_key, chainId: res.keystore.chain_id };
+      logSafe('wallet_created', { kind: 'account' });
+      return { accountId, publicKey: res.public_key, chainId: res.keystore.chain_id };
     }
     case 'popup:unlock': {
-      const ks = await getKeystore();
-      if (!ks) return { error: { code: 'NoKeystore', reason: 'create a wallet first' } };
-      const res = await callCore('wallet_unlock', JSON.stringify(ks), m.password);
-      newSession();
+      const account = m.accountId ? (await getLedger()).accounts[m.accountId] : await getActiveAccount();
+      if (!account) return { error: { code: 'NoKeystore', reason: 'create a wallet first' } };
+      const res = await callCore('wallet_unlock', JSON.stringify(account.keystore), m.password);
+      // 解锁成功后把公钥写回账户元数据（公开信息；0.1 迁移账户补齐）。
+      const ledger = await getLedger();
+      ledger.accounts[account.id] = { ...account, publicKey: res.public_key };
+      const sel = selectAccount(ledger, account.id, Date.now());
+      await setLedger(sel.ledger);
+      newSession(account.id);
       await storage.session.set({ publicKey: res.public_key });
-      logSafe('wallet_unlocked');
-      return { publicKey: res.public_key, chainId: res.chain_id, playFree: res.play_free, notes: res.notes };
+      logSafe('wallet_unlocked', { kind: 'account' });
+      return {
+        accountId: account.id,
+        publicKey: res.public_key,
+        chainId: res.chain_id,
+        playFree: res.play_free,
+        realFree: res.real_free,
+        notes: res.notes,
+      };
     }
     case 'popup:lock':
       await lockWallet('popup');
       return { locked: true };
+    case 'popup:selectAccount': {
+      // 切换账户：先锁定当前会话（wasm 单槽），再推进 activeAccountId。
+      // 目标账户保持锁定，需各自口令解锁——源账户状态不受影响。
+      await lockWallet('account_switch');
+      const sel = selectAccount(await getLedger(), m.accountId, Date.now());
+      if (!sel.ok) return { error: { code: sel.code, reason: sel.reason } };
+      await setLedger(sel.ledger);
+      logSafe('account_selected', { kind: 'switch' });
+      return { activeAccountId: sel.ledger.activeAccountId, locked: true };
+    }
     case 'popup:faucet': {
       if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
       const res = await callCore('wallet_faucet_play', String(m.amount));
-      const ksNow = await callCore('wallet_persist');
-      await setKeystore((await getKeystore()) ? { ...(await getKeystore()), play_store: ksNow.play_store } : ksNow);
+      await persistActiveKeystore();
       logSafe('devnet_faucet_issued');
       return res;
     }
     case 'popup:getNotes': {
       if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
-      const notes = await callCore('wallet_get_notes');
-      return { notes: sanitizeNotesForPage(notes.notes) };
+      // REAL/PLAY 物理分库视图（0.2）：余额分栏 + 分列 note 列表（脱敏）。
+      const all = await callCore('wallet_get_all_notes');
+      return {
+        notes: sanitizeNotesForPage(all.play),
+        realNotes: sanitizeNotesForPage(all.real),
+        balances: all.balances,
+      };
+    }
+    case 'popup:getDisplayViews': {
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      // 展示门（WALLET-ACC-6）：REAL claim 门 + 托管风险提示，wallet-core
+      // display.rs 单实现输出；UI 只消费，不自行决定。
+      return await callCore('wallet_display_views');
+    }
+    case 'popup:switchNetwork': {
+      // 钱包侧换网（popup UI 发起；UI 已做两步式确认）。写入**当前账户**的
+      // 网络选择（账户元数据网络隔离）。锁定态拒绝（无"当前账户会话"）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const res = setAccountNetwork(await getLedger(), sessionAccountId(), m.chainId, Date.now());
+      if (!res.ok) return { error: { code: res.code, reason: res.reason } };
+      await setLedger(res.ledger);
+      logSafe('network_switched', { kind: 'popup' });
+      const net = resolveNetwork(res.ledger.accounts[res.ledger.activeAccountId].networkId);
+      return { chainId: net.chainId, kind: net.kind };
     }
     case 'popup:listPending':
       return { pending: pendingSummaries() };
@@ -454,6 +804,245 @@ async function handlePopupMessage(m) {
       await setAdapterConfig(merged);
       return { saved: true, appliesOn: 'next service worker start', config: merged };
     }
+    case 'popup:backupExport': {
+      // 加密备份导出（WALLET-ACC-5）：wallet-core ZCBK v1 全库导出；口令错
+      // 不可能（导出只加密）；返回 borsh 字节 hex，popup 转文件下载。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      if (typeof m.password !== 'string' || m.password.length < 8) {
+        return { error: { code: 'InvalidArgument', reason: '口令至少 8 字符' } };
+      }
+      const res = await callCore(
+        'wallet_backup_export',
+        m.password,
+        'interactive',
+        String(Math.floor(Date.now() / 1000)),
+      );
+      logSafe('backup_exported');
+      return { backupHex: res.backup_hex, createdUnix: res.created_unix, notes: res.notes };
+    }
+    case 'popup:backupImport': {
+      // 导入恢复（fail-closed）：结构/魔数/版本 → 口令（AEAD）→ 索引自检 →
+      // keystore 信封同口令复核。成功 = 新增一个**锁定**账户（不自动解锁、
+      // 不替换当前会话），用备份口令解锁后可用。
+      const hexStr = typeof m.backupHex === 'string' ? m.backupHex.trim() : '';
+      if (hexStr.length === 0) return { error: { code: 'InvalidArgument', reason: '备份文件为空' } };
+      let res;
+      try {
+        res = await callCore('wallet_backup_import', hexStr, m.password ?? '');
+      } catch (e) {
+        // 稳定错误码直通 UI：BadPassword / Tampered / UnsupportedVersion。
+        return { error: { code: e.code ?? 'BackupRejected', reason: e.detail ?? '备份被拒绝' } };
+      }
+      const ledger0 = await getLedger();
+      const created = createAccount(ledger0, {
+        id: crypto.randomUUID(),
+        label: `恢复 ${new Date().toISOString().slice(0, 10)}`,
+        keystore: res.keystore,
+        publicKey: res.public_key,
+        now: Date.now(),
+      });
+      if (!created.ok) return { error: { code: created.code, reason: created.reason } };
+      await setLedger(created.ledger);
+      logSafe('backup_imported');
+      return {
+        accountId: created.account.id,
+        publicKey: res.public_key,
+        createdUnix: res.created_unix,
+        indexes: res.indexes,
+        remainsLocked: true,
+      };
+    }
+    case 'popup:receipts': {
+      const receipts = await getReceipts();
+      return {
+        receipts: Object.values(receipts)
+          .map((r) => ({ ...r, view: inclusionView(r, Date.now()) }))
+          .sort((a, b) => (b.signedAtMs ?? 0) - (a.signedAtMs ?? 0)),
+      };
+    }
+    case 'popup:receiptSeen': {
+      // 导入 SeenReceipt（§5.3-1 形状）：0.2 无验签入口——evidence 如实标注
+      // receipt_unverified_signature。
+      const store = await getReceipts();
+      const r = applySeenReceipt(store, m.digest, m.receipt, Date.now());
+      if (!r.ok) return { error: { code: r.code, reason: r.reason } };
+      await storage.local.set({ receipts: r.store });
+      return { entry: r.entry };
+    }
+    case 'popup:receiptIncluded': {
+      // 人工登记 included（0.2 无链上核对通道；evidence 保持 local_manual_entry）。
+      const store = await getReceipts();
+      const r = markIncluded(store, m.digest, Date.now());
+      if (!r.ok) return { error: { code: r.code, reason: r.reason } };
+      await storage.local.set({ receipts: r.store });
+      return { entry: r.entry };
+    }
+    case 'popup:getSettings':
+      return { settings: await getNetworkSettings() };
+    // -----------------------------------------------------------------------
+    // Extension 0.3/0.4：会话密钥授权簿 / 提现预览 / 能力矩阵（popup 内部面）
+    // -----------------------------------------------------------------------
+    case 'popup:getRegistry':
+      return await registryView();
+    case 'popup:revokeOrigin': {
+      // 撤销 origin 授权（§6.12.4 授权簿管理；当前账户名下）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const accountId = sessionAccountId();
+      const account = await getActiveAccount();
+      const grants = revokeOriginGrant(m.origin, account?.grants ?? {});
+      const g = setAccountGrants(await getLedger(), accountId, grants);
+      if (!g.ok) return { error: { code: g.code, reason: g.reason } };
+      await setLedger(g.ledger);
+      logSafe('origin_revoked', { origin: String(m.origin ?? '').slice(0, 40) });
+      return { ok: true };
+    }
+    case 'popup:sessionDraft': {
+      // 0.3 授权流程第 1 步：草稿 + delegated key 生成（wallet-core）+
+      // SNIP-12 typed data + 摘要。**不登记**——确认后走 popup:sessionRegister。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const account = await getActiveAccount();
+      const chainId = m.chainId ?? currentNetwork(account).chainId;
+      const nowSec = Math.floor(Date.now() / 1000);
+      const draft = draftAuthorization({ ...m, chainId, nowSec });
+      if (!draft.ok) return { error: { code: draft.code, reason: draft.reason } };
+      // delegated key 生成（私钥只活在 wasm 会话；返回公钥级摘要）。
+      let created;
+      try {
+        created = await callCore('wallet_session_key_create', JSON.stringify({
+          chainId: draft.request.chainId,
+          accountAddress: draft.request.accountAddress,
+          allowedScopes: draft.request.allowedScopes,
+          perTxLimit: draft.request.perTxLimit,
+          perDayLimit: draft.request.perDayLimit,
+          tableAllowlist: draft.request.tableAllowlist,
+          nonce: draft.request.nonce,
+          validAfter: draft.request.validAfter,
+          validUntil: draft.request.validUntil,
+        }));
+      } catch (e) {
+        return { error: { code: e.code ?? 'WalletCoreError', reason: e.detail ?? 'delegated key generation failed' } };
+      }
+      const key = created.binding;
+      // 字段准入（SNIP-12 规范校验；此刻 delegated key / bindingId 已就绪）。
+      const fullRequest = { ...draft.request, delegatedPublicKey: key.delegated_public_key, bindingId: key.binding_id };
+      const shape = validateDraft(fullRequest);
+      if (!shape.ok) return { error: { code: shape.code, reason: shape.reason } };
+      // SNIP-12 typed data（adapters/starknet.js 组装；与 account_binding.rs
+      // encode_type 逐字一致）+ 摘要（wallet-core poseidon 单实现）。
+      const typed = buildAuthorizeTypedData(fullRequest, { chainId: draft.request.chainId });
+      if (!typed.ok) return { error: { code: typed.code, reason: typed.reason } };
+      let digestRes;
+      try {
+        digestRes = await callCore('wallet_snip12_authorize_digest', JSON.stringify({
+          chainId: draft.request.chainId,
+          accountAddress: draft.request.accountAddress,
+          delegatedPublicKey: key.delegated_public_key,
+          signatureScheme: 'secp256k1',
+          allowedScopes: draft.request.allowedScopes,
+          perTxLimit: draft.request.perTxLimit,
+          perDayLimit: draft.request.perDayLimit,
+          tableAllowlist: draft.request.tableAllowlist,
+          bindingId: key.binding_id,
+          nonce: draft.request.nonce,
+          validAfter: draft.request.validAfter,
+          validUntil: draft.request.validUntil,
+        }));
+      } catch (e) {
+        return { error: { code: e.code ?? 'WalletCoreError', reason: e.detail ?? 'snip12 digest failed' } };
+      }
+      return {
+        request: draft.request,
+        key,
+        typedData: typed.typedData,
+        digest: digestRes.digest,
+        encodeType: digestRes.encode_type,
+        origin: draft.defaults.origin,
+      };
+    }
+    case 'popup:sessionRegister': {
+      // 0.3 授权流程第 2 步：登记约束记录（devnet 入口形态 = 本地登记；
+      // evidence 如实标注 devnet_local_entry——链侧 admission 登记未接）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const accountId = sessionAccountId();
+      const account = await getActiveAccount();
+      const store = await getBindingStore(accountId);
+      const up = upsertBinding(store, { ...m.binding, origin: m.origin ?? m.binding?.origin, evidence: 'devnet_local_entry' });
+      if (!up.ok) return { error: { code: up.code, reason: up.reason } };
+      await setBindingStore(accountId, up.store);
+      logSafe('session_binding_registered', { kind: 'devnet_local_entry' });
+      return { binding: bindingView(up.binding, Math.floor(Date.now() / 1000)) };
+    }
+    case 'popup:sessionRevoke': {
+      // 0.3/0.4 撤销（粘滞；撤销后该 origin 的签名一律拒绝——fail-closed）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const accountId = sessionAccountId();
+      const store = await getBindingStore(accountId);
+      const r = revokeBinding(store, m.bindingId, Math.floor(Date.now() / 1000));
+      if (!r.ok) return { error: { code: r.code, reason: r.reason } };
+      await setBindingStore(accountId, r.store);
+      // 双重校验：撤销态经 wallet-core 状态机确认（wasm 状态查询入口）。
+      let coreStatus = null;
+      try {
+        coreStatus = await callCore('wallet_binding_status', JSON.stringify(r.binding), String(Math.floor(Date.now() / 1000)));
+      } catch { coreStatus = null; }
+      logSafe('session_binding_revoked');
+      return { binding: bindingView(r.binding, Math.floor(Date.now() / 1000)), coreStatus };
+    }
+    case 'popup:sessionDelete': {
+      // 删除记录（显式用户动作；撤销粘滞态的唯一清除路径——删除后该 origin
+      // 回到常规签名路径，而非恢复授权）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const accountId = sessionAccountId();
+      const store = await getBindingStore(accountId);
+      const d = deleteBinding(store, m.bindingId);
+      if (!d.ok) return { error: { code: d.code, reason: d.reason } };
+      await setBindingStore(accountId, d.store);
+      logSafe('session_binding_deleted');
+      return { ok: true };
+    }
+    case 'popup:withdrawPreview': {
+      // 0.3 REAL 提现预览（展示态；canSubmit 恒 false——不开放真实提交）。
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const account = await getActiveAccount();
+      const all = await callCore('wallet_get_all_notes');
+      const views = await callCore('wallet_display_views');
+      const wp = buildWithdrawPreview({
+        amount: m.amount,
+        owner: m.owner,
+        realNotes: sanitizeNotesForPage(all.real),
+        displayViews: views,
+        chainId: currentNetwork(account).chainId,
+        nowSec: Math.floor(Date.now() / 1000),
+      });
+      if (!wp.ok) return { error: { code: wp.code, reason: wp.reason } };
+      return { preview: wp.preview };
+    }
+    case 'popup:capabilityMatrix': {
+      // 0.4 能力矩阵（外部钱包探测 + adapters capability∩白名单逻辑复用）。
+      const account = await getActiveAccount();
+      return {
+        matrix: buildCapabilityMatrix({
+          zchainCaps: capabilities(account),
+          adapterStatus: adapterHost.status(),
+          detection: detectExternalWallets(),
+        }),
+      };
+    }
+    case 'popup:setGateway': {
+      // 按网络设置网关 URL（http(s) origin 规范化；空串 = 清除覆盖回默认）。
+      const net = resolveNetwork(m.chainId);
+      if (!net) return { error: { code: 'NetworkUnsupported', reason: String(m.chainId) } };
+      const settings = await getNetworkSettings();
+      if (m.gatewayUrl == null || m.gatewayUrl === '') {
+        delete settings[net.chainId];
+      } else {
+        const canonical = canonicalHttpUrl(m.gatewayUrl);
+        if (!canonical) return { error: { code: 'InvalidArgument', reason: '网关 URL 必须是 http(s) 源' } };
+        settings[net.chainId] = { ...settings[net.chainId], gatewayUrl: canonical };
+      }
+      await storage.local.set({ networkSettings: settings });
+      return { saved: true, gatewayUrl: effectiveGatewayUrl(net.chainId, settings) };
+    }
     case 'popup:approve':
     case 'popup:reject': {
       const decision = m.type === 'popup:approve' ? 'approved' : 'rejected';
@@ -462,7 +1051,7 @@ async function handlePopupMessage(m) {
       mem.pending = tr.store;
       const waiter = mem.pageWaiters.get(m.requestId);
       if (waiter) {
-        // 连接类（无 preview）与签名类（handleSign 的 waitForDecision）统一唤醒。
+        // 连接/换网类（无签名预览）与签名类（handleSign 的 waitForDecision）统一唤醒。
         mem.pageWaiters.delete(m.requestId);
         waiter.resolve({ ok: true, request: tr.request });
       }
@@ -472,6 +1061,12 @@ async function handlePopupMessage(m) {
     default:
       return { error: { code: 'UnknownPopupMessage', reason: m.type ?? '' } };
   }
+}
+
+/** 网关设置（per 网络；storage.local）。 */
+async function getNetworkSettings() {
+  const { networkSettings } = await storage.local.get('networkSettings');
+  return networkSettings ?? {};
 }
 
 function pendingSummaries() {
@@ -513,7 +1108,7 @@ async function setAdapterConfig(cfg) {
 /** WC/适配器签名的弹出确认仍复用签名管线（origin 标记为 adapter 来源）。 */
 async function adapterSign(method, params) {
   const requestId = `adapter-${crypto.randomUUID()}`;
-  const decision = await handleSign({ method, params }, 'adapter:walletconnect', requestId);
+  const decision = await handleSign({ method, params }, 'adapter:walletconnect', requestId, await getActiveAccount());
   if (decision?.error) {
     const e = new Error(`${decision.error.code}: ${decision.error.reason}`);
     e.code = decision.error.code;
@@ -531,8 +1126,8 @@ function adapterCoreProvider() {
       e.code = 'RouteUnavailable';
       throw e;
     },
-    getNetwork: async () => ({ ...currentNetwork(), abiVersion: 1 }),
-    getCapabilities: async () => capabilities(),
+    getNetwork: async () => ({ ...currentNetwork(await getActiveAccount()), abiVersion: 1 }),
+    getCapabilities: async () => capabilities(await getActiveAccount()),
     getAccounts: async () => {
       if (!isUnlocked()) return { accounts: [], locked: true };
       return { accounts: [await publicKeyHex()], locked: false };
@@ -583,7 +1178,7 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
       sendResponse(response);
       return;
     }
-    // 扩展内部通道（popup/options）：仅扩展自身页面（sender.id === 扩展 id）。
+    // 扩展内部通道（popup/options/portal 页）：仅扩展自身页面（sender.id === 扩展 id）。
     if (sender.id === chrome.runtime.id) {
       sendResponse(await handlePopupMessage(m));
       return;
@@ -596,7 +1191,7 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
   return true; // async sendResponse
 });
 
-// 自动锁屏心跳（alarms 是 0.1 唯一使用的周期任务）。
+// 自动锁屏心跳（alarms 是唯一的周期任务）。
 chrome.alarms.create('zchain.autolock', { periodInMinutes: 1 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== 'zchain.autolock') return;
@@ -609,5 +1204,5 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 });
 
 chrome.runtime.onInstalled.addListener(() => {
-  logSafe('installed', { kind: 'extension-0.1' });
+  logSafe('installed', { kind: 'extension-0.2' });
 });

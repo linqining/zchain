@@ -40,8 +40,9 @@ pub use poker_settlement_core::{
     calculate_side_pots, derive_settlement_plan as derive_plan_from_snapshot, evaluate_best,
     is_eligible, rake_for, split_among_winners, split_across_runouts, HandRank, RitStartStreet,
     RunoutPotPlan, SettlementPlan, SettlementPotPlan, SettlementRunoutSchedule, SidePot,
-    SidePotError, SidePotResult, RAKE_MODE_NONE, RAKE_MODE_PERCENTAGE, MAX_PLAYERS, MAX_RUNOUTS,
-    MAX_TOTAL_BET, SETTLEMENT_PLAN_VERSION, SETTLEMENT_SEATS,
+    SidePotError, SidePotResult, RAKE_MODE_FIXED_RAKE_BURN, RAKE_MODE_NONE,
+    RAKE_MODE_PERCENTAGE, MAX_PLAYERS, MAX_RUNOUTS, MAX_TOTAL_BET, SETTLEMENT_PLAN_VERSION,
+    SETTLEMENT_SEATS,
 };
 
 /// Canonical board input used while deriving a settlement plan.
@@ -341,14 +342,77 @@ fn validate_exposed_cards(table: &TexasPokerTable, boards: &SettlementBoards) ->
     Ok(())
 }
 
-// rake 模式常量在本模块保持可用（RAKE_MODE_NONE/PERCENTAGE 来自 core，
-// 与 `constants.rs` 数值一致——跨 crate 一致性由下面的静态断言钉住）。
+// rake 模式常量在本模块保持可用（RAKE_MODE_NONE/PERCENTAGE/FIXED_RAKE_BURN
+// 来自 core，与 `constants.rs` 数值一致——跨 crate 一致性由下面的静态断言钉住）。
 const _: () = {
     assert!(RAKE_MODE_NONE == super::constants::RAKE_MODE_NONE);
     assert!(RAKE_MODE_PERCENTAGE == super::constants::RAKE_MODE_PERCENTAGE);
+    assert!(RAKE_MODE_FIXED_RAKE_BURN == super::constants::RAKE_MODE_FIXED_RAKE_BURN);
     assert!(MAX_PLAYERS == super::constants::MAX_PLAYERS);
     assert!(MAX_TOTAL_BET == super::constants::MAX_TOTAL_BET);
 };
+
+// ===== TE-M4：FixedRakeBurn 结算处置规则（合约侧落点）=====
+//
+// 结算计划（[`SettlementPlan`]，单一事实源在 poker-settlement-core）只编码
+// **数量**：`gross_pot = total_awards + rake`，mode 2 与 mode 1 计价同式
+// （canonical AIR opening 已证明并冻结该数量关系）。**处置**——抽出的
+// rake 份额去哪里——是本合约侧的规则，与 mode 1 的分账路径严格隔离：
+//
+// - [`RAKE_MODE_PERCENTAGE`]：rake 离开 TableVault 后成为
+//   Treasury-owned 原生 Coin 输出（precompile 的 escrow output，经
+//   `prove_task::L1DispatchOutput::settlement_treasury_receipt` 派生）；
+// - [`RAKE_MODE_FIXED_RAKE_BURN`]：rake 离开 TableVault 后**不产生任何
+//   现金输出**（不铸 Treasury/operator note），即供给紧缩 = 直接销毁。
+//   本合约的 note 表示是原生 Coin UTXO，"不铸即销毁"是其 burn 表示
+//   （选择依据：TableVault 已在 `apply_settlement_plan` 中借记
+//   `chip_pool`，跳过 escrow 输出即净销毁；TreasuryCap 计数器的推进由
+//   经济层 `burn_escrowed_native` 在 precompile 装配点执行）。
+//
+// 该规则是纯函数 [`rake_disposal`]，precompile/证明视图共用同一判定，
+// 不存在第二种换算。
+
+/// rake 份额的结算处置（TE-M4 定稿）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RakeDisposal {
+    /// 零费或零 rake：无处置。
+    None,
+    /// 分账处置（mode 1）：rake 全额成为 Treasury 现金输出。
+    TreasurySplit {
+        /// 离开 TableVault 的 rake 数额（Treasury UTXO 面额）。
+        amount: u64,
+    },
+    /// 销毁处置（mode 2）：rake 全额销毁，无现金输出（供给紧缩）。
+    Burn {
+        /// 销毁数额（等于 plan.rake；不得再产生任何 Treasury/operator 输出）。
+        amount: u64,
+    },
+}
+
+/// rake 模式 → 资金处置的唯一判定（合约侧结算规则；precompile escrow 输出
+/// 与证明视图共用）。
+///
+/// # Errors
+/// 未知 rake 模式（∉ {0, 1, 2}）→ [`PokerL1Error`]（fail-closed：
+/// "不认识 ≠ 接受"；mode 2 的手在 `TableRules::validate_canonical` 开桌
+/// 即冻结，运行态不可出现未知模式）。
+pub fn rake_disposal(rake_mode: u8, rake_amount: u64) -> PokerL1Result<RakeDisposal> {
+    match rake_mode {
+        RAKE_MODE_NONE => {
+            if rake_amount != 0 {
+                return Err(PokerL1Error::Serialization(
+                    "settlement: none-mode table collected a non-zero rake".into(),
+                ));
+            }
+            Ok(RakeDisposal::None)
+        }
+        RAKE_MODE_PERCENTAGE => Ok(RakeDisposal::TreasurySplit { amount: rake_amount }),
+        RAKE_MODE_FIXED_RAKE_BURN => Ok(RakeDisposal::Burn { amount: rake_amount }),
+        mode => Err(PokerL1Error::Serialization(format!(
+            "settlement: unsupported rake mode {mode}"
+        ))),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -720,6 +784,145 @@ mod tests {
             ),
         )
         .unwrap();
+        assert_eq!(glue, core_plan);
+        assert_eq!(
+            glue.digest().unwrap(),
+            poker_settlement_core::SettlementPlan::digest(&core_plan).unwrap()
+        );
+    }
+
+    // ===== TE-M4：FixedRakeBurn 结算处置规则 =====
+
+    /// burn 桌结算守恒：mode 2 桌派生的 plan 满足 gross = awards + rake，
+    /// rake 份额的处置 = [`RakeDisposal::Burn`]（无现金输出）。
+    #[test]
+    fn burn_table_settlement_conserves_funds_with_burn_disposal() {
+        let mut table = table();
+        table.rake_mode = RAKE_MODE_FIXED_RAKE_BURN;
+        table.rake_bps = 500;
+        table.rake_cap = 1_000;
+        let plan = derive_settlement_plan(&table).expect("burn table plan");
+        assert_eq!(plan.gross_pot, 600);
+        // 分层：300（3 座 contested）+ 200（2 座 contested）+ 100（uncalled
+        // 返还层，不计费）→ rake 基数 = 500（B9 contested-only 口径）。
+        assert_eq!(plan.rake_base(), 500);
+        assert_eq!(plan.rake, 25, "5% of 500 contested gross，cap 1000 未触发");
+        assert_eq!(plan.total_awards, 575);
+        assert_eq!(plan.gross_pot, plan.total_awards + plan.rake, "守恒同式");
+        assert_eq!(plan.awards.iter().sum::<u64>(), plan.total_awards);
+
+        // 处置判定：mode 2 → Burn{rake}，无 Treasury/operator 现金输出
+        assert_eq!(
+            rake_disposal(table.rake_mode, plan.rake).unwrap(),
+            RakeDisposal::Burn { amount: 25 }
+        );
+    }
+
+    /// 两侧对照（与 poker-settlement-core 一致性）：mode 2 与 mode 1 的
+    /// plan **逐字段相等**（计价同式，TE-M4 定稿），处置枚举**不同**
+    /// （TreasurySplit vs Burn）——数量关系在 core/合约两侧一致，资金流
+    /// 在合约处置层隔离。
+    #[test]
+    fn burn_and_percentage_plans_match_but_disposals_differ() {
+        let mut table = table();
+        table.rake_mode = RAKE_MODE_FIXED_RAKE_BURN;
+        table.rake_bps = 500;
+        table.rake_cap = 1_000;
+        let burn_plan = derive_settlement_plan(&table).unwrap();
+
+        table.rake_mode = RAKE_MODE_PERCENTAGE;
+        let percentage_plan = derive_settlement_plan(&table).unwrap();
+        assert_eq!(burn_plan, percentage_plan, "mode 2 计价数量关系与 mode 1 同式");
+
+        assert_eq!(
+            rake_disposal(RAKE_MODE_FIXED_RAKE_BURN, burn_plan.rake).unwrap(),
+            RakeDisposal::Burn { amount: burn_plan.rake }
+        );
+        assert_eq!(
+            rake_disposal(RAKE_MODE_PERCENTAGE, percentage_plan.rake).unwrap(),
+            RakeDisposal::TreasurySplit { amount: percentage_plan.rake }
+        );
+        assert_ne!(
+            rake_disposal(RAKE_MODE_FIXED_RAKE_BURN, burn_plan.rake).unwrap(),
+            rake_disposal(RAKE_MODE_PERCENTAGE, percentage_plan.rake).unwrap(),
+            "burn 桌与 percentage 桌的 rake 资金流必须不同"
+        );
+    }
+
+    /// mode 0/1 零回退：处置判定对既有模式逐点不变（NONE → None 且拒绝
+    /// 非零 rake；PERCENTAGE → TreasurySplit；未知模式 fail-closed）。
+    #[test]
+    fn mode_0_and_1_disposals_are_unchanged() {
+        assert_eq!(rake_disposal(RAKE_MODE_NONE, 0).unwrap(), RakeDisposal::None);
+        assert!(rake_disposal(RAKE_MODE_NONE, 1).is_err(), "none 模式抽到钱即状态机 bug");
+        assert_eq!(
+            rake_disposal(RAKE_MODE_PERCENTAGE, 150).unwrap(),
+            RakeDisposal::TreasurySplit { amount: 150 }
+        );
+        assert!(rake_disposal(3, 0).is_err());
+        assert!(rake_disposal(u8::MAX, 0).is_err());
+    }
+
+    /// 跨 crate 一致性（TE-M4）：burn 桌（mode 2）经 VM 胶水派生与经 core
+    /// 快照派生完全相等（digest 一致）——与 mode 0/1 的既有对照测试同构。
+    #[test]
+    fn burn_table_core_snapshot_derivation_matches_vm_glue() {
+        let mut table = table();
+        table.rake_mode = RAKE_MODE_FIXED_RAKE_BURN;
+        table.rake_bps = 500;
+        table.rake_cap = 1_000;
+        let boards = SettlementBoards::twice(
+            RitStartStreet::Flop,
+            table.community_cards.to_vec(),
+            vec![
+                Card::new(2, 2),
+                Card::new(3, 4),
+                Card::new(2, 6),
+                Card::new(2, 12),
+                Card::new(3, 10),
+            ],
+        );
+        let glue = derive_settlement_plan_for_boards(&table, &boards).unwrap();
+
+        let inactive: Vec<bool> = table
+            .seats
+            .iter()
+            .map(|seat| !seat.is_occupied() || seat.is_folded() || seat.has_left_hand())
+            .collect();
+        let all_in: Vec<bool> = table.seats.iter().map(Seat::is_all_in).collect();
+        let total_bets: Vec<u64> = table.seats.iter().map(Seat::total_bet).collect();
+        let hole_cards: Vec<Vec<u8>> = table
+            .seats
+            .iter()
+            .map(|seat| {
+                seat.hand()
+                    .map(|hand| hand.iter().map(|c| c.to_index()).collect::<Vec<u8>>())
+                    .unwrap_or_default()
+            })
+            .collect();
+        let hole_refs: Vec<&[u8]> = hole_cards.iter().map(Vec::as_slice).collect();
+        let snapshot = TableSnapshot {
+            seat_count: table.seats.len(),
+            button: table.button,
+            total_bets: &total_bets,
+            inactive: &inactive,
+            all_in: &all_in,
+            hole_cards: &hole_refs,
+            rake_mode: table.rake_mode,
+            rake_bps: table.rake_bps,
+            rake_cap: table.rake_cap,
+        };
+        let to_idx = |cards: &[Card]| cards.iter().map(|c: &Card| c.to_index()).collect::<Vec<u8>>();
+        let core_plan = poker_settlement_core::derive_settlement_plan(
+            &snapshot,
+            &poker_settlement_core::SettlementBoards::twice(
+                RitStartStreet::Flop,
+                to_idx(boards.board1()),
+                to_idx(boards.board2()),
+            ),
+        )
+        .unwrap();
+        assert_eq!(glue.rake, 25, "contested-only 基数 500 × 5%（uncalled 层不计费）");
         assert_eq!(glue, core_plan);
         assert_eq!(
             glue.digest().unwrap(),

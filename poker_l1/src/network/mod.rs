@@ -422,6 +422,9 @@ pub struct CompactVertex {
     pub tx_short_ids: Vec<ShortId>,
     /// 作者签名（完整签名，不压缩）。
     pub author_sig: Vec<u8>,
+    /// v1.5-a2：本 vertex 强制包含的 tx_hash 列表（完整 hash，与 DagVertex 载荷一致，
+    /// 使 compact 路径重建的 vertex_hash 与 full 路径一致）。
+    pub forced_tx_hashes: Vec<Hash>,
 }
 
 impl CompactVertex {
@@ -443,6 +446,7 @@ impl CompactVertex {
             parent_hashes: vertex.parent_hashes.clone(),
             tx_short_ids,
             author_sig: vertex.author_sig.clone(),
+            forced_tx_hashes: vertex.forced_tx_hashes.clone(),
         }
     }
 }
@@ -793,6 +797,8 @@ pub enum GossipTopic {
     CheckpointAnchor,
     /// commit certificate 投票传播（缺口 #3：多 validator 2/3 多签闭环）。
     CommitVote,
+    /// v1.5-c：checkpoint 投票传播（BLS 聚签 QC）。
+    Checkpoint,
 }
 
 /// 网络消息（SubTask 30.1）。
@@ -843,6 +849,16 @@ pub enum NetworkMessage {
     CommitVote(CommitVote),
     /// Peer Exchange（PEX，缺口 #5）：节点交换已知 peer 地址列表。
     PeerExchange(Vec<PeerInfo>),
+    /// v1.5-c：checkpoint 投票（BLS 聚签 QC；收集端凑齐 2f+1 聚合落盘）。
+    CheckpointVote(crate::consensus::checkpoint::CheckpointVote),
+    /// v1.5-d：DA 回执（validator 对数据摘要的可用性签名；收集端凑齐 2f+1
+    /// 聚合成 DA 凭证）。
+    DaReceipt(crate::consensus::da::DaReceipt),
+    /// v1.5-e：checkpoint 阈值部分份额签名（真 t-of-n；收集端凑齐 t 经
+    /// Lagrange 重构装配阈值 QC）。与 [`NetworkMessage::CheckpointVote`] 同一
+    /// 签名对象（同一 checkpoint 位点可被两种形态背书）；节点按本地
+    /// qc_threshold_t 配置分派签署形态。
+    CheckpointThresholdPartial(crate::consensus::checkpoint::ThresholdQcPartial),
 }
 
 /// commit certificate 投票（缺口 #3）。
@@ -1571,6 +1587,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![[0xAA; 32]],
             author_sig: vec![0x42; 65],
+            forced_tx_hashes: vec![],
         };
         let compact = CompactVertex::from_vertex(&vertex);
         assert_eq!(compact.epoch, 1);

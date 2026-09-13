@@ -1,0 +1,40 @@
+[package]
+name = "stwo-wasm-probe"
+version = "0.1.0"
+edition = "2021"
+description = "M4-ACC-5 探针：stwo 2.3 验证器进 wasm32 的可行性与延迟量级（demo AIR 结构对齐 poker canonical AIR）"
+
+# 独立 lockfile，不进 zchain workspace（参照 poker-appchain-texasair 隔离模式）
+[workspace]
+
+[dependencies]
+stwo = { version = "2.3", features = ["std"] }
+stwo-constraint-framework = { version = "2.3", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+
+[features]
+default = []
+# 原生出证 / 原生基准（需要 nightly，stwo/prover 门 portable_simd 等特性）。
+# wasm 验证器主路径绝不启用；另有 wasm-scope-recommit 变体单独测 prover 路径。
+native-prover = ["stwo/prover", "stwo-constraint-framework/prover"]
+# rayon 并行（canonical 栈的实际 feature 组合）：wasm32 可编译，运行时行为见探针。
+parallel = ["stwo/parallel", "stwo-constraint-framework/parallel"]
+
+[lib]
+name = "stwo_wasm_probe"
+crate-type = ["rlib", "cdylib"]
+
+[[bin]]
+name = "gen-proof"
+path = "src/bin/gen_proof.rs"
+required-features = ["native-prover"]
+
+[[bin]]
+name = "bench-native"
+path = "src/bin/bench_native.rs"
+required-features = ["native-prover"]
+
+[profile.release]
+opt-level = 3
+codegen-units = 1

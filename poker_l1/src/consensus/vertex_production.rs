@@ -92,6 +92,8 @@ pub struct VertexBuilder {
     pub tx_list: Vec<Transaction>,
     /// 引用的上一轮 vertex hash 列表。
     pub parent_hashes: Vec<crate::Hash>,
+    /// v1.5-a2：本 vertex 强制包含的 tx_hash 列表（载荷级承诺，build 时写入）。
+    pub forced_tx_hashes: Vec<crate::Hash>,
 }
 
 impl VertexBuilder {
@@ -103,6 +105,7 @@ impl VertexBuilder {
             author_pubkey,
             tx_list: Vec::new(),
             parent_hashes: Vec::new(),
+            forced_tx_hashes: Vec::new(),
         }
     }
 
@@ -115,6 +118,18 @@ impl VertexBuilder {
     /// 设置 parent_hashes（须 ≥2/3 validator 的上一轮 vertex hash）。
     pub fn with_parents(mut self, parent_hashes: Vec<crate::Hash>) -> Self {
         self.parent_hashes = parent_hashes;
+        self
+    }
+
+    /// v1.5-a2：声明本 vertex 的强制包含集（build 时写入 `forced_tx_hashes`）。
+    ///
+    /// 传入的列表会被去重 + 按 tx_hash 字节序升序规范化（vertex_hash 承诺对顺序
+    /// 敏感，规范化保证同集合同承诺）。
+    #[must_use]
+    pub fn with_forced_tx_hashes(mut self, mut forced: Vec<crate::Hash>) -> Self {
+        forced.sort();
+        forced.dedup();
+        self.forced_tx_hashes = forced;
         self
     }
 
@@ -187,6 +202,7 @@ impl VertexBuilder {
             tx_list: self.tx_list,
             parent_hashes: self.parent_hashes,
             author_sig,
+            forced_tx_hashes: self.forced_tx_hashes,
         }
     }
 }
@@ -374,14 +390,52 @@ pub fn sort_vertex_txs_s9(txs: Vec<Transaction>) -> Vec<Transaction> {
 ///
 /// 返回聚合后按 R4-M4 规则排序的 tx 列表。
 pub fn sort_commit_txs_r4m4(commit_vertex_txs: Vec<Vec<Transaction>>) -> Vec<Transaction> {
+    sort_commit_txs_r4m4_with_force_include(commit_vertex_txs, &[])
+}
+
+/// R4-M4 排序的 M3-ACC-6 扩展（plan §5.3-3）：强制包含 tx 先于全部普通 tx。
+///
+/// 排序规则（全局确定性，同输入同输出）：
+/// 1. `force_include_tx_hashes` 命中的 tx 聚为一组，按 `tx_hash` 字节序升序
+///    （§5.3-3 确定性排序，与到达顺序无关）排在最前；
+/// 2. 其余 tx 保持既有 R4-M4 / S9 规则（GameTurn → Public → ForceSync，
+///    同通道 arrival 顺序 / gas_price 降序）。
+///
+/// `force_include_tx_hashes` 为空时与 [`sort_commit_txs_r4m4`] 完全同序
+/// （禁用路径回归保证）。
+///
+/// v1 边界：forced 集来自出块节点本地的去重集合（见 `force_include` 模块头），
+/// 多 validator 场景下集合不一致属已知活性风险，完整协议（receipt 入共识载荷）属 v2。
+pub fn sort_commit_txs_r4m4_with_force_include(
+    commit_vertex_txs: Vec<Vec<Transaction>>,
+    force_include_tx_hashes: &[crate::Hash],
+) -> Vec<Transaction> {
     // 先按 Bullshark 顺序聚合（保持 vertex 间顺序）
     let mut aggregated: Vec<Transaction> = Vec::new();
     for vertex_txs in commit_vertex_txs {
         aggregated.extend(vertex_txs);
     }
-    // 再按 S9 规则排序（GameTurn 优先，ForceSync 后置）
-    // R4-M4 等价于聚合后做 S9 排序（跨 vertex 的 GameTurn 全先于 ForceSync）
-    sort_vertex_txs_s9(aggregated)
+    if force_include_tx_hashes.is_empty() {
+        // 再按 S9 规则排序（GameTurn 优先，ForceSync 后置）
+        // R4-M4 等价于聚合后做 S9 排序（跨 vertex 的 GameTurn 全先于 ForceSync）
+        return sort_vertex_txs_s9(aggregated);
+    }
+    // M3-ACC-6：分离强制包含组（tx_hash 升序）与普通组（R4-M4/S9 规则）。
+    let mut forced: Vec<(crate::Hash, Transaction)> = Vec::new();
+    let mut normal: Vec<Transaction> = Vec::new();
+    for tx in aggregated {
+        let hash = tx.tx_hash();
+        if force_include_tx_hashes.contains(&hash) {
+            forced.push((hash, tx));
+        } else {
+            normal.push(tx);
+        }
+    }
+    forced.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut result: Vec<Transaction> = Vec::with_capacity(forced.len() + normal.len());
+    result.extend(forced.into_iter().map(|(_, tx)| tx));
+    result.extend(sort_vertex_txs_s9(normal));
+    result
 }
 
 /// SEC-H6 跨 commit force_advance 抢跑防护校验（SubTask 8.6 / Phase 5 Task 10）。
@@ -988,6 +1042,88 @@ mod tests {
         let sorted = sort_commit_txs_r4m4(commit);
         assert_eq!(sorted[0].lane_hint, TxLane::GameTurn);
         assert_eq!(sorted[1].lane_hint, TxLane::ForceSync);
+    }
+
+    // ===== M3-ACC-6：R4-M4 + ForceInclude 排序测试 =====
+
+    #[test]
+    fn sort_commit_txs_r4m4_with_force_include_orders_forced_first() {
+        // 混合序列：强制包含 F（Public 通道）+ GameTurn + 普通 Public + ForceSync。
+        let forced = make_public_tx(9);
+        let forced_hash = forced.tx_hash();
+        let commit = vec![
+            vec![
+                make_force_sync_tx(3),
+                make_gameturn_tx(0x10, 2, false),
+                forced.clone(),
+            ],
+            vec![
+                make_gameturn_tx(0x20, 3, false),
+                make_public_tx(2),
+                make_public_tx(1),
+            ],
+        ];
+        let sorted = sort_commit_txs_r4m4_with_force_include(commit, &[forced_hash]);
+        assert_eq!(sorted.len(), 6);
+        // 强制包含 tx 排在全部普通 tx 之前
+        assert_eq!(
+            sorted[0].tx_hash(),
+            forced_hash,
+            "强制包含交易必须先于普通交易"
+        );
+        // 普通交易保持既有 R4-M4/S9 语义：GameTurn → Public → ForceSync
+        assert_eq!(sorted[1].lane_hint, TxLane::GameTurn);
+        assert_eq!(sorted[2].lane_hint, TxLane::GameTurn);
+        assert_eq!(sorted[3].lane_hint, TxLane::Public);
+        assert_eq!(sorted[4].lane_hint, TxLane::Public);
+        assert_eq!(sorted[5].lane_hint, TxLane::ForceSync);
+        // GameTurn 内保持 arrival（0x10 在 0x20 前）
+        assert_eq!(sorted[1].gameturn_nonce, Some(2));
+        assert_eq!(sorted[2].gameturn_nonce, Some(3));
+    }
+
+    #[test]
+    fn sort_commit_txs_r4m4_with_force_include_is_deterministic() {
+        // 确定性断言：乱序 vertex 输入、同 forced 集 → 同输出（同输入同输出）。
+        let forced = make_public_tx(9);
+        let forced2 = make_public_tx(8);
+        let mut forced_hashes = vec![forced.tx_hash(), forced2.tx_hash()];
+        forced_hashes.sort();
+
+        let build = || {
+            vec![vec![
+                make_public_tx(2),
+                forced.clone(),
+                make_gameturn_tx(0x10, 1, false),
+                forced2.clone(),
+                make_force_sync_tx(4),
+            ]]
+        };
+        let a = sort_commit_txs_r4m4_with_force_include(build(), &forced_hashes);
+        let b = sort_commit_txs_r4m4_with_force_include(build(), &forced_hashes);
+        let a_hashes: Vec<crate::Hash> = a.iter().map(|t| t.tx_hash()).collect();
+        let b_hashes: Vec<crate::Hash> = b.iter().map(|t| t.tx_hash()).collect();
+        assert_eq!(a_hashes, b_hashes, "同输入必须同输出");
+
+        // forced 组按 tx_hash 字节序升序，且先于全部普通 tx
+        let mut expected_forced = forced_hashes.clone();
+        expected_forced.sort();
+        assert_eq!(&a_hashes[..2], &expected_forced[..]);
+        assert_eq!(a[2].lane_hint, TxLane::GameTurn);
+        assert_eq!(a[3].lane_hint, TxLane::Public);
+        assert_eq!(a[4].lane_hint, TxLane::ForceSync);
+    }
+
+    #[test]
+    fn sort_commit_txs_r4m4_with_force_include_empty_set_matches_plain_r4m4() {
+        // 空 forced 集必须与既有 sort_commit_txs_r4m4 完全同序（禁用路径回归保证）。
+        let commit = vec![
+            vec![make_force_sync_tx(1), make_gameturn_tx(0x10, 2, false)],
+            vec![make_public_tx(2), make_gameturn_tx(0x20, 3, false)],
+        ];
+        let plain = sort_commit_txs_r4m4(commit.clone());
+        let with = sort_commit_txs_r4m4_with_force_include(commit, &[]);
+        assert_eq!(plain, with, "空 forced 集时不得改变既有排序");
     }
 
     // ===== SEC-H6 跨 commit 抢跑防护测试 =====

@@ -967,6 +967,7 @@ dependencies = [
  "secp256k1",
  "serde",
  "serde_json",
+ "sha2",
  "starknet-crypto 0.6.2",
  "starknet-ff",
  "thiserror 1.0.69",
@@ -981,7 +982,10 @@ dependencies = [
  "hex",
  "poker-appchain",
  "poker-settlement-core",
+ "poker_l1",
+ "poker_protocol",
  "poker_texas_air",
+ "rand 0.8.8",
 ]
 
 [[package]]
@@ -1038,6 +1042,7 @@ version = "0.1.0"
 dependencies = [
  "blake2",
  "borsh",
+ "starknet-crypto 0.6.2",
  "thiserror 1.0.69",
 ]
 

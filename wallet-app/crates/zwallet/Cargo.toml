@@ -1,0 +1,32 @@
+[package]
+name = "zwallet"
+version = "0.1.0"
+edition = "2024"
+description = "ZChain 桌面钱包 MVP 的 wallet-core 接线层（plan §6.12.5）——不实现任何密码学，全部复用 wallet_core"
+license = "BUSL-1.1"
+
+# 壳层纪律（plan §6.12.3）：本 crate 是 wallet-core 的薄封装（状态机 + 持久化
+# + DTO），不重实现任何协议/密码学逻辑。路径依赖只开默认 feature（wasm 不开）。
+#
+# 依赖指向 wallet-app/vendor/ 的 wallet-core HEAD 快照（而非根 workspace 的
+# 活动源码）：并行开发期间 poker-appchain 正被其他 agent 持续重构（note_v2），
+# 活动源码多次出现编译中间态；快照让本 workspace 的验收可复现。快照内容 =
+# `git archive HEAD`，与上游仓库同源同代码（README"vendor 快照"节有如实记录
+# 与同步方法）。
+[dependencies]
+# ===== wallet-core 唯一密码学/Note/签名/备份实现 =====
+poker-wallet = { path = "../../vendor/poker-wallet" }
+# ===== poker-appchain 类型面（Note/AssetClass/genesis 帧；wallet-core 的同源依赖）=====
+poker-appchain = { path = "../../vendor/poker-appchain" }
+# ===== 序列化（DTO/持久化 JSON 壳）=====
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ===== hex 编码（与 poker-wallet CLI 文件格式互通）=====
+hex = "0.4.3"
+# ===== 稳定字节 ABI（信封/库快照 borsh 编解码，与 wallet-core 同版本）=====
+borsh = "1"
+# ===== 错误 =====
+thiserror = "1"
+
+[dev-dependencies]
+tempfile = "3"

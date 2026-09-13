@@ -16,3 +16,13 @@ nightly:
 No AIR constraints, constants, relation identifiers, witness formulas, or component layouts are
 changed. When an upstream 1.2.x release contains these fixes, prefer removing this import and
 returning to crates.io dependencies.
+
+## Suite boundary
+
+These imported crates' own `cargo test` targets are **not** part of this repository's test
+suite (the official suite is per-crate, see `scripts/ci_local.sh`): the published 1.2.2
+packaging strips path-type dev-dependencies (`stwo-cairo-dev-utils`, …), so the vendored
+prover's test harness cannot compile. An ad-hoc `cargo test --workspace` must use
+`--exclude stwo-cairo-prover`. This is an upstream packaging artifact, not a soundness
+finding: the imported code here is the witness-closure path only, which is exercised by the
+first-party recursive AIR tests in `poker_zkvm/src/stwo_backend/recursive/`.

@@ -1,0 +1,137 @@
+{
+  "wasm_bytes": 3050318,
+  "node": "v24.4.1",
+  "n_iters": 12,
+  "gate_ms": 500,
+  "proofs": [
+    {
+      "file": "canonical_table9101.bin",
+      "bytes": 1185984,
+      "accepted": true,
+      "cold_ms": 1772.867834,
+      "p50_ms": 1699.2654580000008,
+      "p95_ms": 1797.464541999998,
+      "min_ms": 1693.0567910000009,
+      "max_ms": 1797.464541999998,
+      "within_gate_500ms": false,
+      "stats": {
+        "verified": true,
+        "error": null,
+        "archive_len": 1185984,
+        "table_id": 9101,
+        "log_size": 8,
+        "num_columns": 5391,
+        "transition_count": 5,
+        "batch_digest": "13c5c830b1849a4e2922c8af9cfe07385e076e37743d9c3712add75fb69d3dc8",
+        "internal_elapsed_ms": null,
+        "verifier": "stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)"
+      }
+    },
+    {
+      "file": "canonical_table9102.bin",
+      "bytes": 1156406,
+      "accepted": true,
+      "cold_ms": 1735.9292910000004,
+      "p50_ms": 1725.7088340000046,
+      "p95_ms": 1781.6697910000003,
+      "min_ms": 1714.9484999999986,
+      "max_ms": 1781.6697910000003,
+      "within_gate_500ms": false,
+      "stats": {
+        "verified": true,
+        "error": null,
+        "archive_len": 1156406,
+        "table_id": 9102,
+        "log_size": 8,
+        "num_columns": 5391,
+        "transition_count": 5,
+        "batch_digest": "7acf53b4655ce8748e7d714709652288db292728add69bda83a48b14fc6bc6ef",
+        "internal_elapsed_ms": null,
+        "verifier": "stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)"
+      }
+    },
+    {
+      "file": "canonical_table9103.bin",
+      "bytes": 1156565,
+      "accepted": true,
+      "cold_ms": 1688.4862920000014,
+      "p50_ms": 1698.2221250000002,
+      "p95_ms": 1724.7175419999985,
+      "min_ms": 1683.7742079999953,
+      "max_ms": 1724.7175419999985,
+      "within_gate_500ms": false,
+      "stats": {
+        "verified": true,
+        "error": null,
+        "archive_len": 1156565,
+        "table_id": 9103,
+        "log_size": 8,
+        "num_columns": 5391,
+        "transition_count": 5,
+        "batch_digest": "b0beb46964e307017a2e6eb98ba32135bd7dfe538be2e4bd3bcd66e6f8c997ef",
+        "internal_elapsed_ms": null,
+        "verifier": "stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)"
+      }
+    }
+  ],
+  "negatives": [
+    {
+      "file": "canonical_table9101.bin",
+      "kind": "mid_byte_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9101.bin",
+      "kind": "header_field_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9101.bin",
+      "kind": "truncated_quarter",
+      "rc": -1,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9102.bin",
+      "kind": "mid_byte_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9102.bin",
+      "kind": "header_field_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9102.bin",
+      "kind": "truncated_quarter",
+      "rc": -1,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9103.bin",
+      "kind": "mid_byte_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9103.bin",
+      "kind": "header_field_flip",
+      "rc": -2,
+      "rejected": true
+    },
+    {
+      "file": "canonical_table9103.bin",
+      "kind": "truncated_quarter",
+      "rc": -1,
+      "rejected": true
+    }
+  ],
+  "all_genuine_accepted": true,
+  "all_negatives_rejected": true,
+  "overall_p50_ms": 1699.2654580000008,
+  "overall_p95_ms": 1797.464541999998
+}

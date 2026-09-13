@@ -1,0 +1,16 @@
+[package]
+name = "stwo-dep-check"
+version = "0.1.0"
+edition = "2021"
+description = "M4-ACC-5 探针步骤1：stwo 2.3 依赖树对 wasm32-unknown-unknown 的编译友好性"
+
+# 独立 lockfile，不进任何 workspace（参照 poker-appchain-texasair 隔离模式）
+[workspace]
+
+[dependencies]
+stwo = "2.3"
+
+[features]
+default = []
+parallel = ["stwo/parallel"]
+prover = ["stwo/prover"]

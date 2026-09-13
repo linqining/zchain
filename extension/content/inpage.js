@@ -25,7 +25,7 @@
     return;
   }
 
-  const PROVIDER_VERSION = '0.1.0';
+  const PROVIDER_VERSION = '0.2.0-alpha';
   const REQUEST_TTL_SEC = 300; // 信封 expiry：now + 300s
   const DEFAULT_TIMEOUT_MS = 45_000;
 
@@ -103,7 +103,12 @@
     /** 能力矩阵（dapp 应据此降级，而不是探测 eth_*）。 */
     getCapabilities: () => call('zchain_getCapabilities'),
 
-    /** 换网：0.1 未交付（仅 devnet），后台返回 NotSupportedIn01；0.2 交付。 */
+    /**
+     * 换网（0.2）：networkId ∈ {zchain-devnet-1, zchain-testnet-1}（注册表外
+     * 网络——含 mainnet——一律 NetworkUnsupported）。异网切换必须经弹窗二次
+     * 确认；批准后 chain_id 绑定该账户（签名摘要域含 chain_id，跨网重放必
+     * 换摘要）。同网重复切换为幂等 no-op。
+     */
     switchNetwork: (networkId) => call('zchain_switchNetwork', { chainId: networkId }),
 
     /** 当前账户（公钥；未解锁返回空数组）。 */

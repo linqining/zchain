@@ -1,0 +1,12 @@
+# wasm32 下 secp256k1-sys（poker_l1 传递依赖，上游真实 C 代码）需要带 wasm32
+# 后端的 clang。macOS 自带 Apple clang 无 wasm target，改用 brew llvm 的 clang
+# 编译其官方 wasm/wasm.c（wasm-sysroot 由 crate 自带）——不改动任何上游源码。
+# 仅在本 workspace 生效（.cargo/config.toml 随本 workspace 走）。
+[target.wasm32-unknown-unknown]
+linker = "rust-lld"
+
+[env]
+CC_wasm32-unknown-unknown = "/usr/local/opt/llvm/bin/clang"
+CC_wasm32_unknown_unknown = "/usr/local/opt/llvm/bin/clang"
+AR_wasm32-unknown-unknown = "/usr/local/opt/llvm/bin/llvm-ar"
+AR_wasm32_unknown_unknown = "/usr/local/opt/llvm/bin/llvm-ar"

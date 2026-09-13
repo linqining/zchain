@@ -66,6 +66,9 @@ pub const DOMAIN_SPEND_DIGEST: &[u8] = b"poker-appchain.spend.digest.v1";
 pub const DOMAIN_VAULT_DIGEST: &[u8] = b"poker-appchain.vault.digest.v1";
 /// 域标签常量：证明批次根（pipeline::batch_root，见 docs/ABI.md §「批次根」）。
 pub const DOMAIN_BATCH_ROOT: &[u8] = b"poker-appchain.batch_root.v1";
+/// 域标签常量：批次根二级聚合（aggregate::aggregate_roots，v1.2.3 冻结；
+/// 见 docs/ABI.md §「聚合根」）。
+pub const DOMAIN_AGGREGATE_ROOT: &[u8] = b"poker-appchain.aggregate_root.v1";
 
 #[cfg(test)]
 mod tests {

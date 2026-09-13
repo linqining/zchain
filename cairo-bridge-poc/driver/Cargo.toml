@@ -1,0 +1,39 @@
+[package]
+name = "bridge-driver"
+version = "0.1.0"
+edition = "2021"
+description = "cairo-bridge-poc driver: mirrors verifier arithmetic, runs the Cairo executables in cairo-vm (proof mode), and produces STARK proofs via stwo-cairo 1.2.2"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+num-bigint = "0.4"
+num-traits = "0.2"
+serde_json = "1"
+cairo-vm = { version = "3.2.0", default-features = false, features = [
+    "extensive_hints",
+    "mod_builtin",
+] }
+cairo-lang-executable = "2.11.4"
+cairo-lang-runner = "2.11.4"
+cairo-lang-utils = "2.11.4"
+cairo-lang-casm = "2.11.4"
+stwo = { version = "2.3", features = ["parallel", "prover"] }
+cairo-air = "=1.2.2"
+stwo-cairo-adapter = "=1.2.2"
+stwo-cairo-common = { path = "../../third_party/stwo-cairo/common", features = ["prover"] }
+stwo-cairo-prover = { path = "../../third_party/stwo-cairo/prover" }
+stwo-cairo-serialize = "1.2.2"
+starknet-crypto = "0.6.2"
+starknet-ff = "0.3.7"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+
+# registry 的 stwo-cairo-adapter 1.2.2 会传递依赖 registry 版 stwo-cairo-common 1.2.2，
+# 后者仍带 Mask::to_int()（当前 nightly 已移除）。与 zchain 根 workspace 相同，统一
+# 重定向到已打补丁的 vendored 版（third_party/stwo-cairo/README.md）。
+[patch.crates-io]
+stwo-cairo-common = { path = "../../third_party/stwo-cairo/common" }

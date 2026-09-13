@@ -1,0 +1,115 @@
+# M8 安全与反滥用收尾包：CI 门（本地等价脚本 scripts/ci_local.sh）。
+#
+# 纪律：
+# - 全部测试/构建一律 --release（仓库惯例：ZK/密码学路径只验 release 语义）；
+# - toolchain 由根 rust-toolchain.toml 决定（pinned nightly），runner 上
+#   rustup 会按文件自动安装，无需显式 setup 步骤；
+# - gateway-smoke 依赖 scripts/explorer_gateway_smoke.sh（独立交付物），
+#   本文件只引用，不在 CI 内实现。
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: build (workspace, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo build --release
+        run: cargo build --release
+
+  test-core:
+    name: test-core (rust crates, release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: poker_l1 (lib)
+        run: cargo test --release -p poker_l1 --lib
+      - name: poker-appchain
+        run: cargo test --release -p poker-appchain
+      - name: poker-settlement-core
+        run: cargo test --release -p poker-settlement-core
+      - name: poker-wallet
+        run: cargo test --release -p poker-wallet
+
+  test-extension:
+    name: test-extension (node --test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: node --test
+        run: node --test tests/*.test.js tests/adapters/*.test.js
+
+  website-scans:
+    name: website-scans (build + banned-words + links + a11y)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build site
+        run: python3 website/build.py
+      - name: banned-words scan
+        run: python3 website/tools/scan_banned_words.py
+      - name: link check
+        run: python3 website/tools/check_links.py
+      - name: a11y check
+        run: python3 website/tools/check_a11y.py
+
+  gateway-smoke:
+    name: gateway-smoke (explorer gateway end-to-end)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build poker-appchain bins
+        run: cargo build --release -p poker-appchain
+      - name: explorer gateway smoke
+        run: bash scripts/explorer_gateway_smoke.sh
+
+  # M8-ACC-7：结构化 fuzz 冒烟（push/PR 短预算；完整预算与历史记录见
+  # fuzz/README.md）。任何 panic 即失败——fail-closed 语义的运行时验证。
+  fuzz-smoke:
+    name: fuzz-smoke (cargo-fuzz, short budget)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: fuzz
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: fuzz note_abi
+        run: cargo fuzz run note_abi -- -max_total_time=120
+      - name: fuzz soft_confirm_api
+        run: cargo fuzz run soft_confirm_api -- -max_total_time=120
+      - name: fuzz settlement_witness
+        run: cargo fuzz run settlement_witness -- -max_total_time=120
+
+  # WEB-ACC-5（仓库内部分）：发布准备门——SBOM（CycloneDX，全 workspace，
+  # JSON）+ 版本一致性检查（ABI.md 头 / build.py SITE / docs-status 版本串
+  # 必须一致）。SBOM 作为 artifact 上传供发布流水线消费。
+  release-prep:
+    name: release-prep (SBOM + version consistency)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
+      - name: generate SBOM (all crates, CycloneDX json)
+        run: cargo cyclonedx --all --format json
+      - name: version consistency check
+        run: bash scripts/check_release_versions.sh
+      - name: upload SBOM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom-json
+          path: "**/*.cdx.json"
+          if-no-files-found: error

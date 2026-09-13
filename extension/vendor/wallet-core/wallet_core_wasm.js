@@ -1,6 +1,86 @@
 /* @ts-self-types="./wallet_core_wasm.d.ts" */
 
 /**
+ * 备份导出（需解锁会话）：REAL/PLAY 双库快照 + keystore/DEK 信封 +
+ * 声明索引 → 口令加密的 EncryptedBackup（borsh hex 传输；JS 侧转二进制
+ * 文件下载）。profile 同 wallet_create："interactive"（生产 Argon2id
+ * 参数）或 "test"（仅测试/冒烟）。
+ * @param {string} password
+ * @param {string} profile
+ * @param {string} now
+ * @returns {string}
+ */
+export function wallet_backup_export(password, profile, now) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(profile, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(now, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_backup_export(ptr0, len0, ptr1, len1, ptr2, len2);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * 备份导入（**无会话**：恢复路径在锁定态可用）。拒绝面：结构/魔数篡改
+ * （Tampered）、未来版本（UnsupportedVersion，解密前拒绝）、错误口令
+ * （AEAD 认证失败 → BadPassword）、声明索引与重建索引不一致
+ * （Tampered）。成功时 keystore 信封再用同一口令开启校验一次
+ * （fail-closed 快路径）并回 public_key；恢复数据以密文+信封 hex 返回，
+ * 由 JS 侧落为新账户，**不**自动替换当前会话。
+ * @param {string} backup_hex
+ * @param {string} password
+ * @returns {string}
+ */
+export function wallet_backup_import(backup_hex, password) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(backup_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(password, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_backup_import(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * binding 状态查询（撤销粘滞/时间窗/日限；无会话依赖）。
+ * @param {string} binding
+ * @param {string} now
+ * @returns {string}
+ */
+export function wallet_binding_status(binding, now) {
+    let deferred3_0;
+    let deferred3_1;
+    try {
+        const ptr0 = passStringToWasm0(binding, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(now, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_binding_status(ptr0, len0, ptr1, len1);
+        deferred3_0 = ret[0];
+        deferred3_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
  * @returns {string}
  */
 export function wallet_core_meta() {
@@ -39,6 +119,26 @@ export function wallet_create(password, profile) {
 }
 
 /**
+ * UI 展示门视图（claim 门 + 托管风险提示）。Extension 0.2 的就绪态恒为
+ * offline（Vault/verifier/BFT finality 均未接入）→ REAL 页无 claim 操作、
+ * 常显托管风险提示；PLAY 页无任何 REAL 字段。UI 壳层只消费本输出，
+ * 不得自行决定（display.rs 是唯一事实源）。
+ * @returns {string}
+ */
+export function wallet_display_views() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.wallet_display_views();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
  * 本地铸造一张 PLAY 余额 note（devnet 水龙头 stub：无网络、无链上 mint，
  * 仅用于 0.1 桌面/买入/结算签名链路演示；真实同步在 0.2 接 `sync` trait）。
  * @param {string} amount
@@ -56,6 +156,24 @@ export function wallet_faucet_play(amount) {
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * REAL/PLAY 分库 note 列表 + 按资产类余额（脱敏：无 spend secret/nullifier）。
+ * REAL 侧同样只出承诺/金额/proof 状态——REAL 操作面（提现/claim）0.2 不开放。
+ * @returns {string}
+ */
+export function wallet_get_all_notes() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.wallet_get_all_notes();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
     }
 }
 
@@ -131,6 +249,75 @@ export function wallet_preview(req, now) {
 }
 
 /**
+ * 限额/约束 enforcement（Extension 0.4 签名路径第二层；无会话依赖）。
+ * 输出 `{admitted, rejected_reason, status}`（拒绝是 verdict，非 error）。
+ * @param {string} binding
+ * @param {string} req
+ * @param {string} now
+ * @returns {string}
+ */
+export function wallet_session_admit(binding, req, now) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(binding, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(req, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(now, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_session_admit(ptr0, len0, ptr1, len1, ptr2, len2);
+        deferred4_0 = ret[0];
+        deferred4_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * 生成满足约束的 delegated key（OS 随机源；wallet-core 单实现）。
+ * 输入 = session_check 模块文档中的 binding 形状，其中
+ * `delegatedPublicKey` **不可提供**（由本入口生成后返回）；
+ * `bindingId` 可缺省（缺省时用 OS 随机源生成 32B）。
+ * 返回 binding 摘要（公钥级信息）；私钥不入返回值。
+ * @param {string} req
+ * @returns {string}
+ */
+export function wallet_session_key_create(req) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(req, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_session_key_create(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
+ * 本会话内生成的 delegated key 列表（仅公钥级字段；锁定/切换账户即清空，
+ * 如实反映"私钥不持久化"边界）。
+ * @returns {string}
+ */
+export function wallet_session_key_list() {
+    let deferred1_0;
+    let deferred1_1;
+    try {
+        const ret = wasm.wallet_session_key_list();
+        deferred1_0 = ret[0];
+        deferred1_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+    }
+}
+
+/**
  * @param {string} req
  * @param {string} now
  * @returns {string}
@@ -175,6 +362,26 @@ export function wallet_sign_settle_input(record_borsh, input_index) {
 }
 
 /**
+ * SNIP-12 `AuthorizeZChainKey` 摘要（revision 1；授权确认页展示面）。
+ * @param {string} msg
+ * @returns {string}
+ */
+export function wallet_snip12_authorize_digest(msg) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(msg, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_snip12_authorize_digest(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+    }
+}
+
+/**
  * @param {string} keystore
  * @param {string} password
  * @returns {string}
@@ -193,6 +400,25 @@ export function wallet_unlock(keystore, password) {
         return getStringFromWasm0(ret[0], ret[1]);
     } finally {
         wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
+    }
+}
+
+/**
+ * @param {string} detail
+ * @returns {string}
+ */
+export function wallet_verify_settlement_detail(detail) {
+    let deferred2_0;
+    let deferred2_1;
+    try {
+        const ptr0 = passStringToWasm0(detail, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wallet_verify_settlement_detail(ptr0, len0);
+        deferred2_0 = ret[0];
+        deferred2_1 = ret[1];
+        return getStringFromWasm0(ret[0], ret[1]);
+    } finally {
+        wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
     }
 }
 function __wbg_get_imports() {

@@ -305,6 +305,7 @@ mod tests {
             tx_list: vec![],
             parent_hashes: vec![[salt; 32]],
             author_sig: vec![0u8; 65],
+            forced_tx_hashes: vec![],
         }
     }
 

@@ -1,0 +1,59 @@
+[package]
+name = "poker-wallet"
+version = "0.1.0"
+edition = "2024"
+description = "ZChain shared wallet core (wallet-core, plan-appchain §6.12.3) + minimal CLI wallet"
+license = "BUSL-1.1"
+
+# wallet-app vendor 快照（zchain 仓库 HEAD = wallet-core 的唯一事实源，见
+# wallet-app/README.md "vendor 快照"）：workspace 继承依赖改写为具象版本。
+# 库名 wallet_core：共享核心语义（浏览器扩展/Web/桌面/移动 不得各自实现密码学）。
+[lib]
+name = "wallet_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "poker-wallet"
+path = "src/bin/poker-wallet.rs"
+
+[dependencies]
+# ===== 校验面接入（复用 appchain 既有密码学，不重实现）=====
+poker-appchain = { path = "../poker-appchain" }
+# ===== Stark curve / SNIP-12 摘要（poseidon_hash_many + 签名验证）=====
+starknet-crypto = { version = "0.6", default-features = false, features = ["alloc"] }
+# ===== secp256k1 owner / session key =====
+secp256k1 = { version = "0.29", features = ["recovery", "rand", "global-context"] }
+# ===== 稳定字节 ABI =====
+borsh = { version = "1.7", features = ["derive"] }
+# ===== 哈希与编码 =====
+blake2 = "0.10.6"
+sha3 = "0.10.8"
+hex = "0.4.3"
+# ===== 序列化（CLI JSON 文件驱动）=====
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# ===== 错误 =====
+thiserror = "1.0.61"
+# ===== 随机源（密钥/salt/nonce 生成；OsRng）=====
+rand = "0.8.5"
+# ===== keystore/backup：Argon2id + AEAD + zeroize =====
+argon2 = "0.5"
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+zeroize = { version = "1", features = ["derive"] }
+
+[features]
+default = []
+# ===== 浏览器 WASM 绑定（plan-appchain §6.12.4 Extension 0.1）=====
+# 仅 wasm32 构建启用；默认构建/测试/CLI 完全不受影响。
+wasm = ["dep:wasm-bindgen"]
+
+# ---- 仅 wasm32 目标（native 构建不编译，43 个测试/CLI 零影响）----
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2.17", features = ["js"] }
+wasm-bindgen = { version = "=0.2.127", optional = true }
+
+# WASM bin（src/wasm.rs 的模块文档含完整构建/绑定命令）。
+[[bin]]
+name = "wallet_core_wasm"
+path = "src/wasm.rs"
+required-features = ["wasm"]

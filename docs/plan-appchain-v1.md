@@ -1,12 +1,126 @@
 # 自研扑克 L1（appchain）v1 技术方案
 
-> 状态：2026-09-12 v1.3 产品化与对外发布补充稿。功能模块 / 实现内容清单 /
-> 验收测试 / 官网与文档发布四段式。
+> 状态：2026-09-13 v1.4 增补稿（v1.3 产品化基础上：代币经济 + v1.5 共识 +
+> 钱包全线 + 外部评审采纳，排期与状态见 `docs/roadmap-schedule.md`）。
+> 功能模块 / 实现内容清单 / 验收测试 / 官网与文档发布四段式。
 > 决策依据与推导过程见会话结论（Hyperliquid 模式、费率即数据、可证明 rake、
 > 流式证明、note 账本）。基线锚点 `plan_d_perf.md`、`TEXAS_TAGGED_AIR.md` 及
 > §1 复用映射引用的 AIR/证明栈文件位于全量仓库 `/Users/mac/projects/poker_texas_air`
 > （本仓库内的同名 crate 是精简集成版）；实现 crate `poker-appchain/` 落在
 > **本仓库**根下，2026-09-05 迁入。
+
+## ⭐ 实现状态（2026-09-13 第六轮：M0–M9 缺口收口 + 常规测试立档）
+
+对照 §2 全部 47 项 ACC 判据逐项审计（36 达成 / 10 部分达成 / 0 未达成），
+本轮收口 6 项部分达成项：
+
+- **M0-ACC-2**：ABI v1.3 实现-规范一致性核对**评审记录归档**
+  （`poker-appchain/docs/ABI.md` 头注，判别值冻结/golden/additive 三类证据）；
+- **M3-ACC-4**：限流告警规则 `rate_limit_storm` 进 `evaluate_alerts`
+  （`HealthInputs.rate_limit_rejected_window` + 注入断言，M9-ACC-2 口径）；
+- **M4-ACC-4**：积压降级**端到端注入**（门控引擎灌 12 任务过高水位 →
+  degraded + `proof_backlog_degraded` 告警 → 放行 → 积压清空、降级解除，
+  `pipeline.rs::backlog_degraded_end_to_end_injection_and_recovery`）；
+- **M5-ACC-3**：1000 手批量审计**实测留痕**（selftest --hands 1000 →
+  export → verify 零差异，5003 帧 / rake_total 39240；独立性边界维持
+  runbook 如实声明）；
+- **M7-ACC-1**：提现**并发混沌**专项（4 线程 12 请求、2 组跨线程碰撞
+  request_id，exactly-once 10 成功 / 2 幂等拒，账本终态与并发序无关，
+  `tests/te_m2.rs::withdrawal_concurrent_chaos_exactly_once_per_request`）；
+- **M7-ACC-2**：SLA **达标演练**（20 笔受控 5 分钟打款 → p95 = 300s
+  ≤ 600s 门槛、breached_count = 0，`withdrawal_sla_p95_within_ten_minute_gate`）。
+
+余 4 项部分达成为外部依赖/决策门（M4-ACC-5 用户豁免口径、M6-ACC-5 真机
+矩阵、M9-ACC-1 host-validate 引擎口径、M9-ACC-3 prover 演练未脚本化），
+如实维持。
+
+**复验修复**：① 重启回归——`apply_genesis_alloc` genesis 幂等对拍
+version 硬编码 0，与运行期推进的持久化 validator-set version 必然失配
+（全节点重启 fail）；修复为沿用持久化对象版本号（restart_catchup 演练
+修复后 PASS skew=0）。② `zchain test-e2e` 夹具过时（epoch/空集/零
+state_root/假签名）——修复为真实 genesis validator + 真实执行 state_root
++ 真实可恢复证书签名。
+
+**常规测试立档**：`scripts/e2e_acceptance.sh`（full/quick 两档）成为
+e2e 验收唯一入口——workspace release 套件 + 节点 e2e + 4 场景演练
+（**串行强制**）+ extension 浏览器 E2E + 独立 workspace + fuzz 冒烟 +
+1000 手审计留痕；逐门结果时间戳落档 `docs/test-records/`。立档日全量
+记录见 `docs/e2e-acceptance-2026-09-13.md`（本日另一教训：并行跑两套
+7 节点演练会因 CPU 争用产生 commit 引擎时序假阴性，脚本已强制单流程）。
+
+## ⭐ 实现状态（2026-09-13 第五轮：二次盘点核验 + kill-2 死锁修复）
+
+对照 `docs/roadmap-schedule.md` 全量复验二次盘点五项交付——阈值 BLS（t-of-n
+DKG）、DA v2（object_type 签名域 + Merkle 分块挑战-应答）、withdrawal_root
+进 appchain checkpoint（additive）、bond/slash 对账恒等（`SlashLedger::
+reconciliation_digest` 链式摘要 + `slash.rs`/`bond.rs` 两侧 reconcile +
+`slash_ledger_digest:<hex>` 跨仓锚定）、合规运营化框架（geo_policy 版本化 +
+sequencer 准入门接线 + 审计账 + 指标）——实现与测试全部在树。**测试基线**：
+全量 release 套件 3714/0（54 目标；`--exclude stwo-cairo-prover`，套件口径
+见排期表表头如实标注）+ extension 154/154 + zwallet 19/19。
+
+**复验发现的回归与修复**：阈值/聚合 7 节点演练 kill-2 场景（存活恰 = quorum）
+3 次尝试全败——引用轮闭合检查把掉线 validator 永不产出的 vertex 当 gossip
+在途无限等待，且候选按 round-asc 序最老者优先、失败即整体弃权 → commit 冻死
+（vertex 平面持续推进而 tip 停滞，二次盘点声明的 PASS=9 不可复现）。修复：
+`bullshark::author_has_vertex_since` + `COMMIT_ABSENCE_ROUNDS` 前沿缺席分类
+（DAG 内容纯函数，finality 口径不变，见 `consensus/bullshark.rs` 模块头 L6）。
+修复后：阈值演练第 1 次尝试 PASS=9 FAIL=0（kill-2 后 QC 24→32、mode=
+threshold、重启恢复 fail-closed），聚合演练 PASS=5 FAIL=0；受影响目标
+poker_l1 lib 1896 / poker-appchain 390 / zchain 17 全绿。上游洗牌链阶段 0
+（2026-09-12 PASS，`poker-appchain/docs/SHUFFLE_STAGE0.md`）状态同步入表。
+
+## ⭐ 实现状态（2026-09-13 第四轮：排期表全线开发）
+
+按 `docs/roadmap-schedule.md` 完成各组开发（多工作流并行，逐项证据见排期表
+行内标注与各 docs/ 报告）。**测试基线（终验实测）**：poker_l1 lib 1873 /
+poker-appchain 389 / settlement-core 36 / wallet 43 / zchain 17 / texasair 16
+全绿；网关 smoke 85 PASS；扩展 node 154/154 + E2E 30/30+36/36+12/12；可复现
+构建 PASS 6/6；网站三扫描 0/0/全过（ABI v1.3）。
+
+**v1.5 共识**：ForceInclude 强化（receipt sidecar 持久化、forced 集进 vertex
+载荷）；SlashLedger 真实罚没（stake 扣减→归零停出块）；checkpoint + 聚合 QC
+（blstrs 零新依赖，7 节点演练 kill-2 后 QC 推进；如实命名聚合 QC 非阈值 BLS）；
+DA 凭证闭环（独立域防重放，M8-ACC-8 场景过）。修复 commit 路径 sig 排序
+load-bearing 既有 bug。
+
+**代币经济 TE**：TE-E0 三仓枚举（FIXED_RAKE_BURN=2，上游 mode2 完整 STARK
+实测）；TE-M1 AssetId{domain,token}（v2 一次性改型，同域跨 token 攻击面
+fail-closed）；TE-M2 REAL 多币种（DepositV2=9/WithdrawRequestV2=10，per-token
+托管恒等式，轧差拒绝结构性强制）；TE-M3 GTS（RegisterGameToken=11/Issue=12/
+Burn=13，价带双向，供给恒等对账）；TE-M4 FixedRakeBurn 合约侧销毁处置
+（rake_disposal 单一判定点，GAME 桌一手 e2e：outstanding 收缩闭环）；
+TE-M5 多币种呈现（网关资产摘要+扩展分栏+网站说明）；TE-M6 Free 模式
+（14/15/16，GasCreditLedger 与 CustodyLedger 物理隔离，INV-TE-8/9）。
+合规运营化框架（GeoPolicy 版本化/KYC 制动位/限额）实现已并入工作树。
+
+**钱包全线**：Extension 0.2→0.4.0-alpha（多账户/网络切换/备份恢复/proof
+portal 含 wasm 复验/SNIP-12 会话密钥授权/限额双层/capability matrix/
+可复现构建 PASS 6/6）；Tauri 桌面钱包 MVP（Tauri v2 + zwallet，CLI 互通）。
+
+**探针与决策**：stwo-wasm 探针 CONDITIONAL GO → **路径 A 已拍板并交付**
+（vendored cfg 门解除，canonical 真证明浏览器验证 p50 ~1.7s，超 500ms
+3.5× 按低频口径如实标注；路径 B 留后续）；Cairo 递归桥 PoC CONDITIONAL
+（官方 verifier_core 写 Cairo 验证程序全链路跑通；直接合约验 AIR 24.7B gas
+NO-GO，递归桥 10M–100M gas，无信任退出 CONDITIONAL——前置 FRI 降 q 等）；
+GPU 探测 v1 不引入。
+
+**洗牌/发牌证明链（路线 A+B，用户拍板）**：上游阶段 0 PASS——全链单批
+13 行（shuffle×4→reveal×4→下注→终局）prove+verify 通过，协议行边际成本
+≈0，log 8 维持；原生 sidecar 校验必拒 deck 篡改（AIR 盲区的实证正当性）。
+消费侧：hand_binding v2（poseidon 域，deck_chain_digest+reveal_commitment
+进绑定）、REAL×协议行 fail-closed、镜像偏移表钉扎、deck 摘要算法裁决冻结
+（上游同源 poseidon 折叠）。待办：wire 格式冻结、hooks 实时接线（阶段 1 C5）、
+v2 owner 进 AIR。
+
+**密钥与合规**：KeyProvider 可插拔注入（Env/File/Remote 三实现，无固定种子
+回退双重钉住）+ 轮换工具整合。
+
+**待办与边界（如实）**：洗牌链 wire 冻结与实时接线；阈值 BLS（聚合 QC 已
+预留接入点）；TE-M5 对账页部署面；stwo-wasm 优化（如需达标 500ms 需路径 B
+或 simd 深化）；canonical AIR 未纳入 v2 owner（v2 证明覆盖为水位级）；
+fold-win 计费语义（业务决策）；部署依赖项仍以 `RELEASE_PREREQUISITES.md`
+为准。
 
 ## ⭐ 实现状态（2026-09-12 第二轮：BLOCKERS 全关 + wallet-core + 产品化站点）
 
@@ -49,6 +163,98 @@ WALLET-ACC 覆盖对照见 `poker-wallet/README.md` 与 `extension/ACCEPTANCE.md
 poker_l1 / poker-appchain / poker-settlement-core / poker-wallet / zchain
 bin / poker-appchain-texasair / texas（poker_texas_air 工作区）全部套件
 绿（数字见最终验证报告）。
+
+## ⭐ 实现状态（2026-09-13：E2 闭环 + outer_aggregate + GPU 探测结题）
+
+**explorer E2 闭环（§6.5）**：证明注册表 `proof_registry.rs`（冻结 JSONL
+契约 + pipeline `attach_proof_registry` 挂账，写失败不吞完成项的 sidecar
+语义；base64 手写实现钉 RFC 4648 向量，零新依赖）；网关
+`/api/v1/proofs` + `/api/v1/proof/{binding}`（引擎响应头 + base64 归档
+字节）+ settlement 明细补 `payout_root` 与 proof 链接。**E2 验收链路
+实测通过**：帧 → settlement(hand_binding) → payout_root → 归档下载
+（HTTP 200 + 独立引擎 verify），smoke 62 PASS。
+
+**M4 outer_aggregate**：`aggregate.rs`（域 `poker-appchain.aggregate_root.v1`
+确定性 Poseidon 折叠，golden 冻结）+ pipeline `aggregate_due(now, interval)`
+时间窗触发（空窗 None、不重复聚合）+ sequencer `record_aggregate`/
+`attach_aggregate_log` sidecar/恢复等价 + watcher `--aggregate-log` 独立
+重算校验（换根负例 exit 1 `aggregate_mismatch`）+ 网关
+`/api/v1/aggregates` 与 status 聚合字段。ABI **v1.2.3**（加法式：聚合根、
+注册表契约、端点表；网站版本串同步，史实性 v1.2.2 引用保留）。
+
+**M0 GPU 探测结题**：`docs/gpu-prover-probe.md`——结论 v1 不引入 GPU
+prover（CPU 基线 777ms p95 对 ≤3s 门槛余量 ~4×；DR-1 结构性结论不因
+GPU 改变），含重启评估触发条件。
+
+**终验 B（独立复跑）**：appchain 155 / poker_l1 1809 / settlement-core 29
+/ wallet 43 / zchain 17 全绿；E2 链路与聚合 watcher 正负例 HTTP 级实录；
+网站三扫描 0/0/全过；ci_local **14 PASS / 0 FAIL**（含 fuzz-smoke 实跑）。
+仍开放：indexer 持久化（archive 节点级）、E3 proof portal 部署面、
+E4 BFT 视图（v1.5）、线上桥校准、钱包产品线（RELEASE_PREREQUISITES）。
+
+## ⭐ 实现状态（2026-09-12 第三轮：Phase 1 收尾 + 浏览器开发 E1/E2）
+
+**M3-ACC-6 ForceInclude（plan §5.3）**：新模块 `poker_l1/src/force_include.rs`
+——SeenReceipt（节点 secp256k1 签名回执，域 `0x53||chain_id||tx_hash||
+seen_at`）+ RPC `get_seen_receipt`/`check_censorship`；inclusion deadline
+（`--inclusion-deadline-ms`，默认 10000，0=禁用且与旧路径对拍回归）到期
+交易强制包含、组内 tx_hash 升序先于普通交易、included 去重；CensorshipProof
+三态（Censored/Included/NotYetDue）+ 命中计数（`zchain_censorship_detected_
+total`，v1 只记录不罚没）。测试：poker_l1 lib 1788→1809 全绿 + 端到端
+小样；3 节点组网回归 PASS。边界如实：receipt 内存态、多 validator forced
+集不进共识载荷（活性风险已文档化）、checkpoint 窗口用块数近似。
+
+**M3-ACC-7 watcher 独立化（收尾）**：`appchain_watcher` 独立进程——软确认
+链完整性、结算语义（表策略逐条 validate_settlement）、proven log 批次根
+按窗口独立重算、checkpoint 对拍、双链分叉检测；四类篡改负例全部退出码 1
+且类别定位正确；exit 0/1/2 语义 + `--json-out` 接告警。
+
+**M8**：① proven-log sidecar（`attach_proven_log`/`replay_restoring_proven`，
+JSONL 契约冻结、撕裂尾行容错、越界拒绝）——关闭"水位/批次根重启即失"
+的观测缺口；② checkpoint 导出/校验（`checkpoint.rs`，digest 全字段对拍）；
+③ bond 内部记账框架 v1（`bond.rs`，只记录不真实罚没）；④ 密钥轮换停机
+清单工具（`rotation.rs`+`seq_key_rotate` bin，域分离签名，篡改拒绝；链内
+热轮换属 v1.5，runbook §5 流程）。
+
+**M5-ACC-3（v1）**：`rake_audit` 工具——export（WAL 重放→逐手 pots/rake
+base/分账/守恒数字 JSON）+ verify（**只用 poker-settlement-core 的独立
+代码路径**：contested-only 口径、费率/分账/守恒全重算）；4 类篡改负例
+（改 rake/改分账/翻 contested 标记/删明细）全部退出码 1。边界：同仓独立
+路径 ≠ 第三方独立仓库，最终形态仍待外审。
+
+**M9**：runbook `docs/runbook.md`（sequencer 重启/prover 积压/提现故障/
+工具/密钥轮换，含 evaluate_alerts 5 条告警对照）+ 重启演练脚本
+（head_hash 一致，实测 RTO 26ms 开发机样本）；四延迟指标 M9-ACC-4
+（`latency_report`：soft_confirm p50/p95/p99 + proof_ready p50/p95，
+bft/claimable 未上线如实输出 null）。
+
+**区块链浏览器 E1/E2（§6.5 Explorer）**：`explorer_gateway` 只读网关——
+appchain WAL 回放态（replay + proven-log 恢复水位）+ L1 节点 RPC 代理
+（HTTP 优先、newline TCP 回落）；端点 status/frames/settlements/
+settlement/{binding}/batch_roots/metrics/l1.{metrics,block,tx}；每 IP 令牌
+桶限流、默认只绑回环（`--public` 显式并告警）、篡改 WAL 拒启。网站接线：
+explorer 页同源 fetch 实时数据 + 刷新按钮，无网关静默保持 SAMPLE DATA。
+**E1 验收实测**：3 节点 devnet 起网，经网关取回真实高度与块（代理
+`zchain_block_height` 与节点直连一致，块含 DAG commit certificate）；
+**契约交叉校验**：watcher 对网关 fixture 独立重算判定 CONSISTENT（该对拍
+曾暴露 fixture 用 settlement_binding 而非 hand_binding 折叠的漂移，已修
+正对齐 pipeline 生产语义）。E2 剩余：proof 归档下载、archive 级持久化
+indexer（见路线图 open 项）。
+
+**CI**：`.github/workflows/ci.yml`（build/test-core/test-extension/
+website-scans/gateway-smoke 五 job）+ `scripts/ci_local.sh` 本地等价门
+（11 PASS / 0 FAIL 实测）。
+
+**测试基线（本轮终验实测）**：poker_l1 lib 1809 / poker-appchain 全目标
+131 / poker-settlement-core 29 / poker-wallet 43 / zchain bin 17 全绿；
+extension 79/79；gateway smoke 41/41；网站三扫描 0 命中/0 断链/全过。
+记录：n=1 单 validator 不出块（n=1 从非目标形态，组网验收以 n≥3 为准）。
+
+**仍开放（后续轮次）**：M4 批次递归聚合（outer_aggregate 定期聚合）、
+M7 线上桥校准、proof 归档下载 + 持久化 indexer、
+Extension 0.2/0.4、独立钱包应用、stwo-wasm——发布依赖项仍以
+`website/RELEASE_PREREQUISITES.md` 为准。GPU 路线探测已结题（报告
+`docs/gpu-prover-probe.md`，结论 v1 不引入）。
 
 ## ⭐ 实现状态（2026-09-12：§5.2 P0 全部关闭 + stwo 端到端 + 多节点组网验收）
 
@@ -217,7 +423,7 @@ B6 texas 接线、B7 出入金链上侧）。
 **实现内容**：
 - [ ] 逐街流式证明基准：4 段 street 部分证明 + 4 次递归聚合 vs 整手一次性证明，
       在 release / pinned nightly / 参考硬件上测延迟与 CPU 成本曲线（1/2/4/8 桌并发）
-- [ ] GPU 路线探测（可选）：stwo GPU prover 可行性调研，仅出报告不实施
+- [x] GPU 路线探测（可选，仅出报告）：`docs/gpu-prover-probe.md`——v1 不引入 GPU prover（CPU 基线 777ms p95 对 ≤3s 门槛余量 ~4×）；含重启评估触发条件
 - [ ] 规范冻结：note ABI、FeePolicy ABI、软确认链帧格式、结算选择子 witness 形状
 - [ ] 决策记录落档（沿用 `PERFORMANCE_FOLLOWUPS.md` #24 的处置格式）
 
@@ -295,7 +501,7 @@ B6 texas 接线、B7 出入金链上侧）。
 **实现内容**：
 - [ ] 街级证明任务流水线：street 结束触发部分证明，递归聚合衔接（若 M0 通过）
 - [ ] 按桌并行 worker 池：任务队列背压、优先级（real 桌 > play 桌）
-- [ ] 批次聚合：`outer_aggregate` 定期（如 5 min）聚合已验证证明，产出批次根
+- [x] 批次聚合：`outer_aggregate` 定期聚合已验证证明产出聚合根（2026-09-13 交付：`aggregate.rs` Poseidon 域 `poker-appchain.aggregate_root.v1` 折叠 + pipeline `aggregate_due` 时间窗触发 + sequencer 记录/sidecar 持久化 + watcher 独立重算校验；注：聚合根为确定性承诺折叠，stwo 递归证明聚合属上游/Phase 2）
 - [ ] 证明注册表 + host 验证器（复用现有 witness 兼容验证器）
 - [ ] 降级档位：证明积压时自动降为整手批量慢档 + 告警（SLA 接口预留）
 - [ ] 桌级证明产出指标（延迟直方图）

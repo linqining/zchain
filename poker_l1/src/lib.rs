@@ -41,6 +41,7 @@ pub mod crypto_precompiles;
 pub mod economics;
 pub mod error;
 pub mod executor;
+pub mod force_include;
 pub mod governance;
 pub mod indexer;
 pub mod metrics;

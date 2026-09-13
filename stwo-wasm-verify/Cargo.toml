@@ -1,0 +1,24 @@
+# stwo-wasm-verify — 独立 workspace（path A：canonical 真证明的 STARK wasm 验证器）
+#
+# 隔离模式与 stwo-wasm-probe 相同：自带 lockfile，不进 zchain 根 workspace。
+# 本 workspace 内 [patch.crates-io] 把整张依赖图中的 `stwo = "2.3"` 重定向到
+# third_party/stwo-wasm-patch/stwo-2.3.0（cfg 门 → wasm-poseidon feature 门的
+# vendored 副本）——只在本 workspace 生效，registry 原件与 zchain 根 workspace
+# 均不受影响。
+#
+# 成员：
+#   crates/verify-core  — crate A：canonical 归档 → verify_canonical_proof_wasm()
+#                         （native 与 wasm32 共用同一份验证逻辑）
+#   crates/wasm         — crate B：cdylib，手写 C ABI（探针已验证模式，无 wasm-bindgen）
+#   crates/gen-native   — 原生出证工具：poker_texas_air 真实 canonical 证明 ≥3 份落盘
+[workspace]
+resolver = "2"
+members = ["crates/verify-core", "crates/wasm", "crates/gen-native"]
+
+[patch.crates-io]
+stwo = { path = "../third_party/stwo-wasm-patch/stwo-2.3.0" }
+
+[profile.release]
+opt-level = 3
+# 验证器 wasm 不追求链接时间最小化，单 codegen unit 换稳定性能。
+codegen-units = 1

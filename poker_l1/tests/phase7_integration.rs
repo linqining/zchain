@@ -351,6 +351,7 @@ mod subtask_35_6_12 {
                 tx_list: vec![],
                 parent_hashes: vec![],
                 author_sig: vec![0u8; 65],
+                forced_tx_hashes: vec![],
             };
             let h = dag.insert(vertex);
             round0_hashes.push(h);
@@ -372,6 +373,7 @@ mod subtask_35_6_12 {
                 tx_list: vec![],
                 parent_hashes: parents,
                 author_sig: vec![0u8; 65],
+                forced_tx_hashes: vec![],
             };
             dag.insert(vertex);
         }
@@ -432,6 +434,7 @@ mod subtask_35_6_12 {
                 tx_list: vec![],
                 parent_hashes: vec![],
                 author_sig: vec![0u8; 65],
+                forced_tx_hashes: vec![],
             };
             dag.insert(vertex);
         }
