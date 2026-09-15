@@ -495,3 +495,31 @@ invoke v1 组装与签名、Starknet JSON-RPC 客户端、余额/合约调用/�
   语义如实提示）；公网预设 class hash（ArgentX Cairo-1）可在 UI 覆盖。
 - devnet 水龙头（dev_faucet：注册 pubkey + 出资）与链端验签依赖注册表，
   为 dev 链扩展；真实网络验签在账户合约内进行。
+
+---
+
+## Extension 0.6.1 验收对照（一键 onboarding 交互，2026-09-16 交付）
+
+交互要求：新用户打开即"一键创建钱包"；已有钱包的老用户不触发创建流程
+（参考 MetaMask onboarding 模式）。
+
+| 要求 | 状态 | 覆盖位置 |
+|---|---|---|
+| 新用户首屏 = 欢迎页（一键创建 + 高级自定义 + 导入入口） | ✅ | `popup:overview`（onboarded 判定）+ `renderWelcome`；E2E O1 |
+| 一键创建（一次点击创建三层账户） | ✅ | `popup:quickCreate`：自动强口令（24 位 base62 拒绝采样）+ 同一口令创建 ZChain（wallet-core Argon2id keystore）/ EVM（PBKDF2+AES-GCM）/ Starknet 三层并全部解锁；成功页口令**只显示一次**（可复制）+ 三链地址；E2E O2/O2b |
+| 老用户不触发创建 | ✅ | onboarded=true 时欢迎页/创建流程不再出现；首页直接是三链总览；重开 popup 验证；E2E O4 |
+| API 级防护：已有钱包再 quickCreate 拒绝 | ✅ | `OnboardedAlready`（绝不覆盖既有钱包）；E2E O7 |
+| 统一解锁 | ✅ | `popup:quickUnlock` 同一口令逐一解锁三链（独立 keystore 互不影响）；错口令 fail-closed；E2E O5a/O5b |
+| 全部锁定 | ✅ | `popup:lockAll`；E2E O4 前置 |
+| 明细页直达 | ✅ | 首页卡片进入各链已解锁面板；E2E O6a–c |
+| 回归 | ✅ | 单测 198/198；run_02 36/36、run_03 30/30、run_04 12/12、run_05 36/36、run_06 32/32 全部不回归 |
+| e2e（浏览器操作） | ✅ | `tests/e2e/run_07.mjs` 13 步全 UI 操作 PASS（e2e07_result.json + 截图） |
+
+### 0.6.1 安全边界（如实声明）
+
+- 一键创建的自动口令（24 位 base62，~142 bit 熵，拒绝采样）只在成功页
+  显示一次，不落任何存储（instant-wallet 模式）；丢失无法找回（fail-closed，
+  无后门）；"高级：自定义口令创建"供用户自带口令。
+- quickCreate 仅在三层全空的全新状态允许（OnboardedAlready 防覆盖）；
+  各层 keystore 仍为独立加密文件（同口令不同盐/IV）。
+- 统一解锁按层独立尝试并逐层回报结果：不匹配的层保持锁定。

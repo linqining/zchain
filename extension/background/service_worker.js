@@ -1345,6 +1345,22 @@ function stkError(code, reason) {
   return { error: { code, reason: reason ?? '' } };
 }
 
+/** 一键创建用的强口令（24 位 base62，拒绝采样去偏差，~142 bit 熵；只在成功页显示一次）。 */
+function generateStrongPassword() {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let out = '';
+  while (out.length < 24) {
+    const buf = new Uint8Array(32);
+    crypto.getRandomValues(buf);
+    for (const b of buf) {
+      if (out.length >= 24) break;
+      if (b >= 248) continue; // 248 = 62 * 4：拒绝采样消除模偏差
+      out += alphabet[b % 62];
+    }
+  }
+  return out;
+}
+
 function stkRpc(vault, settings) {
   const net = resolveStarknetNetwork(vault.networkId ?? DEFAULT_STARKNET_NETWORK_ID);
   if (!net) return { error: stkError('NetworkUnsupported', String(vault.networkId)) };
@@ -1847,6 +1863,151 @@ async function handlePopupMessage(m) {
   }
   if (typeof m?.type === 'string' && m.type.startsWith('popup:stk')) {
     return handleStkMessage(m);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Extension 0.6.1：MetaMask 式一键 onboarding
+  // ---------------------------------------------------------------------------
+  if (m?.type === 'popup:overview') {
+    const zLedger = await getLedger();
+    const zActive = activeAccount(zLedger);
+    const zHas = Object.keys(zLedger.accounts).length > 0;
+    const evmV = await getEvmVault();
+    const evmHas = Object.keys(evmV.accounts).length > 0;
+    const stkV = await getStkVault();
+    const stkHas = Object.keys(stkV.accounts).length > 0;
+    return {
+      onboarded: zHas || evmHas || stkHas,
+      layers: {
+        zchain: {
+          has: zHas, unlocked: isUnlocked(),
+          address: isUnlocked() ? (await publicKeyHex()) : (zActive?.publicKey ?? null),
+          label: zActive?.label ?? null,
+        },
+        evm: {
+          has: evmHas, unlocked: evmUnlocked(),
+          address: evmUnlocked() ? mem.evm.session.address : (evmActiveAccount(evmV)?.address ?? null),
+          label: evmActiveAccount(evmV)?.label ?? null,
+        },
+        stk: {
+          has: stkHas, unlocked: stkUnlocked(),
+          address: stkUnlocked() ? mem.stk.session.address : (stkActiveAccount(stkV)?.address ?? null),
+          label: stkActiveAccount(stkV)?.label ?? null,
+        },
+      },
+    };
+  }
+  if (m?.type === 'popup:quickCreate') {
+    // 仅全新状态允许（任一层已有钱包 → OnboardedAlready，绝不覆盖既有钱包）
+    const zLedger0 = await getLedger();
+    const evmV0 = await getEvmVault();
+    const stkV0 = await getStkVault();
+    if (Object.keys(zLedger0.accounts).length > 0 || Object.keys(evmV0.accounts).length > 0 || Object.keys(stkV0.accounts).length > 0) {
+      return stkError('OnboardedAlready', '已存在钱包：请用口令解锁，不会被一键创建覆盖');
+    }
+    // 口令：用户自定义（≥8）或自动生成强口令（成功页只显示一次；不落任何存储）
+    const custom = typeof m.password === 'string' && m.password.length >= 8;
+    const password = custom ? m.password : generateStrongPassword();
+    // (1) ZChain note 钱包
+    const zRes = await callCore('wallet_create', password, 'interactive');
+    const zId = crypto.randomUUID();
+    const zCreated = createAccount(zLedger0, {
+      id: zId, label: 'ZChain 主账户', keystore: zRes.keystore,
+      publicKey: zRes.public_key, networkId: DEFAULT_NETWORK_ID, now: Date.now(),
+    });
+    if (!zCreated.ok) return stkError(zCreated.code, zCreated.reason);
+    await setLedger(zCreated.ledger);
+    newSession(zId);
+    await storage.session.set({ publicKey: zRes.public_key });
+    // (2) EVM 账户
+    const evmCreated = await createKeystore(password);
+    const evmId = crypto.randomUUID();
+    evmV0.accounts[evmId] = {
+      id: evmId, label: 'EVM 主账户', address: evmCreated.address,
+      keystore: evmCreated.keystore, createdAt: Date.now(),
+    };
+    evmV0.activeAccountId = evmId;
+    await setEvmVault(evmV0);
+    mem.evm.session = { accountId: evmId, privateKey: hexToBytes(evmCreated.privateKey), address: evmCreated.address };
+    // (3) Starknet 账户（当前网络 class hash）
+    const net = resolveStarknetNetwork(DEFAULT_STARKNET_NETWORK_ID);
+    const stkCreated = await createStarkAccount(password, net.accountClassHash);
+    const stkId = crypto.randomUUID();
+    stkV0.accounts[stkId] = {
+      id: stkId, label: 'Starknet 主账户', address: stkCreated.address, pubKey: stkCreated.pubKey,
+      keystore: stkCreated.keystore, createdAt: Date.now(),
+    };
+    stkV0.activeAccountId = stkId;
+    await setStkVault(stkV0);
+    mem.stk.session = {
+      accountId: stkId, privateKey: hexToBigInt(stkCreated.privateKey),
+      address: stkCreated.address, pubKey: stkCreated.pubKey,
+    };
+    logSafe('quick_created');
+    return {
+      generated: !custom, // 自动口令时成功页只显示一次
+      password: !custom ? password : undefined,
+      layers: {
+        zchain: { publicKey: zRes.public_key },
+        evm: { address: evmCreated.address },
+        stk: { address: stkCreated.address },
+      },
+    };
+  }
+  if (m?.type === 'popup:quickUnlock') {
+    // 统一解锁：同一口令逐一尝试三个层（各自独立 keystore，互不影响）
+    const results = { zchain: null, evm: null, stk: null };
+    let unlockedCount = 0;
+    let total = 0;
+    // zchain
+    const zLedger = await getLedger();
+    const zAccount = activeAccount(zLedger);
+    if (zAccount) {
+      total += 1;
+      try {
+        const res = await callCore('wallet_unlock', JSON.stringify(zAccount.keystore), m.password);
+        const ledger = await getLedger();
+        ledger.accounts[zAccount.id] = { ...zAccount, publicKey: res.public_key };
+        const sel = selectAccount(ledger, zAccount.id, Date.now());
+        await setLedger(sel.ledger);
+        newSession(zAccount.id);
+        await storage.session.set({ publicKey: res.public_key });
+        results.zchain = true;
+        unlockedCount += 1;
+      } catch { results.zchain = false; }
+    }
+    // evm
+    const evmV = await getEvmVault();
+    const evmAccount = evmActiveAccount(evmV);
+    if (evmAccount) {
+      total += 1;
+      try {
+        const priv = await decryptFromKeystore(evmAccount.keystore, m.password);
+        mem.evm.session = { accountId: evmAccount.id, privateKey: priv, address: evmAccount.address };
+        results.evm = true;
+        unlockedCount += 1;
+      } catch { results.evm = false; }
+    }
+    // stk
+    const stkV = await getStkVault();
+    const stkAccount = stkActiveAccount(stkV);
+    if (stkAccount) {
+      total += 1;
+      try {
+        const priv = await decryptStarkKeystore(stkAccount.keystore, m.password);
+        mem.stk.session = { accountId: stkAccount.id, privateKey: priv, address: stkAccount.address, pubKey: stkAccount.pubKey };
+        results.stk = true;
+        unlockedCount += 1;
+      } catch { results.stk = false; }
+    }
+    logSafe('quick_unlock', { count: unlockedCount });
+    return { results, unlockedCount, total };
+  }
+  if (m?.type === 'popup:lockAll') {
+    await lockWallet('lockAll');
+    lockEvm('lockAll');
+    lockStk('lockAll');
+    return { locked: true };
   }
   switch (m.type) {
     case 'bridge:getSession': {

@@ -41,14 +41,14 @@ const $view = document.getElementById('view');
 const $net = document.getElementById('net-badge');
 const $modeNav = document.getElementById('mode-nav');
 
-// UI 模式（'zchain' | 'evm'）：会话内由 header 切换按钮驱动；EVM 钱包视图
-// 为 Extension 0.5 新增（余额查询 / 合约调用 / 交易记录 / 钱包管理）。
-let uiMode = 'zchain';
+// UI 模式（'home' | 'zchain' | 'evm' | 'stk'）：header 按钮驱动。默认
+// 'home'（0.6.1：一键 onboarding 欢迎页 / 多链总览首页）。
+let uiMode = 'home';
 
 $modeNav?.addEventListener('click', (e) => {
   const btn = e.target.closest('.mode-btn');
   if (!btn) return;
-  uiMode = btn.id === 'mode-evm' ? 'evm' : btn.id === 'mode-stk' ? 'stk' : 'zchain';
+  uiMode = btn.id === 'mode-evm' ? 'evm' : btn.id === 'mode-stk' ? 'stk' : btn.id === 'mode-zchain' ? 'zchain' : 'home';
   for (const b of $modeNav.querySelectorAll('.mode-btn')) {
     b.classList.toggle('active', b === btn);
   }
@@ -100,6 +100,14 @@ function badge(text, cls) {
 
 async function render() {
   try {
+    // 0.6.1：MetaMask 式 onboarding——新用户（三层都无钱包）默认落欢迎页；
+    // 老用户（任一层有钱包）永不触发，直接进统一首页/各模式。
+    const overview = await send({ type: 'popup:overview' });
+    if (!overview?.error && uiMode === 'home') {
+      // 新用户 → 一键创建欢迎页；老用户 → 多链总览（绝不触发创建）
+      if (!overview.onboarded) return await renderWelcome();
+      return await renderHome(overview);
+    }
     if (uiMode === 'evm') return await renderEvm();
     if (uiMode === 'stk') return await renderStk();
     const state = await send({ type: 'popup:getState' });
@@ -1499,6 +1507,168 @@ function renderEvmManage(state) {
   rm.append(rmErr, rmBtn);
   c.appendChild(rm);
   return c;
+}
+
+// ---------------------------------------------------------------------------
+// Extension 0.6.1：一键 onboarding（新用户欢迎页 / 成功页 / 统一首页）
+// 参考 MetaMask：新用户首屏即创建入口；已有钱包绝不触发创建流程。
+// ---------------------------------------------------------------------------
+
+function layerMeta(id) {
+  return {
+    zchain: { name: 'ZChain', desc: 'PLAY/REAL 分库 · SNIP-12 会话密钥' },
+    evm: { name: 'EVM 多链', desc: '以太坊 / Base / Arbitrum 等 · 余额/合约/交易' },
+    stk: { name: 'Starknet', desc: 'STARK curve · 余额/合约/交易' },
+  }[id];
+}
+
+function shortAddr(a) {
+  if (typeof a !== 'string' || a.length < 16) return a ?? '—';
+  return `${a.slice(0, 10)}…${a.slice(-8)}`;
+}
+
+async function renderWelcome() {
+  $net.textContent = '多链';
+  $view.replaceChildren();
+  const hero = card('欢迎使用 ZChain Wallet');
+  hero.id = 'welcome-card';
+  hero.appendChild(el('div', { class: 'bal' }, '一个钱包 · 三条链'));
+  hero.appendChild(el('div', { class: 'dim' },
+    '一键创建 ZChain / EVM / Starknet 三个账户。密钥在本地生成并以口令加密存储，绝不离开你的设备。'));
+
+  const createBtn = el('button', { id: 'welcome-create-btn', class: 'approve' }, '一键创建钱包');
+  const createErr = evmErr();
+  createBtn.addEventListener('click', async () => {
+    createBtn.disabled = true;
+    const res = await send({ type: 'popup:quickCreate' });
+    createBtn.disabled = false;
+    if (res?.error) { createErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderWelcomeSuccess(res);
+  });
+  hero.append(createBtn, createErr);
+
+  const adv = el('details', { id: 'welcome-advanced' });
+  adv.appendChild(el('summary', {}, '高级：自定义口令创建'));
+  adv.append(
+    evmRowOf('welcome-pw', '自定义口令（≥ 8 字符）', 'password'),
+    evmRowOf('welcome-pw2', '重复口令', 'password'),
+  );
+  const advErr = evmErr();
+  const advBtn = el('button', { id: 'welcome-custom-btn', class: 'secondary' }, '用自定义口令创建');
+  advBtn.addEventListener('click', async () => {
+    const p1 = document.getElementById('welcome-pw').value;
+    const p2 = document.getElementById('welcome-pw2').value;
+    if (p1.length < 8) { advErr.textContent = '口令太短（≥ 8 字符）'; return; }
+    if (p1 !== p2) { advErr.textContent = '两次口令不一致'; return; }
+    advBtn.disabled = true;
+    const res = await send({ type: 'popup:quickCreate', password: p1 });
+    advBtn.disabled = false;
+    if (res?.error) { advErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderWelcomeSuccess(res);
+  });
+  adv.append(advErr, advBtn);
+  hero.appendChild(adv);
+
+  const imp = el('details', { id: 'welcome-import' });
+  imp.appendChild(el('summary', {}, '已有钱包？导入'));
+  imp.appendChild(el('div', { class: 'dim' },
+    '切换到对应页签导入私钥：EVM / Starknet 顶部按钮即可进入各自导入页；ZChain 支持加密备份恢复。'));
+  hero.appendChild(imp);
+  $view.appendChild(hero);
+}
+
+/** 一键创建成功页：自动口令只显示这一次（MetaMask 早期 instant wallet 模式）。 */
+function renderWelcomeSuccess(res) {
+  $view.replaceChildren();
+  const c = card('创建成功 🎉');
+  c.id = 'welcome-success';
+  if (res.generated && res.password) {
+    c.appendChild(el('div', { class: 'warn-box' },
+      '我们为你自动生成了钱包口令（强随机）。它只显示这一次，请立即保存：'));
+    const key = el('div', { class: 'mono', id: 'welcome-generated-password' }, res.password);
+    key.style.wordBreak = 'break-all';
+    const copy = el('button', { id: 'welcome-copy-pw', class: 'secondary' }, '复制口令');
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(res.password); copy.textContent = '已复制'; } catch { copy.textContent = '复制失败（手动选择复制）'; }
+    });
+    c.append(key, copy);
+    c.appendChild(el('div', { class: 'hint' },
+      '⚠ 口令丢失无法找回（无后门）。也可创建后在“钱包管理”里改成自己的口令。'));
+  }
+  const list = el('div', { id: 'welcome-addresses' });
+  const rows = [
+    ['ZChain 公钥', res.layers?.zchain?.publicKey],
+    ['EVM 地址', res.layers?.evm?.address],
+    ['Starknet 地址', res.layers?.stk?.address],
+  ];
+  for (const [k, v] of rows) list.appendChild(row(k, shortAddr(v) === v ? v : String(v ?? '—'), true));
+  c.appendChild(list);
+  const done = el('button', { id: 'welcome-done-btn', class: 'approve' }, '我已保存，开始使用');
+  done.addEventListener('click', () => { uiMode = 'home'; render(); });
+  c.appendChild(done);
+  $view.appendChild(c);
+}
+
+/** 统一首页（已 onboarded 的 ZChain 默认页）：三链卡片 + 统一解锁。 */
+async function renderHome(overview) {
+  $net.textContent = '多链';
+  $view.replaceChildren();
+  const L = overview.layers ?? {};
+  const needUnlock = Object.entries(L).filter(([, l]) => l.has && !l.unlocked);
+
+  if (needUnlock.length > 0) {
+    const u = card('解锁钱包');
+    u.id = 'home-unlock-card';
+    u.appendChild(el('div', { class: 'dim' },
+      `待解锁 ${needUnlock.length} 层：${needUnlock.map(([id]) => layerMeta(id).name).join(' / ')}`));
+    u.append(evmRowOf('home-unlock-pw', '口令', 'password'));
+    const err = evmErr();
+    const btn = el('button', { id: 'home-unlock-btn' }, '一键解锁');
+    btn.addEventListener('click', async () => {
+      btn.disabled = true;
+      const res = await send({ type: 'popup:quickUnlock', password: document.getElementById('home-unlock-pw').value });
+      btn.disabled = false;
+      if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+      if (res.unlockedCount === 0) { err.textContent = '口令错误（fail-closed）'; return; }
+      render();
+    });
+    u.append(err, btn);
+    $view.appendChild(u);
+  }
+
+  const c = card('我的钱包（多链总览）');
+  c.id = 'home-card';
+  const METAS = { zchain: layerMeta('zchain'), evm: layerMeta('evm'), stk: layerMeta('stk') };
+  for (const [id, meta] of Object.entries(METAS)) {
+    const l = L[id] ?? { has: false, unlocked: false };
+    const box = el('div', { class: 'receipt' });
+    const head = el('div');
+    head.appendChild(el('span', { class: 'st' }, meta.name));
+    head.appendChild(el('span', { class: 'dim' }, ` · ${meta.desc}`));
+    box.appendChild(head);
+    if (!l.has) {
+      box.appendChild(row('状态', '未创建'));
+      const mk = el('button', { id: `home-${id}-open`, class: 'secondary' }, '去创建 / 导入');
+      mk.addEventListener('click', () => { uiMode = id; render(); });
+      box.appendChild(mk);
+    } else {
+      box.appendChild(row('地址', shortAddr(l.address), true));
+      const btns = el('div', { class: 'btn-row' });
+      const open = el('button', { id: `home-${id}-open`, class: l.unlocked ? 'approve' : 'secondary' },
+        l.unlocked ? '进入钱包' : '解锁并进入');
+      open.addEventListener('click', () => { uiMode = id; render(); });
+      btns.appendChild(open);
+      box.appendChild(btns);
+    }
+    c.appendChild(box);
+  }
+  const lockAll = el('button', { id: 'home-lock-all', class: 'secondary' }, '全部锁定');
+  lockAll.addEventListener('click', async () => {
+    await send({ type: 'popup:lockAll' });
+    render();
+  });
+  c.appendChild(lockAll);
+  $view.appendChild(c);
 }
 
 // ---------------------------------------------------------------------------

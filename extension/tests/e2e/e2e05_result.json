@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-15T18:34:02.702Z",
+  "date": "2026-09-15T19:25:51.212Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "devchainUrl": "http://127.0.0.1:60808",
+  "devchainUrl": "http://127.0.0.1:50337",
   "contract": "0xc0DE000000000000000000000000000000000000",
   "total": 36,
   "pass": 36,
@@ -21,7 +21,7 @@
     {
       "step": "E2 创建钱包（口令 → 加密 keystore）→ EIP-55 地址展示",
       "ok": true,
-      "detail": "0x29a114179708201F779D062D1e7403DddE8F5500"
+      "detail": "0x1514093519A92bC94e7F0B264F2AEa9A091aF061"
     },
     {
       "step": "E2b SW 状态：hasWallet + unlocked + 账户列表",
@@ -31,7 +31,7 @@
     {
       "step": "E3 保存 RPC 覆盖 → 生效 URL = devchain",
       "ok": true,
-      "detail": "http://127.0.0.1:60808"
+      "detail": "http://127.0.0.1:50337"
     },
     {
       "step": "F1 余额查询：水龙头 100 ETH → 余额展示",
@@ -56,17 +56,17 @@
     {
       "step": "C2 合约写预览卡：faucet() + 最大手续费 + chainId",
       "ok": true,
-      "detail": "交易预览（合约调用） | from | 0x29a114179708201F779D062D1e7403DddE8F5500 | to | 0xc0DE000000000000000000000000000000000000 | 方法 | faucet() | value | 0 ETH（0 wei） | data |"
+      "detail": "交易预览（合约调用） | from | 0x1514093519A92bC94e7F0B264F2AEa9A091aF061 | to | 0xc0DE000000000000000000000000000000000000 | 方法 | faucet() | value | 0 ETH（0 wei） | data |"
     },
     {
       "step": "C3 确认 → 签名广播（真实 raw 交易上链）",
       "ok": true,
-      "detail": "0xb4e7f5f21e93ab19b8b9dc91f7ee75486ccf24fc5a6d91d3dfe53fa373e48860"
+      "detail": "0x24eda44a3362fc34e971043bcd6495c697de5f1b66028d97e422c55a1bad5401"
     },
     {
       "step": "C4 开发链核对：sender 恢复 = 钱包地址 + status 0x1",
       "ok": true,
-      "detail": "{\"from\":\"0x29a114179708201F779D062D1e7403DddE8F5500\",\"status\":\"0x1\"}"
+      "detail": "{\"from\":\"0x1514093519A92bC94e7F0B264F2AEa9A091aF061\",\"status\":\"0x1\"}"
     },
     {
       "step": "C5 合约只读 balanceOf → 1000（人类可读换算）",
@@ -76,7 +76,7 @@
     {
       "step": "C6 合约写 transfer(OTHER,250) 广播",
       "ok": true,
-      "detail": "0xe1e4d346a28ecb8219a35a0f8061ad3d47ac50a96ae981cae8da334948787fa8"
+      "detail": "0x253292110f08db758f92cc73550016b1865061f239218164e8da5aa26c6898f2"
     },
     {
       "step": "C7 链上效果核对：balanceOf(OTHER) → 250",
@@ -86,7 +86,7 @@
     {
       "step": "T1 原生转账 1.5 ETH → 广播",
       "ok": true,
-      "detail": "0x83531fe6869e4dd9a0de5bc49e56b5e33deae15ffc8a26990cc4ef69d4d27b24"
+      "detail": "0xb904f8fb5ae5848f936b70a0b691111ede36b0d9f00c353fff2b2c2633624567"
     },
     {
       "step": "T2 取消预览 → 不广播",
@@ -116,7 +116,7 @@
     {
       "step": "H3 记录明细：hash + 方向 + 金额 + 区块",
       "ok": true,
-      "detail": "已确认 · 转账 · 本地 | hash | 0x83531fe6869e4dd9a0de…d4d27b24 | 方向 | 0x29a114…8F5500 → 0xbeeF00…000000 | 金额 | 1.5 ETH | 区块 | 3 | gas used | 21000 | 时间 | 2026/9/16 02:3"
+      "detail": "已确认 · 转账 · 本地 | hash | 0xb904f8fb5ae5848f936b…33624567 | 方向 | 0x151409…1aF061 → 0xbeeF00…000000 | 金额 | 1.5 ETH | 区块 | 3 | gas used | 21000 | 时间 | 2026/9/16 03:2"
     },
     {
       "step": "M1 导出私钥：错口令 fail-closed（BadPassword）",
@@ -126,7 +126,7 @@
     {
       "step": "M2 导出私钥：口令确认 → 64 hex 私钥展示",
       "ok": true,
-      "detail": "0x0b6d57371b…"
+      "detail": "0x00dda75bb2…"
     },
     {
       "step": "M3 锁定 → 错口令解锁拒绝（fail-closed）",
@@ -146,7 +146,7 @@
     {
       "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
       "ok": true,
-      "detail": "{\"key\":\"0x0b6d57371b6917a96ccd04c98e8aa2baa9cb48db9a30abadcf7d445ecb93d2ee\"}"
+      "detail": "{\"key\":\"0x00dda75bb23ffe9f66634387b55c86ee6b32f0dde92ffef3b45754d9998c3228\"}"
     },
     {
       "step": "M6b 删除当前账户 → 回到创建视图",
@@ -156,7 +156,7 @@
     {
       "step": "M6 私钥再导入 → 同一 EIP-55 地址",
       "ok": true,
-      "detail": "0x29a114179708… vs 0x29a114179708…"
+      "detail": "0x1514093519A9… vs 0x1514093519A9…"
     },
     {
       "step": "M7 非法私钥导入拒绝（InvalidArgument）",

@@ -1,12 +1,12 @@
-[2026-09-15T18:33:44.189Z] PASS: F0 harness 页加载（runStarkPortalCheck 可用，common 模块同源加载）
-[2026-09-15T18:33:46.001Z] PASS: F1a STARK 正例：真实 canonical 证明 wasm 完整验证 verified — {"rc_proofLen":1185984,"verdict":"verified","elapsedMs":1794}
-[2026-09-15T18:33:46.002Z] PASS: F1b STARK 正例：verifier 版本如实展示（stwo 2.3.0 vendored+wasm-poseidon） — stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)
-[2026-09-15T18:33:46.002Z] PASS: F1c STARK 正例：归档元数据一致（table_id=9101 / log_size=8 / transitions=5） — {"verified":true,"error":null,"archive_len":1185984,"table_id":9101,"log_size":8,"num_columns":5391,"transition_count":5,"batch_digest":"13c5c830b1849a4e2922c8a
-[2026-09-15T18:33:46.002Z] PASS: F1d STARK 正例：耗时如实测量（>0 数值；超 500ms 预算由 portal 标注） — elapsedMs=1794 wall=1812ms（超500ms=是，如实标注）
-[2026-09-15T18:33:47.724Z] PASS: F2 篡改证明 → StarkVerifyRejected（fail-closed，不伪造 verified） — {"code":"StarkVerifyRejected","reason":"STARK 验证拒绝：AIR 约束不满足: Root mismatch."}
-[2026-09-15T18:33:47.725Z] PASS: F2b fail-closed 结论：STARK 拒绝时 overall ≠ fully verified — {"starkPass":false,"starkState":"StarkVerifyRejected","settlePass":false,"overall":"not verified"}
-[2026-09-15T18:33:47.729Z] PASS: F3 非归档字节 → StarkArchiveInvalid — {"code":"StarkArchiveInvalid"}
-[2026-09-15T18:33:47.732Z] PASS: F4 无归档 → ProofNotFound（不伪造 STARK 结论） — {"step":"fetchProof","code":"ProofNotFound"}
-[2026-09-15T18:33:47.733Z] PASS: F5 网关不可达 → GatewayUnreachable — {"code":"GatewayUnreachable"}
-[2026-09-15T18:33:49.489Z] PASS: F6 超时路径存在且独立分类（GatewayTimeout ≠ GatewayUnreachable） — {"ok":true}
-[2026-09-15T18:33:49.489Z] PASS: F7 settlement 复验步骤照常执行并记录（fixture 明细不作通过断言） — {"verdict":"error","code":"InvalidArgument"}
+[2026-09-15T19:25:32.559Z] PASS: F0 harness 页加载（runStarkPortalCheck 可用，common 模块同源加载）
+[2026-09-15T19:25:34.381Z] PASS: F1a STARK 正例：真实 canonical 证明 wasm 完整验证 verified — {"rc_proofLen":1185984,"verdict":"verified","elapsedMs":1801}
+[2026-09-15T19:25:34.381Z] PASS: F1b STARK 正例：verifier 版本如实展示（stwo 2.3.0 vendored+wasm-poseidon） — stwo-wasm-verify/0.1.0 (stwo 2.3.0 vendored+wasm-poseidon; poker_texas_air canonical AIR)
+[2026-09-15T19:25:34.381Z] PASS: F1c STARK 正例：归档元数据一致（table_id=9101 / log_size=8 / transitions=5） — {"verified":true,"error":null,"archive_len":1185984,"table_id":9101,"log_size":8,"num_columns":5391,"transition_count":5,"batch_digest":"13c5c830b1849a4e2922c8a
+[2026-09-15T19:25:34.381Z] PASS: F1d STARK 正例：耗时如实测量（>0 数值；超 500ms 预算由 portal 标注） — elapsedMs=1801 wall=1822ms（超500ms=是，如实标注）
+[2026-09-15T19:25:36.136Z] PASS: F2 篡改证明 → StarkVerifyRejected（fail-closed，不伪造 verified） — {"code":"StarkVerifyRejected","reason":"STARK 验证拒绝：AIR 约束不满足: Root mismatch."}
+[2026-09-15T19:25:36.136Z] PASS: F2b fail-closed 结论：STARK 拒绝时 overall ≠ fully verified — {"starkPass":false,"starkState":"StarkVerifyRejected","settlePass":false,"overall":"not verified"}
+[2026-09-15T19:25:36.140Z] PASS: F3 非归档字节 → StarkArchiveInvalid — {"code":"StarkArchiveInvalid"}
+[2026-09-15T19:25:36.145Z] PASS: F4 无归档 → ProofNotFound（不伪造 STARK 结论） — {"step":"fetchProof","code":"ProofNotFound"}
+[2026-09-15T19:25:36.146Z] PASS: F5 网关不可达 → GatewayUnreachable — {"code":"GatewayUnreachable"}
+[2026-09-15T19:25:37.884Z] PASS: F6 超时路径存在且独立分类（GatewayTimeout ≠ GatewayUnreachable） — {"ok":true}
+[2026-09-15T19:25:37.884Z] PASS: F7 settlement 复验步骤照常执行并记录（fixture 明细不作通过断言） — {"verdict":"error","code":"InvalidArgument"}

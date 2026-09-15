@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-15T18:35:44.642Z",
+  "date": "2026-09-15T19:26:18.119Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "devchainUrl": "http://127.0.0.1:61431",
+  "devchainUrl": "http://127.0.0.1:50418",
   "total": 32,
   "pass": 32,
   "fail": 0,
@@ -20,7 +20,7 @@
     {
       "step": "S2 创建钱包 → 地址（ADDR_BOUND 内 + Starknet 校验和）+ 公钥展示",
       "ok": true,
-      "detail": "0x0570941432Db46b174ce1A38817B08FFa817B96cc110f1BaF828A8f82a68cBbF / 0x3c93aff95159…"
+      "detail": "0x05048c86431a6CE34390bD7033f2DFF09aF3d7e6B3492687bC97838637B835eE / 0x14e83e802c82…"
     },
     {
       "step": "S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet",
@@ -30,7 +30,7 @@
     {
       "step": "S3 保存 RPC 覆盖 → 生效 URL = starkdevchain",
       "ok": true,
-      "detail": "http://127.0.0.1:61431"
+      "detail": "http://127.0.0.1:50418"
     },
     {
       "step": "F1 余额查询：注册 pubkey + 水龙头 100 DST → 余额展示",
@@ -60,17 +60,17 @@
     {
       "step": "C3 invoke v1 预览卡：selector + calldata + max fee + chainId",
       "ok": true,
-      "detail": "invoke v1 交易预览 | from | 0x0570941432Db46b174ce1A38817B08FFa817B96cc110f1BaF828A8f82a68cBbF | to | 0xc0de0000000000000000000000000000000070b19e6b9 | 方法 | transfer(recipient, amount_u256) | selector | 0"
+      "detail": "invoke v1 交易预览 | from | 0x05048c86431a6CE34390bD7033f2DFF09aF3d7e6B3492687bC97838637B835eE | to | 0xc0de0000000000000000000000000000000070b19e6b9 | 方法 | transfer(recipient, amount_u256) | selector | 0"
     },
     {
       "step": "C4 确认 → STARK curve 签名广播（[r, s] invoke v1）",
       "ok": true,
-      "detail": "0x53ee80e7a52b8422835cb18b153aa6340021962cfde6b9ee504f477a7156839"
+      "detail": "0x4af35ddddfe2de21750d0e4868944186f941fcfea403891a13ae20c988df778"
     },
     {
       "step": "C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址",
       "ok": true,
-      "detail": "{\"from\":\"0x570941432db46b174ce1a38817b08ffa817b96cc110f1baf828a8f82a68cbbf\",\"st\":\"SUCCEEDED\"}"
+      "detail": "{\"from\":\"0x5048c86431a6ce34390bd7033f2dff09af3d7e6b3492687bc97838637b835ee\",\"st\":\"SUCCEEDED\"}"
     },
     {
       "step": "C6 链上效果核对：balance_of(OTHER) → 25e18（u256）",
@@ -105,7 +105,7 @@
     {
       "step": "M2 导出私钥：口令确认 → felt 私钥展示",
       "ok": true,
-      "detail": "0xe21f1b4b22…"
+      "detail": "0x1f1c059996…"
     },
     {
       "step": "M3 锁定 → 错口令解锁拒绝（fail-closed）",
@@ -125,7 +125,7 @@
     {
       "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
       "ok": true,
-      "detail": "{\"key\":\"0xe21f1b4b22453bbfcf91b10f229459e\"}"
+      "detail": "{\"key\":\"0x1f1c0599960bef1a6e1ef49b97471284\"}"
     },
     {
       "step": "M6b 删除当前账户 → 回到创建视图",
@@ -135,7 +135,7 @@
     {
       "step": "M6 私钥再导入 → 同一地址（新随机盐 → 新地址但同私钥；校验和一致）",
       "ok": true,
-      "detail": "0x04Ee10403375Ce844a9ac1A41653b8203766CDb879D888ACFa0679c804d99b8C"
+      "detail": "0x052a8904b07d2A54332748DD1F8c231bAC41e0F5De97C3944A9C317eaeeCDD06"
     },
     {
       "step": "M7 非法私钥导入拒绝（InvalidArgument）",
