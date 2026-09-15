@@ -121,7 +121,27 @@ SignClient 注入式 + 测试 stub，零 npm 进构建）、Starknet 钱包接�
 / `zchain:zchain-devnet-1`），不伪装成 Ethereum 主网/Starknet 主网账户——
 架构、映射表与红线清单见 `adapters/README.md`。
 
-## 安装（加载 unpacked）
+## 安装（打包 / 加载 unpacked）
+
+**一键打包**（产出可在 Chrome 安装的扩展包 + 真实加载验证）：
+
+```bash
+bash extension/scripts/pack.sh --verify
+# → dist/unpacked/                          直接被 Chrome“加载已解压”的目录
+# → dist/zchain-wallet-extension-v<版本>.zip manifest 在包根（可直接上传
+#   Chrome Web Store 开发者后台，或解压后加载）
+# → dist/SHA256SUMS.txt                     zip 与逐文件 SHA-256 清单
+#   --verify 会用 Chrome for Testing headless 真实加载 dist/unpacked：
+#   service worker 启动 + popup 渲染 + runtime 消息往返 + 三模式按钮
+#   （--out DIR 换输出目录；--skip-checks 跳过 node --check 加速）
+```
+
+**在 Chrome 安装（三选一）**：
+
+1. `chrome://extensions` → 开启"开发者模式"→ "加载已解压的扩展程序" →
+   选择 `extension/dist/unpacked/`（或解压 zip 后的目录）；
+2. Chrome Web Store 开发者后台直接上传 `dist/*.zip`；
+3. Chrome for Testing / Chromium / 企业策略：`--load-extension=<绝对路径>`。
 
 1. （可选，重新构建 WASM，见下文）产物已提交：`vendor/wallet-core/`。
 2. 打开 `chrome://extensions` → 开启"开发者模式"→ "加载已解压的扩展程序"
