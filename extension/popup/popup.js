@@ -39,6 +39,21 @@ import { fetchAssetSummary } from '../common/portal.js';
 
 const $view = document.getElementById('view');
 const $net = document.getElementById('net-badge');
+const $modeNav = document.getElementById('mode-nav');
+
+// UI 模式（'zchain' | 'evm'）：会话内由 header 切换按钮驱动；EVM 钱包视图
+// 为 Extension 0.5 新增（余额查询 / 合约调用 / 交易记录 / 钱包管理）。
+let uiMode = 'zchain';
+
+$modeNav?.addEventListener('click', (e) => {
+  const btn = e.target.closest('.mode-btn');
+  if (!btn) return;
+  uiMode = btn.id === 'mode-evm' ? 'evm' : btn.id === 'mode-stk' ? 'stk' : 'zchain';
+  for (const b of $modeNav.querySelectorAll('.mode-btn')) {
+    b.classList.toggle('active', b === btn);
+  }
+  render();
+});
 
 const send = (m) => chrome.runtime.sendMessage(m);
 
@@ -84,15 +99,22 @@ function badge(text, cls) {
 // ---------------------------------------------------------------------------
 
 async function render() {
-  const state = await send({ type: 'popup:getState' });
-  $net.textContent = `${state.networkKind} · ${state.chainId}`;
-  $net.className = `badge badge-${state.networkKind}`;
-  $view.replaceChildren();
+  try {
+    if (uiMode === 'evm') return await renderEvm();
+    if (uiMode === 'stk') return await renderStk();
+    const state = await send({ type: 'popup:getState' });
+    $net.textContent = `${state.networkKind} · ${state.chainId}`;
+    $net.className = `badge badge-${state.networkKind}`;
+    $view.replaceChildren();
 
-  if (!state.hasKeystore) return renderCreate(state);
-  if (!state.unlocked) return renderLocked(state);
-  await renderAccount(state);
-  await renderPending();
+    if (!state.hasKeystore) return renderCreate(state);
+    if (!state.unlocked) return renderLocked(state);
+    await renderAccount(state);
+    await renderPending();
+  } finally {
+    // 渲染代数计数：测试/调用方可等待"新树渲染完成"（避免点击落在旧树上）
+    window.__zRenderGen = (window.__zRenderGen ?? 0) + 1;
+  }
 }
 
 // ---- 创建钱包 / 新建账户 ----
@@ -932,6 +954,1043 @@ function appendDecideButtons(container, requestId) {
   });
   rowEl.append(ok, no);
   container.appendChild(rowEl);
+}
+
+// ---------------------------------------------------------------------------
+// Extension 0.5：EVM 钱包视图
+// （创建/导入/解锁 → 余额查询 → 转账 → 合约读/写 → 交易记录 → 私钥导出/改密码）
+// 本文件只做 DOM 编排；逻辑在 common/evm/*（纯函数）与 SW（编排）。
+// ---------------------------------------------------------------------------
+
+function evmErr(msg) {
+  return errBox(msg);
+}
+
+function evmRowOf(id, placeholder, type = 'text') {
+  return el('input', { type, id, placeholder });
+}
+
+async function renderEvm() {
+  const state = await send({ type: 'popup:evmGetState' });
+  if (state?.error) {
+    $view.replaceChildren();
+    const c = card('EVM 钱包');
+    c.appendChild(errBox(`${state.error.code}: ${state.error.reason}`));
+    $view.appendChild(c);
+    return;
+  }
+  $view.replaceChildren();
+  if (!state.hasWallet) {
+    renderEvmCreate();
+    renderEvmImport();
+    return;
+  }
+  if (!state.unlocked) {
+    renderEvmAccountList(state);
+    renderEvmUnlock(state);
+    renderEvmImport();
+    return;
+  }
+  renderEvmAccountList(state);
+  await renderEvmDashboard(state);
+}
+
+// ---- 创建 / 导入 / 解锁 / 账户列表 ----
+
+function renderEvmCreate() {
+  const c = card('创建 EVM 钱包');
+  c.appendChild(el('div', { class: 'warn-box' },
+    '随机生成 secp256k1 私钥，以口令派生密钥（PBKDF2-SHA256 60 万次）+ AES-256-GCM 加密后存本地。' +
+    '口令不设恢复：丢失即无法解锁（fail-closed）。'));
+  c.append(
+    evmRowOf('evm-label', '账户标签（可选）'),
+    evmRowOf('evm-pw', '口令（≥ 8 字符）', 'password'),
+    evmRowOf('evm-pw2', '重复口令', 'password'),
+  );
+  const err = evmErr();
+  const btn = el('button', { id: 'evm-create-btn' }, '创建钱包');
+  btn.addEventListener('click', async () => {
+    const p1 = document.getElementById('evm-pw').value;
+    const p2 = document.getElementById('evm-pw2').value;
+    if (p1.length < 8) { err.textContent = '口令太短（≥ 8 字符）'; return; }
+    if (p1 !== p2) { err.textContent = '两次口令不一致'; return; }
+    btn.disabled = true;
+    const res = await send({ type: 'popup:evmCreate', password: p1, label: document.getElementById('evm-label')?.value });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderEvmImport() {
+  const c = card('导入私钥');
+  c.appendChild(el('div', { class: 'dim' }, '导入 64 位 hex 私钥（0x 前缀可选），生成新账户并以口令重新加密。'));
+  c.append(
+    evmRowOf('evm-import-key', '私钥（0x…）'),
+    evmRowOf('evm-import-pw', '加密口令（≥ 8 字符）', 'password'),
+  );
+  const err = evmErr();
+  const btn = el('button', { id: 'evm-import-btn', class: 'secondary' }, '导入为新账户');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const res = await send({
+      type: 'popup:evmImportKey',
+      privateKey: document.getElementById('evm-import-key').value.trim(),
+      password: document.getElementById('evm-import-pw').value,
+    });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderEvmUnlock(state) {
+  const acct = (state.accounts ?? []).find((a) => a.id === state.activeAccountId);
+  const c = card(`解锁 EVM 账户${acct ? `：${acct.label}` : ''}`);
+  c.append(evmRowOf('evm-unlock-pw', '口令', 'password'));
+  const err = evmErr();
+  const btn = el('button', { id: 'evm-unlock-btn' }, '解锁');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const res = await send({
+      type: 'popup:evmUnlock',
+      accountId: state.activeAccountId,
+      password: document.getElementById('evm-unlock-pw').value,
+    });
+    btn.disabled = false;
+    if (res?.error) {
+      err.textContent = res.error.code === 'BadPassword' ? '口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`;
+      return;
+    }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderEvmAccountList(state) {
+  const list = state.accounts ?? [];
+  if (state.unlocked && list.length <= 1) return; // 单账户解锁态不重复展示
+  const c = card('EVM 账户');
+  const ul = el('ul', { class: 'acct-list' });
+  for (const a of list) {
+    const li = el('li', { class: a.active ? 'active' : '' });
+    const who = el('div', { class: 'who' });
+    who.appendChild(el('div', { class: 'lbl' }, `${a.label}${a.active ? ' · 当前' : ''}`));
+    who.appendChild(el('div', { class: 'pk mono' }, a.address));
+    li.appendChild(who);
+    if (!a.active) {
+      const sw = el('button', { class: 'secondary' }, '切换');
+      sw.addEventListener('click', async () => {
+        sw.disabled = true;
+        await send({ type: 'popup:evmSelectAccount', accountId: a.id });
+        render();
+      });
+      li.appendChild(sw);
+    } else if (a.unlocked) {
+      li.appendChild(badge('已解锁', 'badge-play'));
+    }
+    ul.appendChild(li);
+  }
+  c.appendChild(ul);
+  $view.appendChild(c);
+}
+
+// ---- 解锁态主面板 ----
+
+let evmChainInfo = null; // 最近一次 refresh 的链状态（余额/nonce/gas）
+
+async function renderEvmDashboard(state) {
+  const acct = (state.accounts ?? []).find((a) => a.id === state.activeAccountId);
+  const net = (state.networks ?? []).find((n) => n.id === state.networkId);
+
+  // 顶部：账户 + 地址 + 网络 + RPC
+  const c = card(`EVM 账户：${acct?.label ?? ''}`);
+  c.id = 'evm-account-card';
+  const addrRow = el('div', { class: 'row' });
+  addrRow.appendChild(el('span', { class: 'k' }, '地址'));
+  const addr = el('span', { class: 'v mono', id: 'evm-address' }, state.address ?? '');
+  addrRow.appendChild(addr);
+  c.appendChild(addrRow);
+
+  const netRow = el('div', { class: 'row' });
+  netRow.appendChild(el('span', { class: 'k' }, '网络'));
+  const netSel = el('select', { id: 'evm-net-select' });
+  for (const n of state.networks ?? []) {
+    const opt = el('option', { value: n.id }, `${n.name} (${n.chainIdHex})`);
+    if (n.id === state.networkId) opt.selected = true;
+    netSel.appendChild(opt);
+  }
+  netRow.appendChild(netSel);
+  c.appendChild(netRow);
+  const netErr = evmErr();
+  netSel.addEventListener('change', async () => {
+    const res = await send({ type: 'popup:evmSetNetwork', networkId: netSel.value });
+    if (res?.error) { netErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.appendChild(netErr);
+
+  const rpcRow = el('div', { class: 'row' });
+  rpcRow.appendChild(el('span', { class: 'k' }, 'RPC'));
+  const rpcInput = evmRowOf('evm-rpc-input', net?.rpcUrl ?? 'http://…（留空恢复默认）');
+  rpcInput.value = net?.rpcOverridden ? (net.rpcUrl ?? '') : '';
+  rpcRow.appendChild(rpcInput);
+  c.appendChild(rpcRow);
+  const rpcSave = el('button', { id: 'evm-rpc-save', class: 'secondary' }, '保存 RPC（留空恢复默认）');
+  const rpcErr = evmErr();
+  rpcSave.addEventListener('click', async () => {
+    const res = await send({ type: 'popup:evmSetRpc', chainIdHex: net.chainIdHex, rpcUrl: rpcInput.value.trim() });
+    if (res?.error) { rpcErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(rpcSave, rpcErr);
+
+  const exRow = el('div', { class: 'row' });
+  exRow.appendChild(el('span', { class: 'k' }, 'Explorer API'));
+  const exInput = evmRowOf('evm-explorer-input', 'Etherscan 兼容 txlist 端点（可选）');
+  exInput.value = net?.explorerApiUrl ?? '';
+  exRow.appendChild(exInput);
+  c.appendChild(exRow);
+  const exSave = el('button', { id: 'evm-explorer-save', class: 'secondary' }, '保存 Explorer API（留空清除）');
+  const exErr = evmErr();
+  exSave.addEventListener('click', async () => {
+    const res = await send({ type: 'popup:evmSetExplorer', chainIdHex: net.chainIdHex, apiUrl: exInput.value.trim() });
+    if (res?.error) { exErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(exSave, exErr);
+
+  // 余额 / 链状态
+  const balRow = el('div', { class: 'bal-row' });
+  const bal = el('span', { class: 'bal mono', id: 'evm-balance' }, evmChainInfo ? `${evmChainInfo.balanceHuman} ETH` : '—');
+  balRow.appendChild(bal);
+  const refreshBtn = el('button', { id: 'evm-refresh-btn', class: 'secondary' }, '刷新余额');
+  balRow.appendChild(refreshBtn);
+  c.appendChild(balRow);
+  const chainLine = el('div', { class: 'dim', id: 'evm-chain-info' },
+    evmChainInfo
+      ? `chainId ${evmChainInfo.chainIdHex ?? '—'} · nonce ${evmChainInfo.nonce} · gas ${evmChainInfo.gasPriceGwei} gwei${evmChainInfo.chainIdMismatch ? ' · ⚠ RPC chainId 与网络预设不符' : ''}`
+      : '点击“刷新余额”查询链上状态。');
+  c.appendChild(chainLine);
+  const refreshErr = evmErr();
+  refreshBtn.addEventListener('click', async () => {
+    refreshBtn.disabled = true;
+    const res = await send({ type: 'popup:evmRefresh' });
+    refreshBtn.disabled = false;
+    if (res?.error) { refreshErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    evmChainInfo = res;
+    render();
+  });
+  c.append(refreshErr);
+
+  // devnet 水龙头
+  if (net?.faucet) {
+    const fRow = el('div', { class: 'row' });
+    fRow.appendChild(evmRowOf('evm-faucet-amount', '水龙头金额（ETH，如 10）'));
+    const fbtn = el('button', { id: 'evm-faucet-btn', class: 'secondary' }, '领取测试币');
+    const fErr = evmErr();
+    fbtn.addEventListener('click', async () => {
+      fbtn.disabled = true;
+      const res = await send({ type: 'popup:evmFaucet', amountEth: document.getElementById('evm-faucet-amount').value.trim() || '1' });
+      fbtn.disabled = false;
+      if (res?.error) { fErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+      const r = await send({ type: 'popup:evmRefresh' });
+      if (!r?.error) { evmChainInfo = r; }
+      render();
+    });
+    fRow.appendChild(fbtn);
+    c.append(fRow, fErr);
+  }
+
+  // 锁定
+  const lockBtn = el('button', { id: 'evm-lock-btn', class: 'secondary' }, '锁定 EVM 钱包');
+  lockBtn.addEventListener('click', async () => {
+    await send({ type: 'popup:evmLock' });
+    evmChainInfo = null;
+    render();
+  });
+  c.appendChild(lockBtn);
+  $view.appendChild(c);
+
+  // 转账
+  $view.appendChild(renderEvmTransfer());
+  // 合约调用
+  $view.appendChild(renderEvmContract());
+  // 交易记录
+  renderEvmHistory(state);
+  // 管理（导出私钥 / 改密码 / 删除）
+  $view.appendChild(renderEvmManage(state));
+}
+
+/** prepare → 预览确认卡（转账与合约写共用）。 */
+function renderEvmTxPreview(container, preview) {
+  container.replaceChildren();
+  const box = el('div', { class: 'receipt', id: 'evm-tx-preview' });
+  box.appendChild(el('div', { class: 'st' }, `交易预览（${preview.kind === 'contract' ? '合约调用' : '转账'}）`));
+  box.appendChild(row('from', preview.from, true));
+  box.appendChild(row('to', preview.to, true));
+  if (preview.methodLabel) box.appendChild(row('方法', preview.methodLabel, true));
+  for (const a of preview.decodedArgs ?? []) {
+    box.appendChild(row(`arg.${a.name} (${a.type})`, a.value, true));
+  }
+  box.appendChild(row('value', `${preview.valueHuman} ETH（${preview.valueWei} wei）`, true));
+  if (preview.data) box.appendChild(row('data', `${preview.data.slice(0, 42)}…`, true));
+  box.appendChild(row('nonce / gas', `${preview.nonce} / ${preview.gasLimit}`, true));
+  box.appendChild(row('gas price', `${preview.gasPriceGwei} gwei`, true));
+  box.appendChild(row('最大手续费', `${preview.maxFeeHuman} ETH`, true));
+  box.appendChild(row('chainId', preview.chainIdHex, true));
+  box.appendChild(el('div', { class: 'warn-box' }, '确认后签名并广播（签名在扩展后台完成，raw 交易上链）。'));
+
+  const btns = el('div', { class: 'btn-row' });
+  const ok = el('button', { id: 'evm-tx-confirm', class: 'approve' }, '确认签名并发送');
+  const no = el('button', { id: 'evm-tx-reject', class: 'reject' }, '取消');
+  const err = evmErr();
+  ok.addEventListener('click', async () => {
+    ok.disabled = no.disabled = true;
+    const res = await send({ type: 'popup:evmConfirmTx' });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; ok.disabled = no.disabled = false; return; }
+    // e2e 观测点：广播哈希在重渲染后仍可断言（window 全局，非 storage）
+    window.__lastEvmBroadcast = res.hash;
+    container.appendChild(el('div', { class: 'ok-box' }, `已广播：${res.hash}`));
+    render();
+  });
+  no.addEventListener('click', async () => {
+    await send({ type: 'popup:evmRejectTx' });
+    container.replaceChildren();
+  });
+  btns.append(ok, no);
+  box.append(btns, err);
+  container.appendChild(box);
+}
+
+function renderEvmTransfer() {
+  const c = card('转账（原生币）');
+  c.append(
+    evmRowOf('evm-tx-to', '收款地址（0x…）'),
+    evmRowOf('evm-tx-value', '金额（ETH，如 0.5）'),
+    evmRowOf('evm-tx-data', 'data（hex，可选）'),
+  );
+  const err = evmErr();
+  const out = el('div');
+  const btn = el('button', { id: 'evm-tx-prepare' }, '生成交易预览');
+  btn.addEventListener('click', async () => {
+    out.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:evmPrepareTx',
+      to: document.getElementById('evm-tx-to').value.trim(),
+      valueEth: document.getElementById('evm-tx-value').value.trim(),
+      dataHex: document.getElementById('evm-tx-data').value.trim(),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderEvmTxPreview(out, res.preview);
+  });
+  c.append(err, btn, out);
+  return c;
+}
+
+function renderEvmContract() {
+  const c = card('合约调用');
+  c.appendChild(el('div', { class: 'dim' }, '只读方法（view/pure）直接 eth_call 查询；非只读方法走交易确认路径。预设 ERC-20 免填 ABI。'));
+  const presetSel = el('select', { id: 'evm-abi-preset' });
+  presetSel.appendChild(el('option', { value: 'erc20' }, '预设：ERC-20 代币'));
+  presetSel.appendChild(el('option', { value: 'custom' }, '自定义 ABI JSON'));
+  c.appendChild(presetSel);
+  const abiWrap = el('div');
+  abiWrap.style.display = 'none';
+  const abiTa = el('textarea', { id: 'evm-abi-json', rows: '4', placeholder: '[{"type":"function","name":"greet","stateMutability":"view","inputs":[],"outputs":[{"type":"string"}]}]' });
+  abiTa.style.width = '100%';
+  abiWrap.appendChild(abiTa);
+  c.appendChild(abiWrap);
+  presetSel.addEventListener('change', () => {
+    abiWrap.style.display = presetSel.value === 'custom' ? '' : 'none';
+  });
+  c.append(
+    evmRowOf('evm-contract', '合约地址（0x…）'),
+    evmRowOf('evm-method', '方法名（如 balanceOf / transfer / greet）'),
+    evmRowOf('evm-args', '参数（逗号分隔；token 金额用人类可读单位如 1.5）'),
+  );
+  const err = evmErr();
+  const btns = el('div', { class: 'btn-row' });
+  const readBtn = el('button', { id: 'evm-read-btn', class: 'secondary' }, '读取（eth_call）');
+  const writeBtn = el('button', { id: 'evm-write-btn' }, '发起合约交易');
+  const readOut = el('div', { id: 'evm-read-result' });
+  const txOut = el('div');
+  readBtn.addEventListener('click', async () => {
+    readOut.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:evmReadContract',
+      preset: presetSel.value === 'erc20' ? 'erc20' : null,
+      abiJson: presetSel.value === 'custom' ? document.getElementById('evm-abi-json').value : null,
+      contract: document.getElementById('evm-contract').value.trim(),
+      method: document.getElementById('evm-method').value.trim(),
+      args: splitArgs(document.getElementById('evm-args').value),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    const box = el('div', { class: 'receipt' });
+    box.appendChild(el('div', { class: 'st' }, `${res.signature} →`));
+    for (const v of res.values ?? []) {
+      box.appendChild(row(v.type, v.human != null && v.human !== v.raw ? `${v.human}（raw ${v.raw}）` : String(v.raw ?? '—'), true));
+    }
+    readOut.appendChild(box);
+  });
+  writeBtn.addEventListener('click', async () => {
+    txOut.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:evmPrepareContractTx',
+      preset: presetSel.value === 'erc20' ? 'erc20' : null,
+      abiJson: presetSel.value === 'custom' ? document.getElementById('evm-abi-json').value : null,
+      contract: document.getElementById('evm-contract').value.trim(),
+      method: document.getElementById('evm-method').value.trim(),
+      args: splitArgs(document.getElementById('evm-args').value),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderEvmTxPreview(txOut, res.preview);
+  });
+  btns.append(readBtn, writeBtn);
+  c.append(err, btns, readOut, txOut);
+  return c;
+}
+
+function splitArgs(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return [];
+  return s.split(',').map((x) => x.trim()).filter((x) => x.length > 0);
+}
+
+function renderEvmHistory(state) {
+  const c = card('交易记录');
+  const btnRow = el('div', { class: 'btn-row' });
+  const btn = el('button', { id: 'evm-history-btn', class: 'secondary' }, '刷新记录');
+  const explorerCb = el('input', { type: 'checkbox', id: 'evm-history-explorer' });
+  explorerCb.style.width = 'auto';
+  const explorerLabel = el('label', { for: 'evm-history-explorer' }, '合并链上探索器记录');
+  explorerLabel.style.display = 'inline-flex';
+  const list = el('div', { id: 'evm-history-list' });
+  const err = evmErr();
+  btn.addEventListener('click', async () => {
+    list.replaceChildren();
+    err.textContent = '';
+    btn.disabled = true;
+    const res = await send({ type: 'popup:evmHistory', includeExplorer: explorerCb.checked });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderEvmHistoryList(list, res);
+  });
+  btnRow.append(btn);
+  const cbWrap = el('span');
+  cbWrap.style.display = 'inline-flex';
+  cbWrap.style.alignItems = 'center';
+  cbWrap.style.gap = '4px';
+  cbWrap.append(explorerCb, explorerLabel);
+  btnRow.appendChild(cbWrap);
+  c.append(btnRow, err, list);
+  $view.appendChild(c);
+}
+
+function renderEvmHistoryList(container, res) {
+  const txs = res.txs ?? [];
+  if (txs.length === 0) {
+    container.appendChild(el('div', { class: 'dim' }, '暂无交易记录（发送交易后可在此查看状态）。'));
+  }
+  if (res.explorerNote) {
+    container.appendChild(el('div', { class: 'hint' }, `链上探索器记录未合并（${res.explorerNote}）——本地记录照常展示。`));
+  }
+  for (const t of txs.slice(0, 30)) {
+    const box = el('div', { class: 'receipt' });
+    const head = el('div');
+    const stCls = t.status === 'confirmed' ? 'included' : t.status === 'failed' ? 'seen' : '';
+    head.appendChild(el('span', { class: `st ${stCls}` },
+      t.status === 'confirmed' ? '已确认' : t.status === 'failed' ? '失败' : '待确认'));
+    head.appendChild(el('span', { class: 'dim' },
+      ` · ${t.kind === 'contract' ? (t.methodLabel ?? '合约') : '转账'} · ${t.source === 'explorer' ? '链上' : '本地'}`));
+    box.appendChild(head);
+    const hashRow = row('hash', '', true);
+    const hashA = el('a', { class: 'mono' }, `${t.hash.slice(0, 22)}…${t.hash.slice(-8)}`);
+    if (t.explorerUrl) { hashA.href = t.explorerUrl; hashA.target = '_blank'; hashA.rel = 'noreferrer'; }
+    hashRow.querySelector('.v').replaceChildren(hashA);
+    box.appendChild(hashRow);
+    box.appendChild(row('方向', `${shortHex(t.from ?? '', 8, 6)} → ${shortHex(t.to ?? '', 8, 6)}`, true));
+    box.appendChild(row('金额', t.kind === 'contract' ? t.valueHuman : `${t.valueHuman} ETH`, true));
+    if (t.blockNumber) box.appendChild(row('区块', t.blockNumber));
+    if (t.gasUsed) box.appendChild(row('gas used', t.gasUsed));
+    if (t.createdAtMs) box.appendChild(row('时间', new Date(t.createdAtMs).toLocaleString()));
+    for (const a of t.decodedArgs ?? []) {
+      box.appendChild(row(`arg.${a.name}`, String(a.value), true));
+    }
+    container.appendChild(box);
+  }
+  if ((res.pendingReconciled ?? 0) > 0) {
+    container.appendChild(el('div', { class: 'ok-box' }, `本轮对账更新 ${res.pendingReconciled} 笔待确认交易。`));
+  }
+}
+
+function renderEvmManage(state) {
+  const c = card('钱包管理');
+  c.appendChild(el('div', { class: 'dim' }, '导出私钥与修改口令都需要口令确认（fail-closed）。私钥一旦导出请离线保存。'));
+
+  // 导出私钥
+  const exp = el('details', { id: 'evm-export-details' });
+  exp.appendChild(el('summary', {}, '导出私钥'));
+  exp.appendChild(evmRowOf('evm-export-pw', '口令', 'password'));
+  const expErr = evmErr();
+  const expBtn = el('button', { id: 'evm-export-btn', class: 'reject' }, '显示私钥（谨慎）');
+  const expOut = el('div', { id: 'evm-export-out' });
+  expBtn.addEventListener('click', async () => {
+    expOut.replaceChildren();
+    expErr.textContent = '';
+    const res = await send({ type: 'popup:evmExportKey', password: document.getElementById('evm-export-pw').value });
+    if (res?.error) { expErr.textContent = res.error.code === 'BadPassword' ? '口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`; return; }
+    const key = el('div', { class: 'mono', id: 'evm-exported-key' }, res.privateKey);
+    key.style.wordBreak = 'break-all';
+    const copy = el('button', { id: 'evm-export-copy', class: 'secondary' }, '复制私钥');
+    copy.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(res.privateKey); copy.textContent = '已复制'; } catch { copy.textContent = '复制失败（手动选择复制）'; }
+    });
+    const warn = el('div', { class: 'warn-box' }, '⚠ 任何持有该私钥的人都能完全控制此账户。切勿粘贴到不受信任的页面。');
+    expOut.append(key, copy, warn);
+  });
+  exp.append(expErr, expBtn, expOut);
+  c.appendChild(exp);
+
+  // 修改口令
+  const cp = el('details', { id: 'evm-cpw-details' });
+  cp.appendChild(el('summary', {}, '修改口令（当前账户）'));
+  cp.append(
+    evmRowOf('evm-cpw-current', '当前口令', 'password'),
+    evmRowOf('evm-cpw-next', '新口令（≥ 8 字符）', 'password'),
+  );
+  const cpErr = evmErr();
+  const cpBtn = el('button', { id: 'evm-cpw-btn', class: 'secondary' }, '修改口令');
+  cpBtn.addEventListener('click', async () => {
+    cpErr.textContent = '';
+    const res = await send({
+      type: 'popup:evmChangePassword',
+      current: document.getElementById('evm-cpw-current').value,
+      next: document.getElementById('evm-cpw-next').value,
+    });
+    if (res?.error) { cpErr.textContent = res.error.code === 'BadPassword' ? '当前口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`; return; }
+    document.getElementById('evm-cpw-current').value = '';
+    document.getElementById('evm-cpw-next').value = '';
+    cp.appendChild(el('div', { class: 'ok-box' }, '口令已修改（keystore 已用新口令重加密）。'));
+  });
+  cp.append(cpErr, cpBtn);
+  c.appendChild(cp);
+
+  // 删除当前账户
+  const rm = el('details', { id: 'evm-remove-details' });
+  rm.appendChild(el('summary', {}, '删除当前账户'));
+  rm.appendChild(el('div', { class: 'dim' }, '删除本地加密 keystore 与交易记录。没有私钥备份将永久失去该账户——请先导出私钥。'));
+  const rmErr = evmErr();
+  const rmBtn = el('button', { id: 'evm-remove-btn', class: 'reject' }, '确认删除当前账户');
+  rmBtn.addEventListener('click', async () => {
+    rmBtn.disabled = true;
+    const res = await send({ type: 'popup:evmRemoveAccount', accountId: state.activeAccountId });
+    if (res?.error) { rmErr.textContent = `${res.error.code}: ${res.error.reason}`; rmBtn.disabled = false; return; }
+    render();
+  });
+  rm.append(rmErr, rmBtn);
+  c.appendChild(rm);
+  return c;
+}
+
+// ---------------------------------------------------------------------------
+// Extension 0.6：Starknet 钱包视图（STARK curve 账户层；DOM 编排同 EVM 视图）
+// ---------------------------------------------------------------------------
+
+let stkChainInfo = null;
+
+async function renderStk() {
+  const state = await send({ type: 'popup:stkGetState' });
+  if (state?.error) {
+    $view.replaceChildren();
+    const c = card('Starknet 钱包');
+    c.appendChild(errBox(`${state.error.code}: ${state.error.reason}`));
+    $view.appendChild(c);
+    return;
+  }
+  $view.replaceChildren();
+  if (!state.hasWallet) {
+    renderStkCreate();
+    renderStkImport();
+    return;
+  }
+  if (!state.unlocked) {
+    renderStkAccountList(state);
+    renderStkUnlock(state);
+    renderStkImport();
+    return;
+  }
+  renderStkAccountList(state);
+  await renderStkDashboard(state);
+}
+
+function renderStkCreate() {
+  const c = card('创建 Starknet 钱包');
+  c.appendChild(el('div', { class: 'warn-box' },
+    '随机生成 STARK curve 私钥（< 2^125，生态惯例），账户地址 = UDC 公式推导' +
+    '（class hash + 随机盐 + 公钥）。口令派生密钥（PBKDF2 60 万次）+ AES-256-GCM 加密存本地；口令丢失无法恢复。'));
+  c.append(
+    evmRowOf('stk-label', '账户标签（可选）'),
+    evmRowOf('stk-pw', '口令（≥ 8 字符）', 'password'),
+    evmRowOf('stk-pw2', '重复口令', 'password'),
+  );
+  const err = evmErr();
+  const btn = el('button', { id: 'stk-create-btn' }, '创建钱包');
+  btn.addEventListener('click', async () => {
+    const p1 = document.getElementById('stk-pw').value;
+    const p2 = document.getElementById('stk-pw2').value;
+    if (p1.length < 8) { err.textContent = '口令太短（≥ 8 字符）'; return; }
+    if (p1 !== p2) { err.textContent = '两次口令不一致'; return; }
+    btn.disabled = true;
+    const res = await send({ type: 'popup:stkCreate', password: p1, label: document.getElementById('stk-label')?.value });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderStkImport() {
+  const c = card('导入私钥（STARK curve）');
+  c.appendChild(el('div', { class: 'dim' }, '导入 felt 私钥（0x 可选，< 2^125），按当前网络 class hash + 随机盐推导地址并以口令重新加密。'));
+  c.append(
+    evmRowOf('stk-import-key', '私钥（0x…）'),
+    evmRowOf('stk-import-pw', '加密口令（≥ 8 字符）', 'password'),
+  );
+  const err = evmErr();
+  const btn = el('button', { id: 'stk-import-btn', class: 'secondary' }, '导入为新账户');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const res = await send({
+      type: 'popup:stkImportKey',
+      privateKey: document.getElementById('stk-import-key').value.trim(),
+      password: document.getElementById('stk-import-pw').value,
+    });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderStkUnlock(state) {
+  const acct = (state.accounts ?? []).find((a) => a.id === state.activeAccountId);
+  const c = card(`解锁 Starknet 账户${acct ? `：${acct.label}` : ''}`);
+  c.append(evmRowOf('stk-unlock-pw', '口令', 'password'));
+  const err = evmErr();
+  const btn = el('button', { id: 'stk-unlock-btn' }, '解锁');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const res = await send({
+      type: 'popup:stkUnlock',
+      accountId: state.activeAccountId,
+      password: document.getElementById('stk-unlock-pw').value,
+    });
+    btn.disabled = false;
+    if (res?.error) {
+      err.textContent = res.error.code === 'BadPassword' ? '口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`;
+      return;
+    }
+    render();
+  });
+  c.append(err, btn);
+  $view.appendChild(c);
+}
+
+function renderStkAccountList(state) {
+  const list = state.accounts ?? [];
+  if (state.unlocked && list.length <= 1) return;
+  const c = card('Starknet 账户');
+  const ul = el('ul', { class: 'acct-list' });
+  for (const a of list) {
+    const li = el('li', { class: a.active ? 'active' : '' });
+    const who = el('div', { class: 'who' });
+    who.appendChild(el('div', { class: 'lbl' }, `${a.label}${a.active ? ' · 当前' : ''}`));
+    who.appendChild(el('div', { class: 'pk mono' }, `${a.address.slice(0, 18)}…${a.address.slice(-10)}`));
+    li.appendChild(who);
+    if (!a.active) {
+      const sw = el('button', { class: 'secondary' }, '切换');
+      sw.addEventListener('click', async () => {
+        sw.disabled = true;
+        await send({ type: 'popup:stkSelectAccount', accountId: a.id });
+        render();
+      });
+      li.appendChild(sw);
+    } else if (a.unlocked) {
+      li.appendChild(badge('已解锁', 'badge-play'));
+    }
+    ul.appendChild(li);
+  }
+  c.appendChild(ul);
+  $view.appendChild(c);
+}
+
+async function renderStkDashboard(state) {
+  const acct = (state.accounts ?? []).find((a) => a.id === state.activeAccountId);
+  const net = (state.networks ?? []).find((n) => n.id === state.networkId);
+
+  const c = card(`Starknet 账户：${acct?.label ?? ''}`);
+  c.id = 'stk-account-card';
+  const addrRow = el('div', { class: 'row' });
+  addrRow.appendChild(el('span', { class: 'k' }, '地址'));
+  addrRow.appendChild(el('span', { class: 'v mono', id: 'stk-address' }, state.address ?? ''));
+  c.appendChild(addrRow);
+  const pkRow = el('div', { class: 'row' });
+  pkRow.appendChild(el('span', { class: 'k' }, '公钥'));
+  pkRow.appendChild(el('span', { class: 'v mono', id: 'stk-pubkey' }, acct?.pubKey ?? ''));
+  c.appendChild(pkRow);
+
+  const netRow = el('div', { class: 'row' });
+  netRow.appendChild(el('span', { class: 'k' }, '网络'));
+  const netSel = el('select', { id: 'stk-net-select' });
+  for (const n of state.networks ?? []) {
+    const opt = el('option', { value: n.id }, `${n.name} (${n.chainId})`);
+    if (n.id === state.networkId) opt.selected = true;
+    netSel.appendChild(opt);
+  }
+  netRow.appendChild(netSel);
+  c.appendChild(netRow);
+  const netErr = evmErr();
+  netSel.addEventListener('change', async () => {
+    const res = await send({ type: 'popup:stkSetNetwork', networkId: netSel.value });
+    if (res?.error) { netErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.appendChild(netErr);
+
+  const rpcRow = el('div', { class: 'row' });
+  rpcRow.appendChild(el('span', { class: 'k' }, 'RPC'));
+  const rpcInput = evmRowOf('stk-rpc-input', net?.rpcUrl ?? 'http://…（留空恢复默认）');
+  rpcInput.value = net?.rpcOverridden ? (net.rpcUrl ?? '') : '';
+  rpcRow.appendChild(rpcInput);
+  c.appendChild(rpcRow);
+  const rpcSave = el('button', { id: 'stk-rpc-save', class: 'secondary' }, '保存 RPC（留空恢复默认）');
+  const rpcErr = evmErr();
+  rpcSave.addEventListener('click', async () => {
+    const res = await send({ type: 'popup:stkSetRpc', networkId: net.id, rpcUrl: rpcInput.value.trim() });
+    if (res?.error) { rpcErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(rpcSave, rpcErr);
+
+  const exRow = el('div', { class: 'row' });
+  exRow.appendChild(el('span', { class: 'k' }, 'Explorer API'));
+  const exInput = evmRowOf('stk-explorer-input', 'txlist 端点（可选）');
+  exInput.value = settingsExplorerOf(state) ?? '';
+  exRow.appendChild(exInput);
+  c.appendChild(exRow);
+  const exSave = el('button', { id: 'stk-explorer-save', class: 'secondary' }, '保存 Explorer API（留空清除）');
+  const exErr = evmErr();
+  exSave.addEventListener('click', async () => {
+    const res = await send({ type: 'popup:stkSetExplorer', networkId: net.id, apiUrl: exInput.value.trim() });
+    if (res?.error) { exErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    render();
+  });
+  c.append(exSave, exErr);
+
+  const balRow = el('div', { class: 'bal-row' });
+  balRow.appendChild(el('span', { class: 'bal mono', id: 'stk-balance' },
+    stkChainInfo ? `${stkChainInfo.balanceHuman} ${stkChainInfo.tokenSymbol}` : '—'));
+  const refreshBtn = el('button', { id: 'stk-refresh-btn', class: 'secondary' }, '刷新余额');
+  balRow.appendChild(refreshBtn);
+  c.appendChild(balRow);
+  const chainLine = el('div', { class: 'dim', id: 'stk-chain-info' },
+    stkChainInfo
+      ? `chainId ${stkChainInfo.chainId} · nonce ${stkChainInfo.nonce}${stkChainInfo.chainIdMismatch ? ' · ⚠ RPC chainId 与网络预设不符' : ''}`
+      : '点击“刷新余额”查询链上状态。');
+  c.appendChild(chainLine);
+  const refreshErr = evmErr();
+  refreshBtn.addEventListener('click', async () => {
+    refreshBtn.disabled = true;
+    const res = await send({ type: 'popup:stkRefresh' });
+    refreshBtn.disabled = false;
+    if (res?.error) { refreshErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    stkChainInfo = res;
+    render();
+  });
+  c.append(refreshErr);
+
+  if (net?.faucet) {
+    const fRow = el('div', { class: 'row' });
+    fRow.appendChild(evmRowOf('stk-faucet-amount', '水龙头金额（如 100）'));
+    const fbtn = el('button', { id: 'stk-faucet-btn', class: 'secondary' }, '注册 + 领取测试币');
+    const fErr = evmErr();
+    fbtn.addEventListener('click', async () => {
+      fbtn.disabled = true;
+      const res = await send({ type: 'popup:stkFaucet', amountHuman: document.getElementById('stk-faucet-amount').value.trim() || '100' });
+      fbtn.disabled = false;
+      if (res?.error) { fErr.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+      const r = await send({ type: 'popup:stkRefresh' });
+      if (!r?.error) { stkChainInfo = r; }
+      render();
+    });
+    fRow.appendChild(fbtn);
+    c.append(fRow, fErr);
+  }
+
+  const lockBtn = el('button', { id: 'stk-lock-btn', class: 'secondary' }, '锁定 Starknet 钱包');
+  lockBtn.addEventListener('click', async () => {
+    await send({ type: 'popup:stkLock' });
+    stkChainInfo = null;
+    render();
+  });
+  c.appendChild(lockBtn);
+  $view.appendChild(c);
+
+  $view.appendChild(renderStkTransfer());
+  $view.appendChild(renderStkContract());
+  renderStkHistory(state);
+  $view.appendChild(renderStkManage(state));
+}
+
+function settingsExplorerOf(state) {
+  const net = (state.networks ?? []).find((n) => n.id === state.networkId);
+  return null; // explorer override 由 SW 侧 settings 驱动；UI 输入为覆盖入口
+}
+
+/** prepare → 预览确认卡（Starknet invoke）。 */
+function renderStkTxPreview(container, preview) {
+  container.replaceChildren();
+  const box = el('div', { class: 'receipt', id: 'stk-tx-preview' });
+  box.appendChild(el('div', { class: 'st' }, 'invoke v1 交易预览'));
+  box.appendChild(row('from', preview.from, true));
+  box.appendChild(row('to', preview.to, true));
+  if (preview.methodLabel) box.appendChild(row('方法', preview.methodLabel, true));
+  box.appendChild(row('selector', preview.selector, true));
+  box.appendChild(row('calldata', preview.calldata.join(', '), true));
+  box.appendChild(row('nonce', preview.nonce, true));
+  box.appendChild(row('max fee', `${preview.maxFeeHuman}（${preview.maxFeeWei} wei）`, true));
+  box.appendChild(row('chainId', preview.chainId, true));
+  box.appendChild(el('div', { class: 'warn-box' }, '确认后以 STARK curve ECDSA 签名交易哈希并广播（[r, s]）。'));
+  const btns = el('div', { class: 'btn-row' });
+  const ok = el('button', { id: 'stk-tx-confirm', class: 'approve' }, '确认签名并发送');
+  const no = el('button', { id: 'stk-tx-reject', class: 'reject' }, '取消');
+  const err = evmErr();
+  ok.addEventListener('click', async () => {
+    ok.disabled = no.disabled = true;
+    const res = await send({ type: 'popup:stkConfirmTx' });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; ok.disabled = no.disabled = false; return; }
+    window.__lastStkBroadcast = res.hash;
+    container.appendChild(el('div', { class: 'ok-box' }, `已广播：${res.hash}`));
+    render();
+  });
+  no.addEventListener('click', async () => {
+    await send({ type: 'popup:stkRejectTx' });
+    container.replaceChildren();
+  });
+  btns.append(ok, no);
+  box.append(btns, err);
+  container.appendChild(box);
+}
+
+function renderStkTransfer() {
+  const c = card('代币转账（ERC-20 形状，u256 金额）');
+  c.append(
+    evmRowOf('stk-tx-recipient', '收款地址（0x…）'),
+    evmRowOf('stk-tx-amount', '金额（人类可读，如 1.5）'),
+  );
+  const err = evmErr();
+  const out = el('div');
+  const btn = el('button', { id: 'stk-tx-prepare' }, '生成交易预览');
+  btn.addEventListener('click', async () => {
+    out.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:stkPrepareTx',
+      preset: 'erc20',
+      method: 'transfer',
+      recipient: document.getElementById('stk-tx-recipient').value.trim(),
+      amountHuman: document.getElementById('stk-tx-amount').value.trim(),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderStkTxPreview(out, res.preview);
+  });
+  c.append(err, btn, out);
+  return c;
+}
+
+function renderStkContract() {
+  const c = card('合约调用（Starknet）');
+  c.appendChild(el('div', { class: 'dim' },
+    '只读：方法名（name/symbol/decimals/balance_of 等）→ starknet_call；写：任意 selector + felt calldata → invoke 交易。felt 参数用 hex（0x…）。'));
+  c.append(
+    evmRowOf('stk-contract', '合约地址（0x…）'),
+    evmRowOf('stk-method', '方法名（如 balance_of / faucet）'),
+    evmRowOf('stk-args', '参数（felt hex，逗号分隔；留空用当前地址时自动填充）'),
+  );
+  const err = evmErr();
+  const btns = el('div', { class: 'btn-row' });
+  const readBtn = el('button', { id: 'stk-read-btn', class: 'secondary' }, '读取（starknet_call）');
+  const writeBtn = el('button', { id: 'stk-write-btn' }, '发起合约交易');
+  const readOut = el('div', { id: 'stk-read-result' });
+  const txOut = el('div');
+  readBtn.addEventListener('click', async () => {
+    readOut.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:stkReadContract',
+      contract: document.getElementById('stk-contract').value.trim(),
+      functionName: document.getElementById('stk-method').value.trim(),
+      calldata: splitArgs(document.getElementById('stk-args').value),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    const box = el('div', { class: 'receipt' });
+    box.appendChild(el('div', { class: 'st' }, `selector ${res.selector.slice(0, 18)}… →`));
+    for (const v of res.values ?? []) {
+      box.appendChild(row('返回', String(v), true));
+    }
+    readOut.appendChild(box);
+  });
+  writeBtn.addEventListener('click', async () => {
+    txOut.replaceChildren();
+    err.textContent = '';
+    const res = await send({
+      type: 'popup:stkPrepareTx',
+      to: document.getElementById('stk-contract').value.trim(),
+      functionName: document.getElementById('stk-method').value.trim(),
+      calldata: splitArgs(document.getElementById('stk-args').value),
+    });
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderStkTxPreview(txOut, res.preview);
+  });
+  btns.append(readBtn, writeBtn);
+  c.append(err, btns, readOut, txOut);
+  return c;
+}
+
+function renderStkHistory(state) {
+  const c = card('交易记录');
+  const btnRow = el('div', { class: 'btn-row' });
+  const btn = el('button', { id: 'stk-history-btn', class: 'secondary' }, '刷新记录');
+  const explorerCb = el('input', { type: 'checkbox', id: 'stk-history-explorer' });
+  explorerCb.style.width = 'auto';
+  const explorerLabel = el('label', { for: 'stk-history-explorer' }, '合并链上探索器记录');
+  explorerLabel.style.display = 'inline-flex';
+  const list = el('div', { id: 'stk-history-list' });
+  const err = evmErr();
+  btn.addEventListener('click', async () => {
+    list.replaceChildren();
+    err.textContent = '';
+    btn.disabled = true;
+    const res = await send({ type: 'popup:stkHistory', includeExplorer: explorerCb.checked });
+    btn.disabled = false;
+    if (res?.error) { err.textContent = `${res.error.code}: ${res.error.reason}`; return; }
+    renderStkHistoryList(list, res);
+  });
+  btnRow.append(btn);
+  const cbWrap = el('span');
+  cbWrap.style.display = 'inline-flex';
+  cbWrap.style.alignItems = 'center';
+  cbWrap.style.gap = '4px';
+  cbWrap.append(explorerCb, explorerLabel);
+  btnRow.appendChild(cbWrap);
+  c.append(btnRow, err, list);
+  $view.appendChild(c);
+}
+
+function renderStkHistoryList(container, res) {
+  const txs = res.txs ?? [];
+  if (txs.length === 0) {
+    container.appendChild(el('div', { class: 'dim' }, '暂无交易记录（发送交易后可在此查看状态）。'));
+  }
+  if (res.explorerNote) {
+    container.appendChild(el('div', { class: 'hint' }, `链上探索器记录未合并（${res.explorerNote}）——本地记录照常展示。`));
+  }
+  for (const t of txs.slice(0, 30)) {
+    const box = el('div', { class: 'receipt' });
+    const head = el('div');
+    const stCls = t.status === 'succeeded' ? 'included' : t.status === 'reverted' ? 'seen' : '';
+    head.appendChild(el('span', { class: `st ${stCls}` },
+      t.status === 'succeeded' ? '已确认' : t.status === 'reverted' ? '已回退' : '待确认'));
+    head.appendChild(el('span', { class: 'dim' },
+      ` · ${t.kind === 'transfer' ? '转账' : (t.methodLabel ?? '合约')} · ${t.source === 'explorer' ? '链上' : '本地'}`));
+    box.appendChild(head);
+    const hashRow = row('hash', '', true);
+    const hashA = el('a', { class: 'mono' }, `${t.hash.slice(0, 22)}…${t.hash.slice(-8)}`);
+    if (t.explorerUrl) { hashA.href = t.explorerUrl; hashA.target = '_blank'; hashA.rel = 'noreferrer'; }
+    hashRow.querySelector('.v').replaceChildren(hashA);
+    box.appendChild(hashRow);
+    box.appendChild(row('方向', `${shortHex(t.from ?? '', 8, 6)} → ${shortHex(t.to ?? '', 8, 6)}`, true));
+    if (t.valueHuman) box.appendChild(row('金额', t.valueHuman, true));
+    if (t.blockNumber) box.appendChild(row('区块', t.blockNumber));
+    if (t.createdAtMs) box.appendChild(row('时间', new Date(t.createdAtMs).toLocaleString()));
+    container.appendChild(box);
+  }
+  if ((res.pendingReconciled ?? 0) > 0) {
+    container.appendChild(el('div', { class: 'ok-box' }, `本轮对账更新 ${res.pendingReconciled} 笔待确认交易。`));
+  }
+}
+
+function renderStkManage(state) {
+  const c = card('钱包管理');
+  c.appendChild(el('div', { class: 'dim' }, '导出私钥与修改口令都需要口令确认（fail-closed）。'));
+
+  const exp = el('details', { id: 'stk-export-details' });
+  exp.appendChild(el('summary', {}, '导出私钥'));
+  exp.appendChild(evmRowOf('stk-export-pw', '口令', 'password'));
+  const expErr = evmErr();
+  const expBtn = el('button', { id: 'stk-export-btn', class: 'reject' }, '显示私钥（谨慎）');
+  const expOut = el('div', { id: 'stk-export-out' });
+  expBtn.addEventListener('click', async () => {
+    expOut.replaceChildren();
+    expErr.textContent = '';
+    const res = await send({ type: 'popup:stkExportKey', password: document.getElementById('stk-export-pw').value });
+    if (res?.error) { expErr.textContent = res.error.code === 'BadPassword' ? '口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`; return; }
+    const key = el('div', { class: 'mono', id: 'stk-exported-key' }, res.privateKey);
+    key.style.wordBreak = 'break-all';
+    const warn = el('div', { class: 'warn-box' }, '⚠ 任何持有该私钥的人都能完全控制此账户。切勿粘贴到不受信任的页面。');
+    expOut.append(key, warn);
+  });
+  exp.append(expErr, expBtn, expOut);
+  c.appendChild(exp);
+
+  const cp = el('details', { id: 'stk-cpw-details' });
+  cp.appendChild(el('summary', {}, '修改口令（当前账户）'));
+  cp.append(
+    evmRowOf('stk-cpw-current', '当前口令', 'password'),
+    evmRowOf('stk-cpw-next', '新口令（≥ 8 字符）', 'password'),
+  );
+  const cpErr = evmErr();
+  const cpBtn = el('button', { id: 'stk-cpw-btn', class: 'secondary' }, '修改口令');
+  cpBtn.addEventListener('click', async () => {
+    cpErr.textContent = '';
+    const res = await send({
+      type: 'popup:stkChangePassword',
+      current: document.getElementById('stk-cpw-current').value,
+      next: document.getElementById('stk-cpw-next').value,
+    });
+    if (res?.error) { cpErr.textContent = res.error.code === 'BadPassword' ? '当前口令错误（fail-closed）' : `${res.error.code}: ${res.error.reason}`; return; }
+    document.getElementById('stk-cpw-current').value = '';
+    document.getElementById('stk-cpw-next').value = '';
+    cp.appendChild(el('div', { class: 'ok-box' }, '口令已修改（keystore 已用新口令重加密）。'));
+  });
+  cp.append(cpErr, cpBtn);
+  c.appendChild(cp);
+
+  const rm = el('details', { id: 'stk-remove-details' });
+  rm.appendChild(el('summary', {}, '删除当前账户'));
+  rm.appendChild(el('div', { class: 'dim' }, '删除本地加密 keystore 与交易记录。没有私钥备份将永久失去该账户——请先导出私钥。'));
+  const rmErr = evmErr();
+  const rmBtn = el('button', { id: 'stk-remove-btn', class: 'reject' }, '确认删除当前账户');
+  rmBtn.addEventListener('click', async () => {
+    rmBtn.disabled = true;
+    const res = await send({ type: 'popup:stkRemoveAccount', accountId: state.activeAccountId });
+    if (res?.error) { rmErr.textContent = `${res.error.code}: ${res.error.reason}`; rmBtn.disabled = false; return; }
+    render();
+  });
+  rm.append(rmErr, rmBtn);
+  c.appendChild(rm);
+  return c;
 }
 
 render();

@@ -1,0 +1,171 @@
+{
+  "date": "2026-09-15T18:35:44.642Z",
+  "browser": "Chrome/153.0.8010.36",
+  "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
+  "devchainUrl": "http://127.0.0.1:61431",
+  "total": 32,
+  "pass": 32,
+  "fail": 0,
+  "results": [
+    {
+      "step": "S0 popup 页加载 + Starknet 模式按钮存在",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "S1 切换到 Starknet 钱包 → 创建视图",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "S2 创建钱包 → 地址（ADDR_BOUND 内 + Starknet 校验和）+ 公钥展示",
+      "ok": true,
+      "detail": "0x0570941432Db46b174ce1A38817B08FFa817B96cc110f1BaF828A8f82a68cBbF / 0x3c93aff95159…"
+    },
+    {
+      "step": "S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet",
+      "ok": true,
+      "detail": "{\"hasWallet\":true,\"unlocked\":true,\"net\":\"starknet-devnet\"}"
+    },
+    {
+      "step": "S3 保存 RPC 覆盖 → 生效 URL = starkdevchain",
+      "ok": true,
+      "detail": "http://127.0.0.1:61431"
+    },
+    {
+      "step": "F1 余额查询：注册 pubkey + 水龙头 100 DST → 余额展示",
+      "ok": true,
+      "detail": "100 DST"
+    },
+    {
+      "step": "F2 链状态行：chainId=ZCDN + nonce 展示",
+      "ok": true,
+      "detail": "chainId ZCDN · nonce 0"
+    },
+    {
+      "step": "F3 SW 余额面：balanceWei=100e18 + nonce=0 + chainId 无误",
+      "ok": true,
+      "detail": "{\"chainId\":\"ZCDN\",\"chainIdMismatch\":false,\"nonce\":\"0\",\"balanceWei\":\"100000000000000000000\",\"balanceHuman\":\"100\",\"tokenSymbol\":\"DST\",\"rpcUrl\""
+    },
+    {
+      "step": "C1 合约只读 symbol → DST（starknet_call）",
+      "ok": true,
+      "detail": "selector 0x216b05c387bab9ac… → | 返回 | DST"
+    },
+    {
+      "step": "C2 合约只读 balance_of → 100e18（felt 原值）",
+      "ok": true,
+      "detail": "selector 0x35a73cd311a05d46… → | 返回 | 0x56bc75e2d63100000（100000000000000000000） | 返回"
+    },
+    {
+      "step": "C3 invoke v1 预览卡：selector + calldata + max fee + chainId",
+      "ok": true,
+      "detail": "invoke v1 交易预览 | from | 0x0570941432Db46b174ce1A38817B08FFa817B96cc110f1BaF828A8f82a68cBbF | to | 0xc0de0000000000000000000000000000000070b19e6b9 | 方法 | transfer(recipient, amount_u256) | selector | 0"
+    },
+    {
+      "step": "C4 确认 → STARK curve 签名广播（[r, s] invoke v1）",
+      "ok": true,
+      "detail": "0x53ee80e7a52b8422835cb18b153aa6340021962cfde6b9ee504f477a7156839"
+    },
+    {
+      "step": "C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址",
+      "ok": true,
+      "detail": "{\"from\":\"0x570941432db46b174ce1a38817b08ffa817b96cc110f1baf828a8f82a68cbbf\",\"st\":\"SUCCEEDED\"}"
+    },
+    {
+      "step": "C6 链上效果核对：balance_of(OTHER) → 25e18（u256）",
+      "ok": true,
+      "detail": "selector 0x35a73cd311a05d46… → | 返回 | 0x15af1d78b58c40000（25000000000000000000） | 返回"
+    },
+    {
+      "step": "T1 取消预览 → 不广播",
+      "ok": true,
+      "detail": "txs=1"
+    },
+    {
+      "step": "T2 余额不足 → 预览前拒绝",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "H1 交易记录列表：本地记录 + 已确认状态",
+      "ok": true,
+      "detail": "boxes=1"
+    },
+    {
+      "step": "H2 explorer txlist 合并",
+      "ok": true,
+      "detail": "merged"
+    },
+    {
+      "step": "M1 导出私钥：错口令 fail-closed（BadPassword）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M2 导出私钥：口令确认 → felt 私钥展示",
+      "ok": true,
+      "detail": "0xe21f1b4b22…"
+    },
+    {
+      "step": "M3 锁定 → 错口令解锁拒绝（fail-closed）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M4 正确口令解锁恢复",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M5 锁定时 prepareTx → SessionInvalid（SW 守卫）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"SessionInvalid\",\"reason\":\"先解锁\"}}"
+    },
+    {
+      "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
+      "ok": true,
+      "detail": "{\"key\":\"0xe21f1b4b22453bbfcf91b10f229459e\"}"
+    },
+    {
+      "step": "M6b 删除当前账户 → 回到创建视图",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M6 私钥再导入 → 同一地址（新随机盐 → 新地址但同私钥；校验和一致）",
+      "ok": true,
+      "detail": "0x04Ee10403375Ce844a9ac1A41653b8203766CDb879D888ACFa0679c804d99b8C"
+    },
+    {
+      "step": "M7 非法私钥导入拒绝（InvalidArgument）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M8 修改口令（keystore 重加密）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M9 旧口令失效 + 新口令解锁成功",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "N1 未知网络拒绝（NetworkUnsupported）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"NetworkUnsupported\",\"reason\":\"nope\"}}"
+    },
+    {
+      "step": "N2 非法 RPC URL 拒绝（InvalidArgument）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"InvalidArgument\",\"reason\":\"RPC URL 必须是 http(s)\"}}"
+    },
+    {
+      "step": "N3 RPC 不可达 → RpcUnreachable（如实报错）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"RpcUnreachable\",\"reason\":\"RPC 不可达：http://127.0.0.1:1\"}}"
+    }
+  ]
+}

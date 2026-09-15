@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-13T10:03:38.029Z",
+  "date": "2026-09-15T18:33:42.752Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "pageOrigin": "http://127.0.0.1:57595",
+  "pageOrigin": "http://127.0.0.1:60713",
   "total": 30,
   "pass": 30,
   "fail": 0,
@@ -15,7 +15,7 @@
     {
       "step": "S1 创建账户",
       "ok": true,
-      "detail": "{\"accountId\":\"bc1c45dc-54b2-4c26-8e7e-cd6c98f03450\",\"publicKey\":\"037eaa043215df898f03af19536e24b5b6c"
+      "detail": "{\"accountId\":\"1b9df2ef-768b-48aa-882c-d4ca6f81a931\",\"publicKey\":\"032082a0820abda0476b9983077624d80f6"
     },
     {
       "step": "S2 两张 PLAY note（300 + 200）",
@@ -30,17 +30,17 @@
     {
       "step": "S4 devnet 入口形态登记（evidence=devnet_local_entry，状态 active）",
       "ok": true,
-      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
+      "detail": "{\"bindingId\":\"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b\",\"origin\":\"http://127.0.0.1:60713\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
     },
     {
       "step": "S5 registry 列表：1 条会话密钥 + origin/限额/有效期投影",
       "ok": true,
-      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
+      "detail": "{\"bindingId\":\"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b\",\"origin\":\"http://127.0.0.1:60713\",\"chainId\":\"zchain-devnet-1\",\"accountAddress\":\""
     },
     {
       "step": "L0 页面连接（origin 授权）",
       "ok": true,
-      "detail": "{\"accounts\":[\"037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa\"],\"chainId\":\"zchain"
+      "detail": "{\"accounts\":[\"032082a0820abda0476b9983077624d80f60c046c4ab3590ff2d067e51b12e4b69\"],\"chainId\":\"zchain"
     },
     {
       "step": "L1 限额内签名请求打开（amount_in=200 ≤ perTx 250）",
@@ -50,12 +50,12 @@
     {
       "step": "L2 限额内签名成功（批准 → wallet-core 真实签名）",
       "ok": true,
-      "detail": "{\"digest\":\"3dc6664b8960c88d71fc4ca958e2ce4d9e180a2b5345809c3cc0ba0359063b01\"}"
+      "detail": "{\"digest\":\"3d77a8a3dc57297176b78a314247b6b12fbc1e038ae13b714441cd668f26ae7b\"}"
     },
     {
       "step": "L3 日限记账：binding dailyUsedToday = 200（amount_in 口径）",
       "ok": true,
-      "detail": "{\"bindingId\":\"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209\",\"origin\":\"http://127.0.0.1:57595\",\"chainId\":\"zchain-devnet-1"
+      "detail": "{\"bindingId\":\"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b\",\"origin\":\"http://127.0.0.1:60713\",\"chainId\":\"zchain-devnet-1"
     },
     {
       "step": "L4 单笔超限 → SessionOverPerTxLimit（批准前拒绝，不打开弹窗）",
@@ -95,12 +95,12 @@
     {
       "step": "L11 常规路径签名成功（owner 路径不受会话密钥影响）",
       "ok": true,
-      "detail": "{\"digest\":\"894093fd29d103345e03bd60f7b2fc1339023dbb47a4b4762ba8fb9cafda0f4e\"}"
+      "detail": "{\"digest\":\"53437c089c9cff6ed9c2cb036e975b02c4b76433443d4ecceaf3200f311e19a6\"}"
     },
     {
       "step": "R1 授权簿含页面 origin",
       "ok": true,
-      "detail": "[{\"origin\":\"http://127.0.0.1:57595\",\"grantedAt\":1789293817}]"
+      "detail": "[{\"origin\":\"http://127.0.0.1:60713\",\"grantedAt\":1789497222}]"
     },
     {
       "step": "R2 撤销 origin 授权",
@@ -115,7 +115,7 @@
     {
       "step": "R4 重连可恢复授权（批准后 granted）",
       "ok": true,
-      "detail": "{\"accounts\":[\"037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa"
+      "detail": "{\"accounts\":[\"032082a0820abda0476b9983077624d80f60c046c4ab3590ff2d067e51b12e4b69"
     },
     {
       "step": "C1 矩阵三协议行齐全（EIP-1193/WC/Starknet）",

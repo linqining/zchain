@@ -1,0 +1,192 @@
+{
+  "date": "2026-09-15T18:34:02.702Z",
+  "browser": "Chrome/153.0.8010.36",
+  "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
+  "devchainUrl": "http://127.0.0.1:60808",
+  "contract": "0xc0DE000000000000000000000000000000000000",
+  "total": 36,
+  "pass": 36,
+  "fail": 0,
+  "results": [
+    {
+      "step": "E0 popup 页加载 + 模式切换按钮存在",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "E1 切换到 EVM 钱包 → 创建视图",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "E2 创建钱包（口令 → 加密 keystore）→ EIP-55 地址展示",
+      "ok": true,
+      "detail": "0x29a114179708201F779D062D1e7403DddE8F5500"
+    },
+    {
+      "step": "E2b SW 状态：hasWallet + unlocked + 账户列表",
+      "ok": true,
+      "detail": "{\"hasWallet\":true,\"unlocked\":true,\"n\":1}"
+    },
+    {
+      "step": "E3 保存 RPC 覆盖 → 生效 URL = devchain",
+      "ok": true,
+      "detail": "http://127.0.0.1:60808"
+    },
+    {
+      "step": "F1 余额查询：水龙头 100 ETH → 余额展示",
+      "ok": true,
+      "detail": "100 ETH"
+    },
+    {
+      "step": "F2 链状态行：chainId/nonce/gas 展示",
+      "ok": true,
+      "detail": "chainId 0x7a69 · nonce 0 · gas 1 gwei"
+    },
+    {
+      "step": "F3 SW 余额面：balanceWei=100e18 + nonce=0 + gasPrice",
+      "ok": true,
+      "detail": "{\"chainIdHex\":\"0x7a69\",\"chainIdMismatch\":false,\"balanceWei\":\"100000000000000000000\",\"balanceHuman\":\"100\",\"nonce\":\"0\",\"gasPriceWei\":\"10000000"
+    },
+    {
+      "step": "C1 合约只读（ERC-20 预设 symbol）→ DVT",
+      "ok": true,
+      "detail": "symbol() → | string | DVT"
+    },
+    {
+      "step": "C2 合约写预览卡：faucet() + 最大手续费 + chainId",
+      "ok": true,
+      "detail": "交易预览（合约调用） | from | 0x29a114179708201F779D062D1e7403DddE8F5500 | to | 0xc0DE000000000000000000000000000000000000 | 方法 | faucet() | value | 0 ETH（0 wei） | data |"
+    },
+    {
+      "step": "C3 确认 → 签名广播（真实 raw 交易上链）",
+      "ok": true,
+      "detail": "0xb4e7f5f21e93ab19b8b9dc91f7ee75486ccf24fc5a6d91d3dfe53fa373e48860"
+    },
+    {
+      "step": "C4 开发链核对：sender 恢复 = 钱包地址 + status 0x1",
+      "ok": true,
+      "detail": "{\"from\":\"0x29a114179708201F779D062D1e7403DddE8F5500\",\"status\":\"0x1\"}"
+    },
+    {
+      "step": "C5 合约只读 balanceOf → 1000（人类可读换算）",
+      "ok": true,
+      "detail": "balanceOf(address) → | uint256 | 1000（raw 1000000000000000000000）"
+    },
+    {
+      "step": "C6 合约写 transfer(OTHER,250) 广播",
+      "ok": true,
+      "detail": "0xe1e4d346a28ecb8219a35a0f8061ad3d47ac50a96ae981cae8da334948787fa8"
+    },
+    {
+      "step": "C7 链上效果核对：balanceOf(OTHER) → 250",
+      "ok": true,
+      "detail": "balanceOf(address) → | uint256 | 250（raw 250000000000000000000）"
+    },
+    {
+      "step": "T1 原生转账 1.5 ETH → 广播",
+      "ok": true,
+      "detail": "0x83531fe6869e4dd9a0de5bc49e56b5e33deae15ffc8a26990cc4ef69d4d27b24"
+    },
+    {
+      "step": "T2 取消预览 → 不广播",
+      "ok": true,
+      "detail": "txs=3"
+    },
+    {
+      "step": "T3 余额不足 → InsufficientFunds（预览前拒绝）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "T4 转账后余额刷新（≈98.5 − gas）",
+      "ok": true,
+      "detail": "98.499935848 ETH"
+    },
+    {
+      "step": "H1 交易记录列表：≥3 条本地记录 + 已确认状态",
+      "ok": true,
+      "detail": "boxes=3"
+    },
+    {
+      "step": "H2 explorer txlist 合并（Etherscan 兼容端点）",
+      "ok": true,
+      "detail": "merged"
+    },
+    {
+      "step": "H3 记录明细：hash + 方向 + 金额 + 区块",
+      "ok": true,
+      "detail": "已确认 · 转账 · 本地 | hash | 0x83531fe6869e4dd9a0de…d4d27b24 | 方向 | 0x29a114…8F5500 → 0xbeeF00…000000 | 金额 | 1.5 ETH | 区块 | 3 | gas used | 21000 | 时间 | 2026/9/16 02:3"
+    },
+    {
+      "step": "M1 导出私钥：错口令 fail-closed（BadPassword）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M2 导出私钥：口令确认 → 64 hex 私钥展示",
+      "ok": true,
+      "detail": "0x0b6d57371b…"
+    },
+    {
+      "step": "M3 锁定 → 错口令解锁拒绝（fail-closed）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M4 正确口令解锁恢复",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M5 锁定时 prepareTx → SessionInvalid（SW 守卫）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"SessionInvalid\",\"reason\":\"先解锁\"}}"
+    },
+    {
+      "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
+      "ok": true,
+      "detail": "{\"key\":\"0x0b6d57371b6917a96ccd04c98e8aa2baa9cb48db9a30abadcf7d445ecb93d2ee\"}"
+    },
+    {
+      "step": "M6b 删除当前账户 → 回到创建视图",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M6 私钥再导入 → 同一 EIP-55 地址",
+      "ok": true,
+      "detail": "0x29a114179708… vs 0x29a114179708…"
+    },
+    {
+      "step": "M7 非法私钥导入拒绝（InvalidArgument）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M8 修改口令（keystore 重加密）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "M9 旧口令失效 + 新口令解锁成功",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "N1 未知网络拒绝（NetworkUnsupported）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"NetworkUnsupported\",\"reason\":\"0xdead\"}}"
+    },
+    {
+      "step": "N2 非法 RPC URL 拒绝（InvalidArgument）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"InvalidArgument\",\"reason\":\"RPC URL 必须是 http(s)\"}}"
+    },
+    {
+      "step": "N3 RPC 不可达 → RpcUnreachable（如实报错）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"RpcUnreachable\",\"reason\":\"RPC 不可达：http://127.0.0.1:1 [TypeError: Failed to fetch]\""
+    }
+  ]
+}

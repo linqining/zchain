@@ -114,3 +114,18 @@ ul.notes li { display: flex; justify-content: space-between; padding: 4px 0; bor
 .hint { font-size: 11px; color: var(--warn); margin-top: 2px; }
 details { margin-bottom: 8px; }
 details summary { cursor: pointer; color: var(--dim); font-size: 12px; }
+/* Extension 0.5：模式切换 + EVM 钱包视图 */
+.mode-nav { display: flex; gap: 4px; }
+.mode-btn {
+  width: auto; margin: 0; padding: 4px 10px; font-size: 12px; font-weight: 600;
+  background: transparent; color: var(--dim); border: 1px solid var(--line); border-radius: 999px;
+}
+.mode-btn.active { color: #06101c; background: var(--accent); border-color: var(--accent); }
+.bal-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 6px 0; }
+.bal-row button { width: auto; margin: 0; padding: 6px 12px; font-size: 12px; }
+textarea {
+  width: 100%; padding: 8px 10px; border-radius: 8px;
+  border: 1px solid var(--line); background: var(--bg); color: var(--fg);
+  margin: 4px 0 8px; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+input[type="checkbox"] { accent-color: var(--accent); }

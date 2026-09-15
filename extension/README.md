@@ -1,14 +1,59 @@
-# ZChain Wallet — Browser Extension 0.4.0-alpha（plan-appchain §6.12.4）
+# ZChain Wallet — Browser Extension 0.6.0-alpha（plan-appchain §6.12.4）
 
-浏览器钱包插件（0.1 最小可用骨架 → 0.2 迭代 → **0.3/0.4 迭代**）。0.2 新增 =
-**testnet、多账户、REAL/PLAY 隔离展示、proof portal、备份恢复、网络切换**；
-0.3 新增 = **SNIP-12 会话密钥授权（UI + 流程）、REAL 提现预览（展示态）**；
-0.4 新增 = **授权簿/registry UI、会话密钥撤销/过期、单笔/每日限额执行
-（wasm/JS 双层 fail-closed）、capability matrix**。0.1 基线 = PLAY、本地
-keystore、ZChain provider（`window.zchain`）、开桌/买入/结算签名、devnet。
-诚实版本策略：0.4 功能面完成后仍为 **alpha**（1.0 门槛 = 第三方安全审查 +
+浏览器钱包插件（0.1 最小可用骨架 → 0.2 迭代 → 0.3/0.4 迭代 → 0.5 迭代 →
+**0.6 迭代**）。
+**0.6 新增 = Starknet 账户层（STARK curve 原生支持）**：STARK curve
+ECDSA/Pedersen/starknet_keccak 自包含实现（公共向量钉住）、UDC 公式地址
+推导、invoke v1 签名广播、余额/合约调用/交易记录/钱包管理全功能（与 EVM
+层同规格）。**0.5 新增 = 完整可用的 EVM 兼容多链账户层**：余额查询、合约
+调用（读/写）、交易记录查询（本地账本 + 链上 explorer 合并）、钱包管理
+（口令加密 keystore、创建/导入/锁定/解锁、私钥导出、修改口令、删除账户、
+多账户切换）。
+0.2 新增 = testnet、多账户、REAL/PLAY 隔离展示、proof portal、备份恢复、
+网络切换；0.3 = SNIP-12 会话密钥授权（UI + 流程）、REAL 提现预览（展示态）；
+0.4 = 授权簿/registry UI、会话密钥撤销/过期、单笔/每日限额执行（wasm/JS
+双层 fail-closed）、capability matrix。0.1 基线 = PLAY、本地 keystore、
+ZChain provider（`window.zchain`）、开桌/买入/结算签名、devnet。
+诚实版本策略：0.5 功能面完成后仍为 **alpha**（1.0 门槛 = 第三方安全审查 +
 wasm 源码级可复现重建/签名发布/SBOM；仓库内可复现构建工程面已随 0.4 交付，
 见 `scripts/extension_reproducible_build.sh`）。
+
+## Extension 0.5：EVM 兼容账户层（本轮交付）
+
+popup 顶栏 **ZChain / EVM 钱包** 双模式切换。EVM 层与既有 ZChain note 钱包
+并存，互不影响（各自 keystore、各自会话、统一自动锁屏心跳）。
+
+| 要求 | 实现 |
+|---|---|
+| **钱包余额查询** | JSON-RPC（`eth_getBalance/getTransactionCount/gasPrice/eth_chainId`），水龙头（dev 链）→ 余额/nonce/gas/chainId 展示 + RPC chainId 不符告警 |
+| **合约调用** | 只读：`eth_call`（ERC-20 预设免填 ABI + 自定义 ABI JSON；金额按 decimals 换算）；写：ABI 编码 → 交易预览卡（to/value/data/gas/手续费/chainId 逐字段）→ 确认 → EIP-155 签名 → `eth_sendRawTransaction` |
+| **交易记录查询** | 本地账本（pending → confirmed/failed 回执状态机）+ Etherscan 兼容 `txlist` 端点合并（hash 去重、本地回执状态优先）+ 待确认交易自动对账 |
+| **钱包管理** | 创建（随机 secp256k1 + PBKDF2-SHA256 600k + AES-256-GCM keystore）、导入私钥（同址重复导入拒绝）、锁定/解锁（错口令 fail-closed）、**私钥导出**（口令确认）、修改口令（重加密）、删除账户、多账户切换、网络/RPC/Explorer 设置 |
+| **E2E（浏览器操作）** | `tests/e2e/run_05.mjs`：36 步全 UI 操作（点击/输入/确认）真实浏览器测试 + 本地开发链（`tests/e2e/devchain.mjs`）链上核对 |
+
+密码学边界（如实声明）：EVM 层的 keccak256/secp256k1/RLP/EIP-155 实现于
+`common/evm/crypto.js`（自包含零依赖；**与 ZChain 路径的 wallet-core WASM
+边界无关**）。正确性由公共测试向量钉住（`tests/evm/crypto.test.js`）：
+keccak256 标准向量、secp256k1 G 点已知向量、EIP-55 规范示例、EIP-155 规范
+示例交易（signing hash + 规范签名交易的 sender 恢复一致性）；e2e 的开发链
+用同一模块独立解码 raw 交易并恢复 sender 与钱包地址核对（交叉验证）。k 的
+生成为 RFC 6979 结构的 HMAC-DRBG（哈希函数用 keccak256，非 RFC 规定的
+SHA 族——确定性性质与安全论证相同）。keystore 用 WebCrypto 平台原语
+（PBKDF2-SHA256 600k 派生 + AES-256-GCM；私钥只在 SW 内存会话，锁定/SW
+回收即毁）。私钥/口令永不落 storage、不入日志（WALLET-ACC-4 同纪律）。
+
+网络预设：ZChain EVM DevNet（本地 8545，支持水龙头）/ Ethereum / Sepolia /
+Base / Arbitrum One + 每链自定义 RPC 与 Explorer API 覆盖（manifest 已声明
+`http://localhost/*`、`http://127.0.0.1/*` host 权限供本地节点使用；公网 RPC
+走 CORS 开放的公开端点）。不冒充 EIP-1193 provider 的红线不变（无
+`window.ethereum` 注入）。
+
+`common/evm/` 模块（全部纯函数、node --test 直覆盖）：
+`crypto.js`（keccak256/secp256k1/RLP/EIP-155/EIP-55/ABI 编解码/数值格式化）、
+`keystore.js`（加密 keystore/导入导出/改密码）、`rpc.js`（JSON-RPC 客户端，
+稳定错误码 RpcUnreachable/RpcError/RpcBadShape）、`networks.js`（链预设与
+覆盖解析）、`contracts.js`（ABI 解析/编码/解码/ERC-20 预设）、`txs.js`
+（本地交易账本状态机）、`history.js`（explorer 行归一 + 合并）。
 
 **密码学零 JS 实现**：摘要（blake2s/poseidon）、签名（secp256k1）、加密
 （Argon2id + ChaCha20-Poly1305）全部由 [wallet-core](../poker-wallet)
@@ -147,7 +192,9 @@ bytes 由 wallet-core 单实现保证；验收挂
 | **Extension 0.1** | PLAY、本地 keystore、ZChain provider、开桌/买入/结算签名、devnet | ✅ 本目录（骨架 + 真实安全层 + 真实 wallet-core WASM） |
 | **Extension 0.2** | testnet、多账户、REAL/PLAY 隔离、proof portal、备份恢复、网络切换 | ✅ 本目录（详见 ACCEPTANCE.md"Extension 0.2 验收对照"节） |
 | **Extension 0.3** | SNIP-12 会话密钥授权、提现预览 | ✅ 本目录（**popup UI 面**；WalletConnect Vault adapter/relay、ForceInclude 提交路径、SeenReceipt 验签未交付——relay 挂 B5 外部依赖） |
-| **Extension 0.4** | account binding registry、会话密钥撤销/过期、单笔/每日限额、Stark wallet capability matrix | ✅ 本目录（**0.4.0-alpha**；撤销/限额在签名路径 wasm/JS 双层 fail-closed；详见 ACCEPTANCE.md"Extension 0.3/0.4 验收对照"节） |
+| **Extension 0.4** | account binding registry、会话密钥撤销/过期、单笔/每日限额、Stark wallet capability matrix | ✅ 本目录（撤销/限额在签名路径 wasm/JS 双层 fail-closed；详见 ACCEPTANCE.md"Extension 0.3/0.4 验收对照"节） |
+| **Extension 0.5** | EVM 兼容多链账户：余额查询、合约调用（读/写）、交易记录查询、钱包管理（口令 keystore/私钥导出/生成导入）、e2e | ✅ 本目录（`common/evm/*` + popup EVM 视图 + 本地开发链；36 步浏览器 e2e PASS，详见 ACCEPTANCE.md"Extension 0.5 验收对照"节） |
+| **Extension 0.6** | **Starknet 账户层（STARK curve）**：余额查询、合约调用（starknet_call/invoke v1 签名）、交易记录、钱包管理（keystore/私钥导出/改密码/删除/多账户） | ✅ 本目录（**0.6.0-alpha**；`common/stark/*` + popup Starknet 视图 + 本地 Starknet 开发链（独立验签）；32 步浏览器 e2e PASS，详见 ACCEPTANCE.md"Extension 0.6 验收对照"节） |
 | Extension 1.0 | 第三方安全审查、可复现构建、硬件钱包适配（仅可读签名） | ◐ 可复现构建的**仓库内工程面**已交付（`scripts/extension_reproducible_build.sh`：两阶段打包比对 PASS + dist-checksums.txt）；外审/签名发布/SBOM/硬件钱包 ⛔ |
 
 ## 可复现构建（1.0 仓库内工程面）
@@ -172,11 +219,10 @@ bash scripts/extension_reproducible_build.sh
 ## 测试
 
 ```bash
-node --test "extension/tests/*.test.js" "extension/tests/adapters/*.test.js"
-                                         # 135 用例 = 既有 112（31 安全校验 +
-                                         # 51 适配器 + 30 其他 + 新增 33）+
-                                         # 0.3/0.4 新增 23（sessions 11/
-                                         # withdraw_preview 6/capability_matrix 6）
+node --test "extension/tests/*.test.js" "extension/tests/adapters/*.test.js" \
+     "extension/tests/evm/*.test.js" "extension/tests/stark/*.test.js"
+                                         # 198 用例 = 0.4 的 135 + 0.5 EVM 24
+                                         #   + 0.6 STARK curve 12/钱包面 8 等
                                          # （node:test，无框架；目录形式
                                          # `node --test extension/tests/` 受本机
                                          # Node 24 通病影响，用通配形式）
@@ -188,6 +234,16 @@ node extension/tests/e2e/run_02.mjs       # 0.2 关键流真实浏览器 E2E（3
 node extension/tests/e2e/run_03.mjs       # 0.3/0.4 关键流真实浏览器 E2E（30 步：
                                          # 会话密钥授权/限额执行/授权簿/能力矩阵/
                                          # 提现预览；见 ACCEPTANCE）
+node extension/tests/e2e/run_04.mjs       # 0.4 portal STARK 验证流 E2E（12 步）
+node extension/tests/e2e/run_05.mjs       # 0.5 EVM 钱包关键流真实浏览器 E2E
+                                         # （36 步全 UI 操作：创建/余额/合约读写/
+                                         # 转账/记录/导出私钥/改密码；内置本地
+                                         # 开发链真实解码 raw 交易核对）
+node extension/tests/e2e/run_06.mjs       # 0.6 Starknet 钱包关键流真实浏览器 E2E
+                                         # （32 步全 UI 操作：创建/余额/合约读/
+                                         # invoke 签名广播/记录/导出私钥/改密码；
+                                         # 本地 Starknet 开发链 STARK curve
+                                         # 独立验签核对）
 cargo test -p poker-wallet --release      # 43 个 wallet-core 测试（不回归）
 cargo test -p poker-wallet --features wasm \
     --bin wallet_core_wasm                # 11 个 wasm.rs 纯逻辑测试
@@ -264,6 +320,33 @@ portal 正例（真实 explorer_gateway）+ 安全回归），证据见 ACCEPTAN
     GatewayUnreachable。
   - `zchain_verifyProof`/`zchain_watchProof` provider 方法仍未开放（portal 为
     扩展页交付）。
+- **0.5 新增边界（如实声明）**：
+  - EVM 层密码学为 JS 自包含实现（`common/evm/crypto.js`，公共向量钉住），
+    不在 wallet-core WASM 边界内；k 生成 = RFC 6979 结构 HMAC-DRBG
+    （H=keccak256）。交易为 legacy（EIP-155）类型；EIP-1559/typed tx、
+    DApp 浏览器 provider 注入（`window.ethereum`——红线不变）、硬件钱包、
+    助记词（BIP-39）派生路径未交付。
+  - 交易记录 = 本地账本 + 待确认回执对账 + Etherscan 兼容 txlist 合并；
+    未配置 Explorer API 的链只展示本钱包发出过的交易（纯 RPC 无法回溯全量
+    链上历史——不虚标）。
+  - 公网 RPC 依赖端点 CORS（公开节点通行做法）；manifest 声明了 localhost
+    host 权限供本地节点。SW 被回收即 EVM 会话锁定（fail-closed），待确认
+    draft 随之失效（60 秒 TTL）。
+  - `tests/e2e/devchain.mjs` 为测试/演示用最小 JSON-RPC 链（真实解码 raw
+    交易 + sender 恢复），非生产链客户端。
+- **0.6 新增边界（如实声明）**：
+  - Starknet 层密码学为 JS 自包含实现（`common/stark/curve.js`，公共向量
+    钉住：crypto-cpp 公钥/验签正负例、StarkEx Pedersen 向量、starknet.js
+    交易哈希向量、地址推导与校验和与官方实现对拍）；k 生成 = RFC 6979
+    结构 HMAC-keccak256 DRBG。
+  - 交易类型仅 invoke v1（Pedersen 元素链哈希）；v3（Poseidon/BLAKE2s）
+    与 SNIP-12 typed-data rev1 哈希仍归 wallet-core 单实现，本层不重复。
+  - 账户地址 = UDC 公式（class hash + 盐 + [公钥]）；公网预设 class hash
+    为广泛引用的 ArgentX Cairo-1 类（UI 可覆盖）；导入同私钥会因新随机盐
+    得到新地址（Starknet 语义：地址由 (class, salt, pubkey) 共同决定）。
+  - 私钥生成 < 2^125（生态惯例）；keystore 'stark-1' 形状与 EVM 层相互独立。
+  - devnet 水龙头 = dev 链扩展方法 dev_faucet（注册 pubkey + 出资）；链端
+    验签依赖注册的 pubkey（真实网络由账户合约内验证）。
 - **0.3/0.4 新增边界（如实声明）**：
   - 会话密钥的 **delegated 私钥只活在 wasm 会话**（锁定/切换即毁，不持久化
     ——wasm_smoke 18 步钉住）；0.3/0.4 交付的是授权与**约束执行面**（origin

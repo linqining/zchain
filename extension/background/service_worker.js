@@ -99,6 +99,49 @@ import { buildAuthorizeTypedData } from '../adapters/starknet.js';
 import { buildWithdrawPreview } from '../common/withdraw_preview.js';
 import { buildCapabilityMatrix, detectExternalWallets } from '../common/capability_matrix.js';
 import { initAdapters } from '../adapters/index.js';
+// ---------------------------------------------------------------------------
+// Extension 0.5：EVM 兼容账户层（余额查询 / 合约调用 / 交易记录 / 钱包管理）
+// 密码学与编解码在 common/evm/*（标准向量钉住）；本文件只做状态机与编排。
+// ---------------------------------------------------------------------------
+import {
+  bytesToHex, toChecksumAddress, isAddress, parseUnits, formatUnits, hexToBytes,
+  signLegacyTransaction,
+} from '../common/evm/crypto.js';
+import {
+  createKeystore, encryptToKeystore, decryptFromKeystore, changeKeystorePassword,
+  parsePrivateKeyHex, addressFromPrivateKey,
+} from '../common/evm/keystore.js';
+import {
+  EVM_NETWORKS, DEFAULT_EVM_NETWORK_ID, resolveEvmNetwork, effectiveRpcUrl,
+  effectiveExplorerApi, evmNetworkView,
+  canonicalHttpUrl as canonicalEvmUrl,
+} from '../common/evm/networks.js';
+import { JsonRpcClient, hexQtyToBigInt } from '../common/evm/rpc.js';
+import { parseAbi, ABI_PRESETS, readContract, buildWriteIntent, presentDecoded } from '../common/evm/contracts.js';
+import { emptyTxStore, addPendingTx, applyReceipt, txListView, pendingHashes } from '../common/evm/txs.js';
+import { mergeHistory, fetchExplorerHistory, normalizeExplorerRow } from '../common/evm/history.js';
+import { formatUnits as formatEvmUnits } from '../common/evm/crypto.js';
+// ---------------------------------------------------------------------------
+// Extension 0.6：Starknet 账户层（STARK curve：余额/合约调用/交易记录/钱包管理）
+// 密码学与编解码在 common/stark/*（公共向量钉住）；本文件只做状态机与编排。
+// ---------------------------------------------------------------------------
+import {
+  hexToBigInt, bigIntToHex, decodeShortString, starknetSelector,
+  toChecksumAddress as starkChecksum, privateKeyToPublicKey,
+} from '../common/stark/curve.js';
+import {
+  createStarkAccount, decryptFromKeystore as decryptStarkKeystore,
+  changeKeystorePassword as changeStarkKeystorePassword, parsePrivateKeyHex as parseStarkPrivateKey,
+  deriveAccount, generateSalt as generateStarkSalt, encryptToKeystore as encryptStarkKeystore,
+} from '../common/stark/account.js';
+import {
+  STARKNET_NETWORKS, DEFAULT_STARKNET_NETWORK_ID, resolveStarknetNetwork,
+  effectiveRpcUrl as effectiveStarkRpcUrl, starknetNetworkView, canonicalHttpUrl as canonicalStarkUrl,
+} from '../common/stark/networks.js';
+import { StarknetRpc } from '../common/stark/rpc.js';
+import { signInvoke, amountToFelts, feltsToAmount, buildInvokeCalldata } from '../common/stark/invoke.js';
+import { emptyTxStore as emptyStkTxStore, addPendingTx as addStkPendingTx, applyReceipt as applyStkReceipt,
+  txListView as stkTxListView, pendingHashes as stkPendingHashes, mergeHistory as mergeStkHistory } from '../common/stark/txs.js';
 
 // ---------------------------------------------------------------------------
 // 状态（SW 内存态 = 可丢失态；丢失即锁定，安全方向单一）
@@ -113,6 +156,16 @@ const mem = {
   pending: {},               // requestId -> {state, payload, openedAt, expiresAt}
   pageWaiters: new Map(),    // requestId -> {resolve}
   lastActivity: 0,
+  // Extension 0.5：EVM 会话（私钥只在 SW 内存；SW 回收即锁，fail-closed）
+  evm: {
+    session: null,           // {accountId, privateKey: Uint8Array, address}
+    draft: null,             // 待确认交易（prepare → confirm 两步）
+  },
+  // Extension 0.6：Starknet 会话（同上 fail-closed；私钥为 felt bigint）
+  stk: {
+    session: null,           // {accountId, privateKey: bigint, address, pubKey}
+    draft: null,             // 待确认 invoke（prepare → confirm 两步）
+  },
 };
 
 const storage = {
@@ -659,10 +712,1142 @@ async function lockWallet(reason) {
 }
 
 // ---------------------------------------------------------------------------
+// Extension 0.5：EVM 兼容账户层
+//
+// 存储（chrome.storage.local，只存密文/公开量）：
+//   evmVault    = { accounts: {id → {id,label,address,keystore,createdAt}},
+//                   activeAccountId, networkId }
+//   evmSettings = { rpcOverrides: {chainIdHex → url}, explorerOverrides: {...} }
+//   evmTxStores = { accountId → tx store（本地交易记录） }
+// 内存：mem.evm.session = {accountId, privateKey, address}（锁定即毁）；
+//       mem.evm.draft = 待确认交易（prepare → confirm 两步，60 秒过期）。
+// 日志纪律同 WALLET-ACC-4：私钥/口令/签名材料一律不入日志。
+// ---------------------------------------------------------------------------
+
+const EVM_DRAFT_TTL_MS = 60_000;
+
+async function getEvmVault() {
+  const { evmVault } = await storage.local.get('evmVault');
+  return evmVault ?? { accounts: {}, activeAccountId: null, networkId: DEFAULT_EVM_NETWORK_ID };
+}
+
+async function setEvmVault(vault) {
+  await storage.local.set({ evmVault: vault });
+}
+
+async function getEvmSettings() {
+  const { evmSettings } = await storage.local.get('evmSettings');
+  return evmSettings ?? { rpcOverrides: {}, explorerOverrides: {} };
+}
+
+async function setEvmSettings(settings) {
+  await storage.local.set({ evmSettings: settings });
+}
+
+async function getEvmTxStore(accountId) {
+  if (!accountId) return emptyTxStore();
+  const { evmTxStores } = await storage.local.get('evmTxStores');
+  return evmTxStores?.[accountId] ?? emptyTxStore();
+}
+
+async function setEvmTxStore(accountId, store) {
+  if (!accountId) return;
+  const { evmTxStores } = await storage.local.get('evmTxStores');
+  await storage.local.set({ evmTxStores: { ...(evmTxStores ?? {}), [accountId]: store } });
+}
+
+function evmUnlocked() {
+  return mem.evm.session != null;
+}
+
+function evmActiveAccount(vault) {
+  return vault.accounts[vault.activeAccountId] ?? null;
+}
+
+function lockEvm(reason) {
+  mem.evm.session = null;
+  mem.evm.draft = null;
+  logSafe('evm_locked', { reason: reason ?? '' });
+}
+
+function evmError(code, reason) {
+  return { error: { code, reason: reason ?? '' } };
+}
+
+/** 当前生效 EVM 网络 + 客户端（无账户/未配置 → 错误）。 */
+function evmRpc(vault, settings) {
+  const net = resolveEvmNetwork(vault.networkId ?? DEFAULT_EVM_NETWORK_ID);
+  if (!net) return { error: evmError('NetworkUnsupported', String(vault.networkId)) };
+  const url = effectiveRpcUrl(net, settings.rpcOverrides);
+  if (!url) return { error: evmError('RpcNotConfigured', net.id) };
+  return { net, rpc: new JsonRpcClient(url) };
+}
+
+/** 待确认交易回执对账（refresh/history 共用）。 */
+async function reconcileEvmPending(rpc, accountId) {
+  const store = await getEvmTxStore(accountId);
+  const hashes = pendingHashes(store);
+  let reconciled = 0;
+  for (const hash of hashes) {
+    try {
+      const receipt = await rpc.getTransactionReceipt(hash);
+      if (receipt && receipt.blockNumber != null) {
+        const applied = applyReceipt(store, hash, receipt, Date.now());
+        if (applied.ok) { await setEvmTxStore(accountId, applied.store); reconciled++; }
+      }
+    } catch { /* 单笔回执查询失败不阻塞其余 */ }
+  }
+  return reconciled;
+}
+
+/** 交易预览草稿（转账与合约写共用）：nonce/gas/余额校验 → mem.evm.draft。 */
+async function evmPrepareAndDraft(vault, settings, account, { to, value, data, kind, methodLabel, decodedArgs }) {
+  const env = evmRpc(vault, settings);
+  if (env.error) return env.error;
+  const { net, rpc } = env;
+  if (!isAddress(String(to ?? ''))) return evmError('InvalidArgument', '收款/合约地址非法');
+  let valueBig;
+  try {
+    valueBig = BigInt(value ?? '0');
+  } catch {
+    return evmError('InvalidArgument', '金额非法');
+  }
+  if (valueBig < 0n) return evmError('InvalidArgument', '金额不能为负');
+  try {
+    const [nonceHex, gasPriceHex, estimateHex] = await Promise.all([
+      rpc.getTransactionCount(account.address),
+      rpc.gasPrice(),
+      rpc.estimateGas({ from: account.address, to, value: '0x' + valueBig.toString(16), data }),
+    ]);
+    const nonce = hexQtyToBigInt(nonceHex);
+    const gasPrice = hexQtyToBigInt(gasPriceHex);
+    let gasLimit = hexQtyToBigInt(estimateHex);
+    if (gasLimit < 21000n) gasLimit = 21000n;
+    const maxFee = gasPrice * gasLimit;
+    const balance = hexQtyToBigInt(await rpc.getBalance(account.address));
+    if (balance < valueBig + maxFee) {
+      return evmError('InsufficientFunds', `余额不足：需要 ${formatUnits(valueBig + maxFee)}，当前 ${formatUnits(balance)}（含 gas）`);
+    }
+    mem.evm.draft = {
+      from: account.address, to: toChecksumAddress(to), value: valueBig.toString(),
+      data, nonce: nonce.toString(), gasPrice: gasPrice.toString(), gasLimit: gasLimit.toString(),
+      chainIdHex: net.chainIdHex, kind, methodLabel: methodLabel ?? null, decodedArgs: decodedArgs ?? null,
+      createdAt: Date.now(),
+    };
+    return {
+      preview: {
+        from: account.address, to: toChecksumAddress(to),
+        valueWei: valueBig.toString(), valueHuman: formatUnits(valueBig),
+        data: data === '0x' ? null : data,
+        nonce: nonce.toString(), gasPriceGwei: formatUnits(gasPrice, 9), gasLimit: gasLimit.toString(),
+        maxFeeWei: maxFee.toString(), maxFeeHuman: formatUnits(maxFee),
+        chainIdHex: net.chainIdHex, kind, methodLabel: methodLabel ?? null, decodedArgs: decodedArgs ?? null,
+        balanceHuman: formatUnits(balance),
+      },
+    };
+  } catch (e) {
+    return evmError(e.code === 'RpcError' ? 'EstimateFailed' : (e.code ?? 'RpcError'), e.message);
+  }
+}
+
+async function handleEvmMessage(m) {
+  const vault = await getEvmVault();
+  const settings = await getEvmSettings();
+  const account = evmActiveAccount(vault);
+
+  switch (m.type) {
+    // ---- 状态 ----
+    case 'popup:evmGetState': {
+      const net = resolveEvmNetwork(vault.networkId ?? DEFAULT_EVM_NETWORK_ID);
+      return {
+        hasWallet: Object.keys(vault.accounts).length > 0,
+        unlocked: evmUnlocked(),
+        address: evmUnlocked() ? mem.evm.session.address : (account?.address ?? null),
+        activeAccountId: vault.activeAccountId,
+        networkId: net?.id ?? null,
+        networks: EVM_NETWORKS.map((n) => evmNetworkView(n, settings.rpcOverrides, settings.explorerOverrides)),
+        accounts: Object.values(vault.accounts)
+          .map((a) => ({
+            id: a.id, label: a.label, address: a.address, createdAt: a.createdAt,
+            active: a.id === vault.activeAccountId,
+            unlocked: evmUnlocked() && mem.evm.session?.accountId === a.id,
+          }))
+          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
+        presets: Object.entries(ABI_PRESETS).map(([id, p]) => ({ id, label: p.label })),
+      };
+    }
+
+    // ---- 钱包管理 ----
+    case 'popup:evmCreate': {
+      if (typeof m.password !== 'string' || m.password.length < 8) {
+        return evmError('InvalidArgument', '口令至少 8 字符');
+      }
+      const { keystore, address, privateKey } = await createKeystore(m.password);
+      const id = crypto.randomUUID();
+      const label = (typeof m.label === 'string' && m.label.trim()) || `EVM 账户 ${Object.keys(vault.accounts).length + 1}`;
+      vault.accounts[id] = { id, label, address, keystore, createdAt: Date.now() };
+      vault.activeAccountId = id;
+      await setEvmVault(vault);
+      mem.evm.session = { accountId: id, privateKey: hexToBytes(privateKey), address };
+      logSafe('evm_wallet_created');
+      return { accountId: id, address };
+    }
+    case 'popup:evmImportKey': {
+      if (typeof m.password !== 'string' || m.password.length < 8) {
+        return evmError('InvalidArgument', '口令至少 8 字符');
+      }
+      let priv;
+      try {
+        priv = parsePrivateKeyHex(m.privateKey);
+      } catch (e) {
+        return evmError(e.code ?? 'InvalidArgument', e.message);
+      }
+      const address = addressFromPrivateKey(priv);
+      if (Object.values(vault.accounts).some((a) => a.address?.toLowerCase() === address.toLowerCase())) {
+        return evmError('AccountExists', '该地址已存在');
+      }
+      const keystore = await encryptToKeystore(priv, m.password);
+      const id = crypto.randomUUID();
+      const label = (typeof m.label === 'string' && m.label.trim()) || `导入 ${address.slice(0, 6)}…`;
+      vault.accounts[id] = { id, label, address, keystore, createdAt: Date.now() };
+      vault.activeAccountId = id;
+      await setEvmVault(vault);
+      mem.evm.session = { accountId: id, privateKey: priv, address };
+      logSafe('evm_wallet_imported');
+      return { accountId: id, address };
+    }
+    case 'popup:evmUnlock': {
+      const target = m.accountId ? vault.accounts[m.accountId] : account;
+      if (!target) return evmError('NoKeystore', '先创建钱包');
+      let priv;
+      try {
+        priv = await decryptFromKeystore(target.keystore, m.password);
+      } catch (e) {
+        return evmError(e.code ?? 'BadPassword', e.message);
+      }
+      vault.activeAccountId = target.id;
+      await setEvmVault(vault);
+      mem.evm.session = { accountId: target.id, privateKey: priv, address: target.address };
+      logSafe('evm_unlocked');
+      return { address: target.address };
+    }
+    case 'popup:evmLock':
+      lockEvm('popup');
+      return { locked: true };
+    case 'popup:evmExportKey': {
+      if (!evmUnlocked()) return evmError('SessionInvalid', '先解锁');
+      let priv;
+      try {
+        priv = await decryptFromKeystore(account.keystore, m.password);
+      } catch (e) {
+        return evmError(e.code ?? 'BadPassword', e.message);
+      }
+      // 双校验：口令解出的私钥必须对应当前账户地址
+      if (addressFromPrivateKey(priv).toLowerCase() !== account.address.toLowerCase()) {
+        return evmError('BadKeystore', 'keystore 与账户不一致（fail-closed）');
+      }
+      logSafe('evm_key_exported');
+      return { privateKey: bytesToHex(priv), address: account.address };
+    }
+    case 'popup:evmChangePassword': {
+      if (typeof m.next !== 'string' || m.next.length < 8) {
+        return evmError('InvalidArgument', '新口令至少 8 字符');
+      }
+      if (!account) return evmError('NoKeystore', '先创建钱包');
+      let next;
+      try {
+        next = await changeKeystorePassword(account.keystore, m.current, m.next);
+      } catch (e) {
+        return evmError(e.code ?? 'BadPassword', e.message);
+      }
+      vault.accounts[account.id] = { ...account, keystore: next };
+      await setEvmVault(vault);
+      logSafe('evm_password_changed');
+      return { ok: true };
+    }
+    case 'popup:evmSelectAccount': {
+      if (!vault.accounts[m.accountId]) return evmError('NoAccount', '账户不存在');
+      lockEvm('evm_account_switch');
+      vault.activeAccountId = m.accountId;
+      await setEvmVault(vault);
+      return { activeAccountId: m.accountId, locked: true };
+    }
+    case 'popup:evmRemoveAccount': {
+      if (!vault.accounts[m.accountId]) return evmError('NoAccount', '账户不存在');
+      if (evmUnlocked() && mem.evm.session.accountId === m.accountId) lockEvm('evm_account_remove');
+      delete vault.accounts[m.accountId];
+      if (vault.activeAccountId === m.accountId) {
+        vault.activeAccountId = Object.keys(vault.accounts)[0] ?? null;
+      }
+      await setEvmVault(vault);
+      const { evmTxStores } = await storage.local.get('evmTxStores');
+      if (evmTxStores?.[m.accountId]) {
+        const next = { ...evmTxStores };
+        delete next[m.accountId];
+        await storage.local.set({ evmTxStores: next });
+      }
+      return { ok: true, activeAccountId: vault.activeAccountId };
+    }
+    case 'popup:evmSetLabel': {
+      if (!account) return evmError('NoAccount', '账户不存在');
+      const label = String(m.label ?? '').slice(0, 40);
+      vault.accounts[account.id] = { ...account, label };
+      await setEvmVault(vault);
+      return { ok: true };
+    }
+
+    // ---- 网络 / RPC 设置 ----
+    case 'popup:evmSetNetwork': {
+      const net = resolveEvmNetwork(m.networkId);
+      if (!net) return evmError('NetworkUnsupported', String(m.networkId));
+      vault.networkId = net.id;
+      await setEvmVault(vault);
+      return { networkId: net.id, chainIdHex: net.chainIdHex };
+    }
+    case 'popup:evmSetRpc': {
+      const net = resolveEvmNetwork(m.chainIdHex);
+      if (!net) return evmError('NetworkUnsupported', String(m.chainIdHex));
+      if (m.rpcUrl == null || m.rpcUrl === '') {
+        delete settings.rpcOverrides[net.chainIdHex];
+      } else {
+        const canonical = canonicalEvmUrl(m.rpcUrl);
+        if (!canonical) return evmError('InvalidArgument', 'RPC URL 必须是 http(s)');
+        settings.rpcOverrides[net.chainIdHex] = canonical;
+      }
+      await setEvmSettings(settings);
+      return { saved: true, rpcUrl: effectiveRpcUrl(net, settings.rpcOverrides) };
+    }
+    case 'popup:evmSetExplorer': {
+      const net = resolveEvmNetwork(m.chainIdHex);
+      if (!net) return evmError('NetworkUnsupported', String(m.chainIdHex));
+      if (m.apiUrl == null || m.apiUrl === '') {
+        delete settings.explorerOverrides[net.chainIdHex];
+      } else {
+        const canonical = canonicalEvmUrl(m.apiUrl);
+        if (!canonical) return evmError('InvalidArgument', 'Explorer API URL 必须是 http(s)');
+        settings.explorerOverrides[net.chainIdHex] = canonical;
+      }
+      await setEvmSettings(settings);
+      return { saved: true, explorerApiUrl: effectiveExplorerApi(net, settings.explorerOverrides) };
+    }
+
+    // ---- 余额 / 链状态 ----
+    case 'popup:evmRefresh': {
+      if (!account) return evmError('NoAccount', '先创建钱包');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      try {
+        const [actualHex, balanceHex, nonceHex, gasPriceHex] = await Promise.all([
+          rpc.request('eth_chainId'), rpc.getBalance(account.address), rpc.getTransactionCount(account.address), rpc.gasPrice(),
+        ]);
+        const reconciled = await reconcileEvmPending(rpc, account.id);
+        const actual = actualHex?.toLowerCase();
+        return {
+          chainIdHex: actual ?? null,
+          chainIdMismatch: actual != null && actual !== net.chainIdHex,
+          balanceWei: hexQtyToBigInt(balanceHex).toString(),
+          balanceHuman: formatUnits(hexQtyToBigInt(balanceHex)),
+          nonce: hexQtyToBigInt(nonceHex).toString(),
+          gasPriceWei: hexQtyToBigInt(gasPriceHex).toString(),
+          gasPriceGwei: formatUnits(hexQtyToBigInt(gasPriceHex), 9),
+          rpcUrl: effectiveRpcUrl(net, settings.rpcOverrides),
+          pendingReconciled: reconciled,
+        };
+      } catch (e) {
+        return evmError(e.code ?? 'RpcError', e.message);
+      }
+    }
+
+    // ---- 合约调用（只读 eth_call）----
+    case 'popup:evmReadContract': {
+      if (!account) return evmError('NoAccount', '先创建钱包');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      let fn;
+      try {
+        fn = resolveEvmFunction(m);
+      } catch (e) {
+        return evmError(e.code ?? 'InvalidArgument', e.message);
+      }
+      try {
+        const res = await readContract({
+          contract: m.contract, fn, args: m.args ?? [],
+          callImpl: (tx) => rpc.call({ from: account.address, ...tx }),
+        });
+        // ERC-20 预设：金额类输出按 decimals 换算人类可读值（多一次只读调用）
+        const decimalsByType = {};
+        if (m.preset === 'erc20' && fn.outputTypes.some((t) => /^uint/.test(t))) {
+          try {
+            const decCall = await readContract({
+              contract: m.contract, fn: parseAbi(ABI_PRESETS.erc20.abi).byName.decimals, args: [],
+              callImpl: (tx) => rpc.call({ from: account.address, ...tx }),
+            });
+            const dec = Number(decCall.values[0]);
+            if (Number.isInteger(dec) && dec >= 0 && dec <= 36) decimalsByType.uint256 = dec;
+          } catch { /* decimals 不可用则只出 raw */ }
+        }
+        return {
+          method: fn.name,
+          signature: fn.signature,
+          values: presentDecoded(fn, res.values, { decimalsByType }),
+        };
+      } catch (e) {
+        return evmError(e.code ?? 'RpcError', e.message);
+      }
+    }
+
+    // ---- 交易（prepare → confirm 两步）----
+    case 'popup:evmPrepareTx': {
+      if (!evmUnlocked()) return evmError('SessionInvalid', '先解锁');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      let to, value, data, kind, methodLabel, decodedArgs;
+      if (m.intent) {
+        ({ to, value, data, methodLabel, decodedArgs } = m.intent);
+        kind = 'contract';
+      } else {
+        to = m.to;
+        value = String(parseUnits(m.valueEth ?? '0'));
+        data = typeof m.dataHex === 'string' && m.dataHex !== '' && m.dataHex !== '0x' ? m.dataHex : '0x';
+        kind = data === '0x' ? 'transfer' : 'contract';
+        methodLabel = kind === 'contract' ? 'raw calldata' : null;
+        decodedArgs = null;
+      }
+      return evmPrepareAndDraft(vault, settings, account, { to, value, data, kind, methodLabel, decodedArgs });
+    }
+    case 'popup:evmPrepareContractTx': {
+      if (!evmUnlocked()) return evmError('SessionInvalid', '先解锁');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      let fn;
+      try {
+        fn = resolveEvmFunction(m);
+      } catch (e) {
+        return evmError(e.code ?? 'InvalidArgument', e.message);
+      }
+      if (fn.view) return evmError('InvalidArgument', `${fn.name} 是只读方法，请用“读取”`);
+      // ERC-20 预设的金额参数：先查 decimals，把人类可读金额换算到最小单位
+      let tokenDecimals = null;
+      if (m.preset === 'erc20' && fn.inputs.some((i) => /^uint\d*$/.test(i.type) && i.type !== 'uint8')) {
+        try {
+          const decRes = await readContract({
+            contract: m.contract, fn: parseAbi(ABI_PRESETS.erc20.abi).byName.decimals, args: [],
+            callImpl: (tx) => env.rpc.call({ from: account.address, ...tx }),
+          });
+          const dec = Number(decRes.values[0]);
+          if (Number.isInteger(dec) && dec >= 0 && dec <= 36) tokenDecimals = dec;
+        } catch { /* decimals 拿不到则按最小单位解释（UI 已提示） */ }
+      }
+      let intent;
+      try {
+        intent = buildWriteIntent(fn, m.args ?? [], { contract: m.contract, tokenDecimals });
+      } catch (e) {
+        return evmError(e.code ?? 'InvalidArgument', e.message);
+      }
+      return evmPrepareAndDraft(vault, settings, account, { ...intent, kind: 'contract' });
+    }
+    case 'popup:evmConfirmTx': {
+      if (!evmUnlocked()) return evmError('SessionInvalid', '先解锁');
+      const draft = mem.evm.draft;
+      if (!draft) return evmError('NoDraft', '没有待确认交易');
+      if (Date.now() - draft.createdAt > EVM_DRAFT_TTL_MS) {
+        mem.evm.draft = null;
+        return evmError('DraftExpired', '交易预览已过期，请重新发起');
+      }
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      const { rpc } = env;
+      let signed;
+      try {
+        signed = signLegacyTransaction({
+          nonce: draft.nonce, gasPrice: draft.gasPrice, gasLimit: draft.gasLimit,
+          to: draft.to, value: draft.value, data: draft.data,
+          chainId: BigInt(draft.chainIdHex),
+        }, mem.evm.session.privateKey);
+      } catch (e) {
+        return evmError('SignFailed', e.message);
+      }
+      let hash;
+      try {
+        hash = await rpc.sendRawTransaction(signed.raw);
+      } catch (e) {
+        return evmError(e.code ?? 'RpcError', e.message);
+      }
+      mem.evm.draft = null;
+      const added = addPendingTx(await getEvmTxStore(account.id), {
+        hash, chainId: draft.chainIdHex, from: draft.from, to: draft.to,
+        value: draft.value, data: draft.data, nonce: draft.nonce, gasPrice: draft.gasPrice,
+        gasLimit: draft.gasLimit, kind: draft.kind, methodLabel: draft.methodLabel,
+        decodedArgs: draft.decodedArgs,
+      }, Date.now());
+      if (added.ok) await setEvmTxStore(account.id, added.store);
+      logSafe('evm_tx_broadcast');
+      return { hash: hash.toLowerCase(), localHash: signed.hash, tx: added.entry ?? null };
+    }
+    case 'popup:evmRejectTx':
+      mem.evm.draft = null;
+      return { ok: true };
+
+    // ---- 交易记录 ----
+    case 'popup:evmHistory': {
+      if (!account) return evmError('NoAccount', '先创建钱包');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      const reconciled = await reconcileEvmPending(rpc, account.id);
+      const local = txListView(await getEvmTxStore(account.id));
+      let explorerRows = [];
+      let explorerNote = null;
+      const explorerApi = effectiveExplorerApi(net, settings.explorerOverrides);
+      if (m.includeExplorer && explorerApi) {
+        const res = await fetchExplorerHistory({ apiUrl: explorerApi, address: account.address });
+        if (res.ok) explorerRows = res.rows;
+        else explorerNote = res.code;
+      } else if (m.includeExplorer && !explorerApi) {
+        explorerNote = 'ExplorerApiNotConfigured';
+      }
+      const merged = mergeHistory(local, explorerRows).map((t) => ({
+        ...t,
+        valueHuman: t.valueHuman ?? formatUnits(t.value ?? '0'),
+        explorerUrl: net.explorerUrl ? `${net.explorerUrl}/tx/${t.hash}` : null,
+      }));
+      return { txs: merged, explorerNote, pendingReconciled: reconciled };
+    }
+
+    // ---- devnet 水龙头（仅支持水龙头的链）----
+    case 'popup:evmFaucet': {
+      if (!account) return evmError('NoAccount', '先创建钱包');
+      const env = evmRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      if (!net.faucet) return evmError('FaucetUnsupported', `${net.name} 不提供水龙头`);
+      let wei;
+      try {
+        wei = parseUnits(m.amountEth ?? '1');
+      } catch {
+        return evmError('InvalidArgument', '金额非法');
+      }
+      if (wei <= 0n) return evmError('InvalidArgument', '金额必须为正');
+      try {
+        await rpc.request('dev_faucet', [account.address, '0x' + wei.toString(16)]);
+      } catch (e) {
+        return evmError(e.code ?? 'RpcError', `水龙头失败：${e.message}`);
+      }
+      logSafe('evm_faucet_issued');
+      return { ok: true, credited: wei.toString() };
+    }
+
+    default:
+      return evmError('UnknownPopupMessage', m.type ?? '');
+  }
+}
+
+/** 从消息解析函数条目：preset（erc20）或自定义 ABI JSON + 方法名。 */
+function resolveEvmFunction(m) {
+  if (m.preset) {
+    const preset = ABI_PRESETS[m.preset];
+    if (!preset) {
+      const e = new Error('未知 ABI 预设');
+      e.code = 'InvalidArgument';
+      throw e;
+    }
+    const abi = parseAbi(preset.abi);
+    const fn = abi.byName[String(m.method ?? '')];
+    if (!fn) {
+      const e = new Error(`预设中无方法 ${m.method}`);
+      e.code = 'UnknownMethod';
+      throw e;
+    }
+    return fn;
+  }
+  let abiJson;
+  try {
+    abiJson = typeof m.abiJson === 'string' ? JSON.parse(m.abiJson) : m.abiJson;
+  } catch {
+    const e = new Error('ABI JSON 解析失败');
+    e.code = 'InvalidArgument';
+    throw e;
+  }
+  const abi = parseAbi(abiJson);
+  const fn = abi.byName[String(m.method ?? '')];
+  if (!fn) {
+    const e = new Error(`ABI 中无方法 ${m.method}`);
+    e.code = 'UnknownMethod';
+    throw e;
+  }
+  return fn;
+}
+
+
+// ---------------------------------------------------------------------------
+// Extension 0.6：Starknet 账户层
+//
+// 存储（chrome.storage.local，只存密文/公开量）：
+//   stkVault    = { accounts: {id → {id,label,address,pubKey,keystore,createdAt}},
+//                   activeAccountId, networkId }
+//   stkSettings = { rpcOverrides: {networkId → url}, explorerOverrides: {...} }
+//   stkTxStores = { accountId → tx store }
+// 内存：mem.stk.session = {accountId, privateKey: bigint, address}（锁定即毁）；
+//       mem.stk.draft = 待确认 invoke（60 秒过期）。日志纪律同 WALLET-ACC-4。
+// ---------------------------------------------------------------------------
+
+const STK_DRAFT_TTL_MS = 60_000;
+
+async function getStkVault() {
+  const { stkVault } = await storage.local.get('stkVault');
+  return stkVault ?? { accounts: {}, activeAccountId: null, networkId: DEFAULT_STARKNET_NETWORK_ID };
+}
+
+async function setStkVault(vault) {
+  await storage.local.set({ stkVault: vault });
+}
+
+async function getStkSettings() {
+  const { stkSettings } = await storage.local.get('stkSettings');
+  return stkSettings ?? { rpcOverrides: {}, explorerOverrides: {} };
+}
+
+async function setStkSettings(settings) {
+  await storage.local.set({ stkSettings: settings });
+}
+
+async function getStkTxStore(accountId) {
+  if (!accountId) return emptyStkTxStore();
+  const { stkTxStores } = await storage.local.get('stkTxStores');
+  return stkTxStores?.[accountId] ?? emptyStkTxStore();
+}
+
+async function setStkTxStore(accountId, store) {
+  if (!accountId) return;
+  const { stkTxStores } = await storage.local.get('stkTxStores');
+  await storage.local.set({ stkTxStores: { ...(stkTxStores ?? {}), [accountId]: store } });
+}
+
+function stkUnlocked() {
+  return mem.stk?.session != null;
+}
+
+function stkActiveAccount(vault) {
+  return vault.accounts[vault.activeAccountId] ?? null;
+}
+
+function lockStk(reason) {
+  if (mem.stk) {
+    mem.stk.session = null;
+    mem.stk.draft = null;
+  }
+  logSafe('stk_locked', { reason: reason ?? '' });
+}
+
+function stkError(code, reason) {
+  return { error: { code, reason: reason ?? '' } };
+}
+
+function stkRpc(vault, settings) {
+  const net = resolveStarknetNetwork(vault.networkId ?? DEFAULT_STARKNET_NETWORK_ID);
+  if (!net) return { error: stkError('NetworkUnsupported', String(vault.networkId)) };
+  const url = effectiveStarkRpcUrl(net, settings.rpcOverrides);
+  if (!url) return { error: stkError('RpcNotConfigured', net.id) };
+  return { net, rpc: new StarknetRpc(url) };
+}
+
+/** 待确认 invoke 回执对账。 */
+async function reconcileStkPending(rpc, accountId) {
+  const store = await getStkTxStore(accountId);
+  const hashes = stkPendingHashes(store);
+  let reconciled = 0;
+  for (const hash of hashes) {
+    try {
+      const receipt = await rpc.getTransactionReceipt(hash);
+      if (receipt && (receipt.block_number != null || receipt.execution_status)) {
+        const applied = applyStkReceipt(store, hash, receipt, Date.now());
+        if (applied.ok) { await setStkTxStore(accountId, applied.store); reconciled++; }
+      }
+    } catch { /* 单笔失败不阻塞 */ }
+  }
+  return reconciled;
+}
+
+/** ERC-20 形状 balanceOf（u256）→ {rawWei: bigint, human: string}。 */
+async function stkTokenBalance(rpc, net, address) {
+  const res = await rpc.call({
+    contract_address: net.tokenAddress,
+    entry_point_selector: bigIntToHex(starknetSelector('balance_of')),
+    calldata: [bigIntToHex(hexToBigInt(address))],
+  });
+  const raw = hexToBigInt(res[0]) | (hexToBigInt(res[1] ?? '0x0') << 128n);
+  return { rawWei: raw, human: formatEvmUnits(raw, net.tokenDecimals) };
+}
+
+async function handleStkMessage(m) {
+  const vault = await getStkVault();
+  const settings = await getStkSettings();
+  const account = stkActiveAccount(vault);
+
+  switch (m.type) {
+    // ---- 状态 ----
+    case 'popup:stkGetState': {
+      const net = resolveStarknetNetwork(vault.networkId ?? DEFAULT_STARKNET_NETWORK_ID);
+      return {
+        hasWallet: Object.keys(vault.accounts).length > 0,
+        unlocked: stkUnlocked(),
+        address: stkUnlocked() ? mem.stk.session.address : (account?.address ?? null),
+        activeAccountId: vault.activeAccountId,
+        networkId: net?.id ?? null,
+        networks: STARKNET_NETWORKS.map((n) => starknetNetworkView(n, settings.rpcOverrides)),
+        accounts: Object.values(vault.accounts)
+          .map((a) => ({
+            id: a.id, label: a.label, address: a.address, pubKey: a.pubKey, createdAt: a.createdAt,
+            active: a.id === vault.activeAccountId,
+            unlocked: stkUnlocked() && mem.stk.session?.accountId === a.id,
+          }))
+          .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
+      };
+    }
+
+    // ---- 钱包管理 ----
+    case 'popup:stkCreate': {
+      if (typeof m.password !== 'string' || m.password.length < 8) {
+        return stkError('InvalidArgument', '口令至少 8 字符');
+      }
+      const net = resolveStarknetNetwork(vault.networkId ?? DEFAULT_STARKNET_NETWORK_ID);
+      let created;
+      try {
+        created = await createStarkAccount(m.password, net.accountClassHash);
+      } catch (e) {
+        return stkError(e.code ?? 'WalletError', e.message);
+      }
+      const id = crypto.randomUUID();
+      const label = (typeof m.label === 'string' && m.label.trim()) || `Starknet 账户 ${Object.keys(vault.accounts).length + 1}`;
+      const displayAddress = starkChecksum(created.address);
+      vault.accounts[id] = {
+        id, label, address: displayAddress, pubKey: created.pubKey,
+        keystore: created.keystore, createdAt: Date.now(),
+      };
+      vault.activeAccountId = id;
+      await setStkVault(vault);
+      mem.stk.session = {
+        accountId: id, privateKey: hexToBigInt(created.privateKey),
+        address: displayAddress, pubKey: created.pubKey,
+      };
+      logSafe('stk_wallet_created');
+      return { accountId: id, address: displayAddress, pubKey: created.pubKey };
+    }
+    case 'popup:stkImportKey': {
+      if (typeof m.password !== 'string' || m.password.length < 8) {
+        return stkError('InvalidArgument', '口令至少 8 字符');
+      }
+      const net = resolveStarknetNetwork(vault.networkId ?? DEFAULT_STARKNET_NETWORK_ID);
+      let priv;
+      try {
+        priv = parseStarkPrivateKey(m.privateKey);
+      } catch (e) {
+        return stkError(e.code ?? 'InvalidArgument', e.message);
+      }
+      // 随机盐 + 网络 class hash 推导地址；同地址重复导入拒绝
+      const salt = generateStarkSalt();
+      const { address, pubKey } = deriveAccount({ privKey: priv, salt, classHash: net.accountClassHash });
+      const addressHex = bigIntToHex(address);
+      if (Object.values(vault.accounts).some((a) => a.address?.toLowerCase() === addressHex.toLowerCase())) {
+        return stkError('AccountExists', '该地址已存在');
+      }
+      const keystore = await encryptStarkKeystore(priv, {
+        password: m.password, salt, classHash: hexToBigInt(net.accountClassHash),
+      });
+      const id = crypto.randomUUID();
+      const label = (typeof m.label === 'string' && m.label.trim()) || `导入 ${addressHex.slice(0, 8)}…`;
+      const displayAddress = starkChecksum(addressHex);
+      vault.accounts[id] = { id, label, address: displayAddress, pubKey: bigIntToHex(pubKey), keystore, createdAt: Date.now() };
+      vault.activeAccountId = id;
+      await setStkVault(vault);
+      mem.stk.session = { accountId: id, privateKey: priv, address: displayAddress, pubKey: bigIntToHex(pubKey) };
+      logSafe('stk_wallet_imported');
+      return { accountId: id, address: displayAddress };
+    }
+    case 'popup:stkUnlock': {
+      const target = m.accountId ? vault.accounts[m.accountId] : account;
+      if (!target) return stkError('NoKeystore', '先创建钱包');
+      let priv;
+      try {
+        priv = await decryptStarkKeystore(target.keystore, m.password);
+      } catch (e) {
+        return stkError(e.code ?? 'BadPassword', e.message);
+      }
+      vault.activeAccountId = target.id;
+      await setStkVault(vault);
+      mem.stk.session = { accountId: target.id, privateKey: priv, address: target.address, pubKey: target.pubKey };
+      logSafe('stk_unlocked');
+      return { address: target.address };
+    }
+    case 'popup:stkLock':
+      lockStk('popup');
+      return { locked: true };
+    case 'popup:stkExportKey': {
+      if (!stkUnlocked()) return stkError('SessionInvalid', '先解锁');
+      let priv;
+      try {
+        priv = await decryptStarkKeystore(account.keystore, m.password);
+      } catch (e) {
+        return stkError(e.code ?? 'BadPassword', e.message);
+      }
+      // 双校验：口令解出的私钥必须对应当前账户公钥
+      if (privateKeyToPublicKey(priv) !== hexToBigInt(account.pubKey)) {
+        return stkError('BadKeystore', 'keystore 与账户不一致（fail-closed）');
+      }
+      logSafe('stk_key_exported');
+      return { privateKey: bigIntToHex(priv), address: account.address };
+    }
+    case 'popup:stkChangePassword': {
+      if (typeof m.next !== 'string' || m.next.length < 8) {
+        return stkError('InvalidArgument', '新口令至少 8 字符');
+      }
+      if (!account) return stkError('NoKeystore', '先创建钱包');
+      let next;
+      try {
+        next = await changeStarkKeystorePassword(account.keystore, m.current, m.next);
+      } catch (e) {
+        return stkError(e.code ?? 'BadPassword', e.message);
+      }
+      vault.accounts[account.id] = { ...account, keystore: next };
+      await setStkVault(vault);
+      logSafe('stk_password_changed');
+      return { ok: true };
+    }
+    case 'popup:stkSelectAccount': {
+      if (!vault.accounts[m.accountId]) return stkError('NoAccount', '账户不存在');
+      lockStk('stk_account_switch');
+      vault.activeAccountId = m.accountId;
+      await setStkVault(vault);
+      return { activeAccountId: m.accountId, locked: true };
+    }
+    case 'popup:stkRemoveAccount': {
+      if (!vault.accounts[m.accountId]) return stkError('NoAccount', '账户不存在');
+      if (stkUnlocked() && mem.stk.session.accountId === m.accountId) lockStk('stk_account_remove');
+      delete vault.accounts[m.accountId];
+      if (vault.activeAccountId === m.accountId) {
+        vault.activeAccountId = Object.keys(vault.accounts)[0] ?? null;
+      }
+      await setStkVault(vault);
+      const { stkTxStores } = await storage.local.get('stkTxStores');
+      if (stkTxStores?.[m.accountId]) {
+        const next = { ...stkTxStores };
+        delete next[m.accountId];
+        await storage.local.set({ stkTxStores: next });
+      }
+      return { ok: true, activeAccountId: vault.activeAccountId };
+    }
+
+    // ---- 网络 / RPC ----
+    case 'popup:stkSetNetwork': {
+      const net = resolveStarknetNetwork(m.networkId);
+      if (!net) return stkError('NetworkUnsupported', String(m.networkId));
+      vault.networkId = net.id;
+      await setStkVault(vault);
+      return { networkId: net.id, chainId: net.chainId };
+    }
+    case 'popup:stkSetRpc': {
+      const net = resolveStarknetNetwork(m.networkId);
+      if (!net) return stkError('NetworkUnsupported', String(m.networkId));
+      if (m.rpcUrl == null || m.rpcUrl === '') {
+        delete settings.rpcOverrides[net.id];
+      } else {
+        const canonical = canonicalStarkUrl(m.rpcUrl);
+        if (!canonical) return stkError('InvalidArgument', 'RPC URL 必须是 http(s)');
+        settings.rpcOverrides[net.id] = canonical;
+      }
+      await setStkSettings(settings);
+      return { saved: true, rpcUrl: effectiveStarkRpcUrl(net, settings.rpcOverrides) };
+    }
+    case 'popup:stkSetExplorer': {
+      const net = resolveStarknetNetwork(m.networkId);
+      if (!net) return stkError('NetworkUnsupported', String(m.networkId));
+      if (m.apiUrl == null || m.apiUrl === '') {
+        delete settings.explorerOverrides[net.id];
+      } else {
+        const canonical = canonicalStarkUrl(m.apiUrl);
+        if (!canonical) return stkError('InvalidArgument', 'Explorer API URL 必须是 http(s)');
+        settings.explorerOverrides[net.id] = canonical;
+      }
+      await setStkSettings(settings);
+      return { saved: true };
+    }
+
+    // ---- 余额 / 链状态 ----
+    case 'popup:stkRefresh': {
+      if (!account) return stkError('NoAccount', '先创建钱包');
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      try {
+        const [chainIdAscii, nonceHex, balance] = await Promise.all([
+          rpc.chainId(), rpc.getNonce(account.address), stkTokenBalance(rpc, net, account.address),
+        ]);
+        const reconciled = await reconcileStkPending(rpc, account.id);
+        return {
+          chainId: chainIdAscii,
+          chainIdMismatch: chainIdAscii !== net.chainId,
+          nonce: hexToBigInt(nonceHex).toString(),
+          balanceWei: balance.rawWei.toString(),
+          balanceHuman: balance.human,
+          tokenSymbol: net.tokenSymbol,
+          rpcUrl: effectiveStarkRpcUrl(net, settings.rpcOverrides),
+          pendingReconciled: reconciled,
+        };
+      } catch (e) {
+        return stkError(e.code ?? 'RpcError', e.message);
+      }
+    }
+
+    // ---- 合约只读调用 ----
+    case 'popup:stkReadContract': {
+      if (!account) return stkError('NoAccount', '先创建钱包');
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      try {
+        let selector, calldata;
+        if (m.preset === 'erc20') {
+          const fn = String(m.method ?? '');
+          const known = { name: 'name', symbol: 'symbol', decimals: 'decimals', totalSupply: 'total_supply', balanceOf: 'balance_of' }[fn];
+          const netFn = { name: 'name', symbol: 'symbol', decimals: 'decimals', totalSupply: 'total_supply', balanceOf: 'balance_of' }[fn];
+          void known;
+          if (!netFn) return stkError('UnknownMethod', `预设中无方法 ${fn}`);
+          selector = bigIntToHex(hexToBigInt(selectorFromName(netFn)));
+          calldata = fn === 'balanceOf' ? [account.address] : [];
+        } else {
+          if (!m.selector && !m.functionName) return stkError('InvalidArgument', '需要 selector 或方法名');
+          selector = m.selector ?? bigIntToHex(hexToBigInt(selectorFromName(m.functionName)));
+          calldata = (m.calldata ?? []).map((c) => bigIntToHex(hexToBigInt(String(c).trim())));
+        }
+        const result = await rpc.call({
+          contract_address: m.contract,
+          entry_point_selector: selector,
+          calldata,
+        });
+        return {
+          selector,
+          calldata,
+          values: (result ?? []).map((f) => {
+            const dec = decodeShortString(f);
+            return /^0x/.test(dec) ? `${dec}（${hexToBigInt(f)}）` : dec;
+          }),
+          raw: result ?? [],
+        };
+      } catch (e) {
+        return stkError(e.code ?? 'RpcError', e.message);
+      }
+    }
+
+    // ---- 交易（prepare → confirm 两步）----
+    case 'popup:stkPrepareTx': {
+      if (!stkUnlocked()) return stkError('SessionInvalid', '先解锁');
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      // 参数：preset erc20 transfer（人类可读金额）或自定义 selector + felt calldata
+      let to, functionName, selector, calldata, methodLabel;
+      try {
+        if (m.preset === 'erc20') {
+          if (m.method !== 'transfer' && m.method !== 'approve') {
+            return stkError('UnknownMethod', `预设写方法仅支持 transfer/approve，收到 ${m.method}`);
+          }
+          // 金额预检（transfer）：amount ≤ 余额（回执前的 fail fast）
+          if (m.method === 'transfer') {
+            const balance = await stkTokenBalance(rpc, net, account.address);
+            const [lo, hi] = amountToFelts(m.amountHuman ?? '0', net.tokenDecimals);
+            const amountWei = hexToBigInt(lo) | (hexToBigInt(hi) << 128n);
+            if (balance.rawWei < amountWei) {
+              return stkError('InsufficientFunds', `余额不足：当前 ${balance.human} ${net.tokenSymbol}，转账 ${m.amountHuman} ${net.tokenSymbol}`);
+            }
+          }
+          const amountArgs = amountToFelts(m.amountHuman ?? '0', net.tokenDecimals);
+          to = net.tokenAddress;
+          functionName = m.method === 'transfer' ? 'transfer' : 'approve';
+          selector = bigIntToHex(hexToBigInt(selectorFromName(functionName)));
+          calldata = m.method === 'transfer'
+            ? [bigIntToHex(hexToBigInt(m.recipient)), ...amountArgs]
+            : [bigIntToHex(hexToBigInt(m.recipient ?? m.spender)), ...amountArgs];
+          methodLabel = `${functionName}(recipient, amount_u256)`;
+        } else {
+          to = m.to;
+          selector = m.selector ?? bigIntToHex(hexToBigInt(selectorFromName(m.functionName)));
+          calldata = (m.calldata ?? []).map((c) => bigIntToHex(hexToBigInt(String(c).trim())));
+          methodLabel = m.functionName ?? 'raw invoke';
+        }
+      } catch (e) {
+        return stkError(e.code ?? 'InvalidArgument', e.message);
+      }
+      if (hexToBigInt(to) === 0n) return stkError('InvalidArgument', '目标合约地址非法');
+      try {
+        const [nonceHex] = await Promise.all([rpc.getNonce(account.address)]);
+        const nonce = hexToBigInt(nonceHex);
+        const chainIdFelt = hexToBigInt(net.chainIdFelt);
+        // 预估费用：dev 链走 dev_estimateFee；通用路径按保守 maxFee 由 RPC estimateFee 提供
+        let maxFeeWei;
+        try {
+          const est = await rpc.request('starknet_estimateFee', [{
+            invoke_v1: {
+              max_fee: '0x0', signature: ['0x0', '0x0'], nonce: bigIntToHex(nonce),
+              sender_address: account.address, calldata: buildInvokeCalldata({ to, entryPointSelector: selector, calldata }),
+            },
+          }, 'latest']);
+          const overall = hexToBigInt(est?.overall_fee ?? '0x0');
+          maxFeeWei = overall + overall / 10n; // +10% 缓冲
+        } catch {
+          maxFeeWei = 10n ** 15n; // 估算不可用时的保守上限（0.001 ETH）
+        }
+        const balance = await stkTokenBalance(rpc, net, account.address);
+        if (balance.rawWei < maxFeeWei) {
+          return stkError('InsufficientFunds', `余额不足以支付手续费：需要 ~${formatEvmUnits(maxFeeWei, net.tokenDecimals)} ${net.tokenSymbol}`);
+        }
+        mem.stk.draft = {
+          to, selector, calldata, methodLabel: methodLabel ?? null,
+          nonce: nonce.toString(), maxFeeWei: maxFeeWei.toString(),
+          chainIdFelt: net.chainIdFelt, createdAt: Date.now(),
+        };
+        return {
+          preview: {
+            from: account.address, to,
+            selector, methodLabel: methodLabel ?? null,
+            calldata,
+            nonce: nonce.toString(),
+            maxFeeWei: maxFeeWei.toString(),
+            maxFeeHuman: formatEvmUnits(maxFeeWei, net.tokenDecimals),
+            chainId: net.chainId,
+          },
+        };
+      } catch (e) {
+        return stkError(e.code === 'RpcError' ? 'EstimateFailed' : (e.code ?? 'RpcError'), e.message);
+      }
+    }
+    case 'popup:stkConfirmTx': {
+      if (!stkUnlocked()) return stkError('SessionInvalid', '先解锁');
+      const draft = mem.stk.draft;
+      if (!draft) return stkError('NoDraft', '没有待确认交易');
+      if (Date.now() - draft.createdAt > STK_DRAFT_TTL_MS) {
+        mem.stk.draft = null;
+        return stkError('DraftExpired', '交易预览已过期，请重新发起');
+      }
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      const nonce = hexToBigInt(draft.nonce);
+      const signed = signInvoke({
+        senderAddress: account.address,
+        to: draft.to,
+        entryPointSelector: draft.selector,
+        calldata: draft.calldata,
+        nonce,
+        maxFee: hexToBigInt(draft.maxFeeWei),
+        chainIdFelt: hexToBigInt(draft.chainIdFelt),
+        privateKey: mem.stk.session.privateKey,
+      });
+      let addRes;
+      try {
+        addRes = await rpc.addInvokeTransaction({
+          max_fee: signed.invocation.max_fee,
+          signature: signed.invocation.signature,
+          nonce: signed.invocation.nonce,
+          sender_address: signed.invocation.sender_address,
+          calldata: signed.invocation.calldata,
+        });
+      } catch (e) {
+        return stkError(e.code ?? 'RpcError', e.message);
+      }
+      const txHash = addRes?.transaction_hash ?? signed.txHash;
+      mem.stk.draft = null;
+      const added = addStkPendingTx(await getStkTxStore(account.id), {
+        hash: txHash, chainId: net.id, from: account.address, to: draft.to,
+        selector: draft.selector, calldataLen: draft.calldata.length,
+        kind: 'contract', methodLabel: draft.methodLabel, nonce: draft.nonce,
+        maxFee: draft.maxFeeWei,
+      }, Date.now());
+      if (added.ok) await setStkTxStore(account.id, added.store);
+      logSafe('stk_tx_broadcast');
+      return { hash: txHash, localHash: signed.txHash, tx: added.entry ?? null };
+    }
+    case 'popup:stkRejectTx':
+      mem.stk.draft = null;
+      return { ok: true };
+
+    // ---- 交易记录 ----
+    case 'popup:stkHistory': {
+      if (!account) return stkError('NoAccount', '先创建钱包');
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      const reconciled = await reconcileStkPending(rpc, account.id);
+      const local = stkTxListView(await getStkTxStore(account.id));
+      let explorerRows = [];
+      let explorerNote = null;
+      const explorerApi = settings.explorerOverrides?.[net.id] ?? null;
+      if (m.includeExplorer && explorerApi) {
+        const res = await fetchExplorerHistory({ apiUrl: explorerApi, address: account.address });
+        if (res.ok) explorerRows = res.rows;
+        else explorerNote = res.code;
+      } else if (m.includeExplorer && !explorerApi) {
+        explorerNote = 'ExplorerApiNotConfigured';
+      }
+      const merged = mergeStkHistory(local, explorerRows).map((t) => ({
+        ...t,
+        explorerUrl: net.explorerUrl ? `${net.explorerUrl}/tx/${t.hash}` : null,
+      }));
+      return { txs: merged, explorerNote, pendingReconciled: reconciled };
+    }
+
+    // ---- devnet 水龙头（注册 pubkey + 出资）----
+    case 'popup:stkFaucet': {
+      if (!account) return stkError('NoAccount', '先创建钱包');
+      const env = stkRpc(vault, settings);
+      if (env.error) return env.error;
+      const { net, rpc } = env;
+      if (!net.faucet) return stkError('FaucetUnsupported', `${net.name} 不提供水龙头`);
+      const amountHuman = String(m.amountHuman ?? '100');
+      let wei;
+      try {
+        wei = BigInt(0) || (() => {
+          const mm = /^(\d+)(?:\.(\d+))?$/.exec(amountHuman);
+          if (!mm) throw new Error('x');
+          const frac = (mm[2] ?? '').slice(0, net.tokenDecimals).padEnd(net.tokenDecimals, '0');
+          return BigInt(mm[1]) * 10n ** BigInt(net.tokenDecimals) + (frac ? BigInt(frac) : 0n);
+        })();
+      } catch {
+        return stkError('InvalidArgument', '金额非法');
+      }
+      try {
+        await rpc.devFaucet(account.address, bigIntToHex(wei), account.pubKey);
+      } catch (e) {
+        return stkError(e.code ?? 'RpcError', `水龙头失败：${e.message}`);
+      }
+      logSafe('stk_faucet_issued');
+      return { ok: true, credited: wei.toString() };
+    }
+
+    default:
+      return stkError('UnknownPopupMessage', m.type ?? '');
+  }
+}
+
+/** 方法名 → selector hex（curve.js starknetSelector 包装）。 */
+function selectorFromName(name) {
+  return bigIntToHex(starknetSelector(String(name)));
+}
+
+
+// ---------------------------------------------------------------------------
 // popup 内部 RPC
 // ---------------------------------------------------------------------------
 
 async function handlePopupMessage(m) {
+  mem.lastActivity = Date.now();
+  if (typeof m?.type === 'string' && m.type.startsWith('popup:evm')) {
+    return handleEvmMessage(m);
+  }
+  if (typeof m?.type === 'string' && m.type.startsWith('popup:stk')) {
+    return handleStkMessage(m);
+  }
   switch (m.type) {
     case 'bridge:getSession': {
       // content bridge 专用：只下发会话令牌与公开状态（无密钥/无 note 明文）。
@@ -1200,6 +2385,13 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   mem.pending = swept.store;
   if (isUnlocked() && Date.now() - mem.lastActivity > AUTO_LOCK_MS) {
     lockWallet('autolock');
+  }
+  // EVM / Starknet 会话同一心跳 fail-closed（私钥只活在 SW 内存）。
+  if (evmUnlocked() && Date.now() - mem.lastActivity > AUTO_LOCK_MS) {
+    lockEvm('autolock');
+  }
+  if (stkUnlocked() && Date.now() - mem.lastActivity > AUTO_LOCK_MS) {
+    lockStk('autolock');
   }
 });
 

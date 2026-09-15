@@ -418,3 +418,80 @@ capability matrix**。版本号 0.4.0-alpha（1.0 仍不宣称——外审/签�
    全部 PASS。
 3. `.DS_Store`、`*.log`、脚本自身产物（dist-checksums.txt、build 目录）一律
    排除在包外。
+
+---
+
+## Extension 0.5 验收对照（EVM 兼容账户层，2026-09-15 交付）
+
+交付范围 = 余额查询、合约调用（读/写）、交易记录查询、钱包管理（口令
+keystore / 创建 / 导入 / 锁定 / **私钥导出** / 改密码 / 删除 / 多账户）。
+实现 = `common/evm/*`（纯函数）+ `background/service_worker.js` EVM 路由 +
+`popup/popup.js` EVM 视图 + `tests/e2e/devchain.mjs`（本地开发链）。本节逐条
+对照交付要求，如实标注。
+
+| 要求 | 状态 | 覆盖位置 |
+|---|---|---|
+| 钱包余额查询 | ✅ | `popup:evmRefresh`（balance/nonce/gasPrice/chainId + chainId 不符告警）；水龙头（仅 dev 链）；E2E F1–F3/T4 |
+| 合约调用（只读） | ✅ | `popup:evmReadContract`（ERC-20 预设 + 自定义 ABI；decimals 金额换算）；E2E C1/C5/C7 |
+| 合约调用（写） | ✅ | `popup:evmPrepareContractTx` / `popup:evmPrepareTx` → 预览卡 → 确认 → EIP-155 签名广播；E2E C2–C4/C6/T1–T3 |
+| 交易记录查询 | ✅ | 本地账本（`common/evm/txs.js` 回执状态机）+ Etherscan 兼容 txlist 合并（`common/evm/history.js`）+ 待确认自动对账；E2E H1–H3 |
+| 钱包管理：口令 keystore | ✅ | PBKDF2-SHA256 600k + AES-256-GCM（WebCrypto）；`tests/evm/wallet.test.js` 错口令/篡改 fail-closed |
+| 钱包管理：钱包生成 | ✅ | 随机 secp256k1 + 地址推导（EIP-55）；E2E E2 |
+| 钱包管理：私钥导入 | ✅ | 形状/范围拒绝面 + 同址重复导入拒绝；E2E M6/M7 |
+| 钱包管理：私钥导出 | ✅ | 口令确认 + keystore↔地址双校验；E2E M2/M6a；导出私钥再导入同址（M6） |
+| 钱包管理：锁定/解锁/改密码/删除 | ✅ | E2E M3/M4/M8/M9/M6b；SW 会话只存内存，锁定/SW 回收即毁 |
+| e2e（浏览器操作） | ✅ | `tests/e2e/run_05.mjs` 36 步全 UI 操作（Chrome for Testing + `--load-extension` + CDP）；36/36 PASS（e2e05_result.json） |
+| 回归 | ✅ | 单测 178/178（0.4 的 135 + 0.5 新增 24，wallet.test 实际 13 个含子断言）；wasm 冒烟 PASS；既有 run_02 36/36、run_03 30/30、run_04 12/12 全部不回归 |
+
+### 0.5 安全边界（如实声明）
+
+- EVM 层密码学为 JS 自包含实现（`common/evm/crypto.js`），**不在** wallet-core
+  WASM 边界内；正确性由公共向量钉住（keccak 标准向量 / secp256k1 G 点 /
+  EIP-55 规范示例 / EIP-155 规范示例交易 signing-hash + sender 恢复一致）。
+  k 生成 = RFC 6979 结构 HMAC-DRBG（H=keccak256）。
+- 私钥只在 SW 内存会话（`mem.evm.session`）；落盘的只有 AES-GCM 密文
+  keystore；口令/私钥/签名材料不入日志。
+- 交易确认采用 prepare → 预览卡（to/value/data/gas/手续费/chainId 逐字段）
+  → confirm 两步；draft 60 秒过期；锁定态 prepare/confirm 一律
+  SessionInvalid。
+- manifest 新增 `host_permissions: http://localhost/*、http://127.0.0.1/*`
+  （本地节点 RPC）；公网 RPC 依赖端点 CORS（公开节点通行做法）。
+  不冒充 EIP-1193 provider 的红线不变（无 `window.ethereum` 注入）。
+- devchain（`tests/e2e/devchain.mjs`）仅测试/演示用：node:http 实现的最小
+  JSON-RPC 链（真实 RLP/EIP-155 解码与 sender 恢复），非生产链客户端。
+
+---
+
+## Extension 0.6 验收对照（Starknet 账户层 / STARK curve，2026-09-16 交付）
+
+交付背景：本项目深度依赖 Stark curve（Starknet 生态）。0.6 在扩展内交付
+**原生的 STARK curve 账户层**：曲线密码学（ECDSA sign/verify/recover）、
+Pedersen 哈希（官方常量点表）、starknet_keccak/选择器、UDC 地址推导、
+invoke v1 组装与签名、Starknet JSON-RPC 客户端、余额/合约调用/交易记录/
+钱包管理全功能（与 0.5 EVM 层同规格，popup 第三模式）。
+
+| 要求 | 状态 | 覆盖位置 |
+|---|---|---|
+| STARK curve 密码学正确性 | ✅ 公共向量 | `tests/stark/curve.test.js` 12 例：crypto-cpp 公钥推导 ×2+、ECDSA 验证正/负例、StarkEx Pedersen 向量 ×2 + H(0,0)=shift_point（rust oracle 确认）、starknet.js 交易哈希向量、地址推导/校验和与 starknet.js v6.11.0 官方实现对拍、选择器向量（'__validate__' 官方 / 'transfer' / 'myFunction' 官方） |
+| 钱包余额查询（Starknet） | ✅ | balance_of（u256）+ nonce + chainId 解码 + chainId 不符告警；E2E F1–F3 |
+| 合约调用（只读 starknet_call） | ✅ | 任意方法名/selector + felt calldata；E2E C1（symbol）/C2（balance_of 100e18）/C6（OTHER 25e18） |
+| 合约调用（invoke v1 写） | ✅ | calldata 组装 → 交易哈希（Pedersen 元素链）→ STARK curve ECDSA [r,s] → 预览确认 → 广播；开发链**独立验签**核对；E2E C3–C6 |
+| 交易记录查询 | ✅ | 本地账本 + 回执（SUCCEEDED/REVERTED）对账 + explorer txlist 合并；E2E H1–H2 |
+| 钱包管理 | ✅ | 创建（< 2^125 随机私钥 + 随机盐 + class hash → UDC 地址）/导入/锁定解锁（错口令 fail-closed）/私钥导出（口令确认 + 公钥双校验）/改密码/删除/多账户；E2E S2、M1–M9 |
+| e2e（浏览器操作） | ✅ | `tests/e2e/run_06.mjs` 32 步全 UI 操作 PASS（e2e06_result.json + 截图）；本地 Starknet 开发链（`starkdevchain.mjs`）链级独立验签 |
+| 回归 | ✅ | 单测 198/198（0.5 的 178 + STARK 20）；既有 run_02 36/36、run_03 30/30、run_04 12/12、run_05 36/36 全部不回归 |
+
+### 0.6 安全边界（如实声明）
+
+- 密码学为 JS 自包含（`common/stark/curve.js`），不在 wallet-core WASM 边界
+  内；常量点表逐字提取自 lambdaworks-crypto 0.13.0（与 StarkWare 同表）；
+  正确性由公共向量与官方实现对拍钉住（见上）。
+- Poseidon / SNIP-12 typed-data rev1 哈希**不在本层**（wallet-core 单实现
+  纪律）；交易类型仅 invoke v1；v3 未交付。
+- 私钥 < 2^125（生态惯例）、只在 SW 内存会话、落盘仅 AES-GCM 密文；
+  keystore 形状 'stark-1'（与 EVM 层 '1' 相互独立，方案同为
+  PBKDF2-SHA256 600k + AES-256-GCM）。
+- 地址 = UDC 公式（class, salt, [pubkey]）：同私钥 + 新盐 = 新地址（导入
+  语义如实提示）；公网预设 class hash（ArgentX Cairo-1）可在 UI 覆盖。
+- devnet 水龙头（dev_faucet：注册 pubkey + 出资）与链端验签依赖注册表，
+  为 dev 链扩展；真实网络验签在账户合约内进行。

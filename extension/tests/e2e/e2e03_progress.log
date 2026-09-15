@@ -1,31 +1,31 @@
-[2026-09-13T10:03:36.238Z] step: open popup page target
-[2026-09-13T10:03:36.293Z] PASS: S0 SW 预热（bridge:getSession 应答）
-[2026-09-13T10:03:36.341Z] PASS: S1 创建账户 — {"accountId":"bc1c45dc-54b2-4c26-8e7e-cd6c98f03450","publicKey":"037eaa043215df898f03af19536e24b5b6c
-[2026-09-13T10:03:36.346Z] PASS: S2 两张 PLAY note（300 + 200） — {"play_free":"500","play_locked":"0","real_free":"0","real_locked":"0"}
-[2026-09-13T10:03:36.350Z] PASS: S3 授权草稿：wallet-core 生成 delegated key（66 hex）+ SNIP-12 摘要（0x..64 hex） — {"request":{"chainId":"zchain-devnet-1","accountAddress":"0x00000000000000000000000000000000000000000000000000000000000000cd","allowedScopes":["play","buyin","settle","transfer"],"perTxLimit":"250","perDayLimit":"1000","tableAllowlist":null
-[2026-09-13T10:03:36.351Z] PASS: S4 devnet 入口形态登记（evidence=devnet_local_entry，状态 active） — {"bindingId":"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209","origin":"http://127.0.0.1:57595","chainId":"zchain-devnet-1","accountAddress":"
-[2026-09-13T10:03:36.352Z] PASS: S5 registry 列表：1 条会话密钥 + origin/限额/有效期投影 — {"bindingId":"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209","origin":"http://127.0.0.1:57595","chainId":"zchain-devnet-1","accountAddress":"
-[2026-09-13T10:03:37.395Z] PASS: L0 页面连接（origin 授权） — {"accounts":["037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa"],"chainId":"zchain
-[2026-09-13T10:03:37.599Z] PASS: L1 限额内签名请求打开（amount_in=200 ≤ perTx 250） — {"abi_version":1,"amount_in":"200","amount_out":"200","asset_class":"PLAY","chain_id":"zchain-devnet
-[2026-09-13T10:03:37.603Z] PASS: L2 限额内签名成功（批准 → wallet-core 真实签名） — {"digest":"3dc6664b8960c88d71fc4ca958e2ce4d9e180a2b5345809c3cc0ba0359063b01"}
-[2026-09-13T10:03:37.604Z] PASS: L3 日限记账：binding dailyUsedToday = 200（amount_in 口径） — {"bindingId":"009d23362600df5c1f5681c5dcba063e535d816b6ff28e3ca44ed38c8a7c9209","origin":"http://127.0.0.1:57595","chainId":"zchain-devnet-1
-[2026-09-13T10:03:37.607Z] PASS: L4 单笔超限 → SessionOverPerTxLimit（批准前拒绝，不打开弹窗） — ERR:SessionOverPerTxLimit
-[2026-09-13T10:03:37.607Z] PASS: L5 超限拒绝不遗留待确认请求 — {"pending":[]}
-[2026-09-13T10:03:37.608Z] PASS: L6 撤销：JS 粘滞位 + wallet-core 状态查询一致（revoked） — {"binding":"revoked","core":"revoked"}
-[2026-09-13T10:03:37.610Z] PASS: L7 撤销后签名 → SessionRevoked（fail-closed，不打开弹窗） — ERR:SessionRevoked
-[2026-09-13T10:03:37.611Z] PASS: L8 删除记录（撤销态唯一清除路径） — {"ok":true}
-[2026-09-13T10:03:37.611Z] PASS: L9 registry 已无该 binding — []
-[2026-09-13T10:03:37.815Z] PASS: L10 删除后签名恢复常规路径（请求可打开等待批准） — {"abi_version":1,"amount_in":"300","amount_out":"300","asset_class":"PLAY","chai
-[2026-09-13T10:03:37.817Z] PASS: L11 常规路径签名成功（owner 路径不受会话密钥影响） — {"digest":"894093fd29d103345e03bd60f7b2fc1339023dbb47a4b4762ba8fb9cafda0f4e"}
-[2026-09-13T10:03:37.818Z] PASS: R1 授权簿含页面 origin — [{"origin":"http://127.0.0.1:57595","grantedAt":1789293817}]
-[2026-09-13T10:03:37.819Z] PASS: R2 撤销 origin 授权 — {"ok":true}
-[2026-09-13T10:03:37.820Z] PASS: R3 撤销后页面请求 → OriginNotPermitted（fail-closed） — ERR:OriginNotPermitted
-[2026-09-13T10:03:38.024Z] PASS: R4 重连可恢复授权（批准后 granted） — {"accounts":["037eaa043215df898f03af19536e24b5b6c87049a16fab01b541090a57de7ea4fa
-[2026-09-13T10:03:38.025Z] PASS: C1 矩阵三协议行齐全（EIP-1193/WC/Starknet） — ["EIP-1193（兼容形状）","WalletConnect v2","Starknet 钱包接口"]
-[2026-09-13T10:03:38.026Z] PASS: C2 EIP-1193：detected=false（headless 无注入）+ 签名方法全拒清单 — {"detected":false,"denied":7}
-[2026-09-13T10:03:38.026Z] PASS: C3 WalletConnect：dormant 如实（SignClient 未注入 = B5 外部依赖） — {"active":false,"summary":"dormant：未注入 SignClient，不监听任何会话事件（生产 relay 属 B5 外部依赖）"}
-[2026-09-13T10:03:38.026Z] PASS: C4 Starknet：未检测到钱包对象如实标注 + note spend 拒绝红线 — {"detected":false}
-[2026-09-13T10:03:38.027Z] PASS: W1 提现预览：canSubmit 恒 false + vault_offline/库空原因 + 托管风险 — {"kind":"withdraw","assetClass":"REAL","chainId":"zchain-devnet-1","amount":"100","owner":"ababababababababababababababababababababababababababababababababab","inputs":[],"finality":{"worstProof":"none","requiredProof":"finalized","reached"
-[2026-09-13T10:03:38.028Z] PASS: W2 坏金额 fail-closed（AmountInvalid） — {"error":{"code":"AmountInvalid","reason":"金额必须是正十进制整数"}}
-[2026-09-13T10:03:38.029Z] PASS: P1 provider 授权方法面未开放 → NotSupportedIn01（popup UI 为唯一入口） — ERR:NotSupportedIn01
-[2026-09-13T10:03:38.029Z] PASS: U1 popup 页面存活 — ok
+[2026-09-15T18:33:40.918Z] step: open popup page target
+[2026-09-15T18:33:40.990Z] PASS: S0 SW 预热（bridge:getSession 应答）
+[2026-09-15T18:33:41.045Z] PASS: S1 创建账户 — {"accountId":"1b9df2ef-768b-48aa-882c-d4ca6f81a931","publicKey":"032082a0820abda0476b9983077624d80f6
+[2026-09-15T18:33:41.053Z] PASS: S2 两张 PLAY note（300 + 200） — {"play_free":"500","play_locked":"0","real_free":"0","real_locked":"0"}
+[2026-09-15T18:33:41.058Z] PASS: S3 授权草稿：wallet-core 生成 delegated key（66 hex）+ SNIP-12 摘要（0x..64 hex） — {"request":{"chainId":"zchain-devnet-1","accountAddress":"0x00000000000000000000000000000000000000000000000000000000000000cd","allowedScopes":["play","buyin","settle","transfer"],"perTxLimit":"250","perDayLimit":"1000","tableAllowlist":null
+[2026-09-15T18:33:41.061Z] PASS: S4 devnet 入口形态登记（evidence=devnet_local_entry，状态 active） — {"bindingId":"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b","origin":"http://127.0.0.1:60713","chainId":"zchain-devnet-1","accountAddress":"
+[2026-09-15T18:33:41.062Z] PASS: S5 registry 列表：1 条会话密钥 + origin/限额/有效期投影 — {"bindingId":"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b","origin":"http://127.0.0.1:60713","chainId":"zchain-devnet-1","accountAddress":"
+[2026-09-15T18:33:42.112Z] PASS: L0 页面连接（origin 授权） — {"accounts":["032082a0820abda0476b9983077624d80f60c046c4ab3590ff2d067e51b12e4b69"],"chainId":"zchain
+[2026-09-15T18:33:42.315Z] PASS: L1 限额内签名请求打开（amount_in=200 ≤ perTx 250） — {"abi_version":1,"amount_in":"200","amount_out":"200","asset_class":"PLAY","chain_id":"zchain-devnet
+[2026-09-15T18:33:42.320Z] PASS: L2 限额内签名成功（批准 → wallet-core 真实签名） — {"digest":"3d77a8a3dc57297176b78a314247b6b12fbc1e038ae13b714441cd668f26ae7b"}
+[2026-09-15T18:33:42.321Z] PASS: L3 日限记账：binding dailyUsedToday = 200（amount_in 口径） — {"bindingId":"026153d5b6d91b7660c539bb40f6d785ffa39771df3aef901d8d66f13a7d813b","origin":"http://127.0.0.1:60713","chainId":"zchain-devnet-1
+[2026-09-15T18:33:42.323Z] PASS: L4 单笔超限 → SessionOverPerTxLimit（批准前拒绝，不打开弹窗） — ERR:SessionOverPerTxLimit
+[2026-09-15T18:33:42.324Z] PASS: L5 超限拒绝不遗留待确认请求 — {"pending":[]}
+[2026-09-15T18:33:42.326Z] PASS: L6 撤销：JS 粘滞位 + wallet-core 状态查询一致（revoked） — {"binding":"revoked","core":"revoked"}
+[2026-09-15T18:33:42.329Z] PASS: L7 撤销后签名 → SessionRevoked（fail-closed，不打开弹窗） — ERR:SessionRevoked
+[2026-09-15T18:33:42.330Z] PASS: L8 删除记录（撤销态唯一清除路径） — {"ok":true}
+[2026-09-15T18:33:42.330Z] PASS: L9 registry 已无该 binding — []
+[2026-09-15T18:33:42.533Z] PASS: L10 删除后签名恢复常规路径（请求可打开等待批准） — {"abi_version":1,"amount_in":"300","amount_out":"300","asset_class":"PLAY","chai
+[2026-09-15T18:33:42.536Z] PASS: L11 常规路径签名成功（owner 路径不受会话密钥影响） — {"digest":"53437c089c9cff6ed9c2cb036e975b02c4b76433443d4ecceaf3200f311e19a6"}
+[2026-09-15T18:33:42.537Z] PASS: R1 授权簿含页面 origin — [{"origin":"http://127.0.0.1:60713","grantedAt":1789497222}]
+[2026-09-15T18:33:42.538Z] PASS: R2 撤销 origin 授权 — {"ok":true}
+[2026-09-15T18:33:42.539Z] PASS: R3 撤销后页面请求 → OriginNotPermitted（fail-closed） — ERR:OriginNotPermitted
+[2026-09-15T18:33:42.745Z] PASS: R4 重连可恢复授权（批准后 granted） — {"accounts":["032082a0820abda0476b9983077624d80f60c046c4ab3590ff2d067e51b12e4b69
+[2026-09-15T18:33:42.747Z] PASS: C1 矩阵三协议行齐全（EIP-1193/WC/Starknet） — ["EIP-1193（兼容形状）","WalletConnect v2","Starknet 钱包接口"]
+[2026-09-15T18:33:42.747Z] PASS: C2 EIP-1193：detected=false（headless 无注入）+ 签名方法全拒清单 — {"detected":false,"denied":7}
+[2026-09-15T18:33:42.747Z] PASS: C3 WalletConnect：dormant 如实（SignClient 未注入 = B5 外部依赖） — {"active":false,"summary":"dormant：未注入 SignClient，不监听任何会话事件（生产 relay 属 B5 外部依赖）"}
+[2026-09-15T18:33:42.747Z] PASS: C4 Starknet：未检测到钱包对象如实标注 + note spend 拒绝红线 — {"detected":false}
+[2026-09-15T18:33:42.749Z] PASS: W1 提现预览：canSubmit 恒 false + vault_offline/库空原因 + 托管风险 — {"kind":"withdraw","assetClass":"REAL","chainId":"zchain-devnet-1","amount":"100","owner":"ababababababababababababababababababababababababababababababababab","inputs":[],"finality":{"worstProof":"none","requiredProof":"finalized","reached"
+[2026-09-15T18:33:42.749Z] PASS: W2 坏金额 fail-closed（AmountInvalid） — {"error":{"code":"AmountInvalid","reason":"金额必须是正十进制整数"}}
+[2026-09-15T18:33:42.751Z] PASS: P1 provider 授权方法面未开放 → NotSupportedIn01（popup UI 为唯一入口） — ERR:NotSupportedIn01
+[2026-09-15T18:33:42.752Z] PASS: U1 popup 页面存活 — ok
