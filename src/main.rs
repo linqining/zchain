@@ -123,6 +123,8 @@ fn sleep_interruptible(duration: Duration, shutdown: &AtomicBool) -> bool {
 trait P2pIo: Read + Write + Send {
     fn try_clone_box(&self) -> std::io::Result<Box<dyn P2pIo>>;
     fn peer_socket_addr(&self) -> Option<SocketAddr>;
+    /// 广播写超时（半开死连接的 write 阻塞防线；不支持者 no-op）。
+    fn set_broadcast_write_timeout(&self) {}
 }
 
 impl P2pIo for TcpStream {
@@ -133,6 +135,10 @@ impl P2pIo for TcpStream {
 
     fn peer_socket_addr(&self) -> Option<SocketAddr> {
         self.peer_addr().ok()
+    }
+
+    fn set_broadcast_write_timeout(&self) {
+        let _ = self.set_write_timeout(Some(P2P_BROADCAST_WRITE_TIMEOUT));
     }
 }
 
@@ -153,6 +159,18 @@ impl P2pIo for std::os::unix::net::UnixStream {
 /// This preserves the header's monotonic soft-time invariant and is identical for every validator
 /// which has the same parent.  The genesis fallback is also deterministic for integration tests
 /// and a freshly initialized chain.
+/// put_block 同高冲突后的权威块拉取退避窗口。
+const BLOCK_CONFLICT_REQUEST_BACKOFF: std::time::Duration = std::time::Duration::from_millis(2_000);
+
+/// epoch 推进周期（每 EPOCH_LENGTH 个 commit 推进一次 epoch）。
+pub const EPOCH_LENGTH: u64 = 10;
+
+/// 落后检测阈值：本地 tip 落后 peer 投票高度即触发 catch-up（=1）。
+/// 网络抖动丢失 1-2 个块时若不补，tip cert_round 分裂会让各节点的
+/// epoch 推进判定错位（本地 tip % EPOCH_LENGTH 各异）→ DAG 清空时机
+/// 分裂 → 拓扑级分叉（实测 tip 分裂 170/171/172 后全网 commit 停滞）。
+const CATCHUP_LAG_THRESHOLD: u64 = 1;
+
 fn consensus_block_timestamp(node: &Node, height: u64) -> Result<u64, String> {
     let previous = height.checked_sub(1).and_then(|previous_height| {
         node.block_store()
@@ -210,8 +228,11 @@ impl VoteCollector {
     fn add_vote(&self, vote: CommitVote) {
         let mut votes = self.votes.lock().unwrap_or_else(|e| e.into_inner());
         let same_signer_at_height = |v: &CommitVote| {
+            // 分叉根因修复：按 (signer, height) 去重。视图切换会让
+            // commit_round 前进而 height 不动——按 round 去重时同一 signer
+            // 对同一 height 的不同 cert 票共存，双 quorum 同高度分叉。
             v.epoch == vote.epoch
-                && v.commit_round == vote.commit_round
+                && v.height == vote.height
                 && v.signer_pubkey == vote.signer_pubkey
         };
         if votes.iter().any(|v| {
@@ -831,6 +852,7 @@ fn run_node(args: &[String]) -> Result<(), String> {
     // 绑定 P2P listener
     let p2p_listener = TcpListener::bind(&p2p_listen)
         .map_err(|e| format!("P2P 监听绑定 {p2p_listen} 失败：{e}"))?;
+    transport.set_self_addr(p2p_listen.clone());
     p2p_listener
         .set_nonblocking(true)
         .map_err(|e| format!("P2P set_nonblocking 失败：{e}"))?;
@@ -1123,6 +1145,13 @@ const MAX_P2P_MSG_SIZE: usize = poker_l1::network::MAX_P2P_MESSAGE_BYTES;
 /// 默认 P2P 请求-响应超时（秒）。
 const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// gossip 广播的 per-stream 写超时：半开死连接的 write 阻塞（TCP 重传
+/// 超时可达 15 分钟+）会持 per-stream 写锁，令所有广播线程排队、validator
+/// loop 停产。超时需长于同机 debug 构建的极端写延迟（实测 2s 会误杀
+/// CPU 争用下的活连接 → 连接churn → vertex 丢失），又须远小于 TCP
+/// 默认阻塞，10s 平衡。
+const P2P_BROADCAST_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// tokio TCP 轻量 P2P 传输层。
 ///
 /// 实现 [`NetworkTransport`] trait，用 4 字节 length-prefix + BCS 序列化消息。
@@ -1133,6 +1162,10 @@ const P2P_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// - `peer_addrs` 用于 `send_to` / `request_blocks_by_range` / `request_vertices_by_range`
 ///   —— 通过创建临时连接发送，避免与持久读取循环冲突
 struct TcpTransport {
+    /// 本节点 P2P 监听地址（自连过滤：PEX 会把自己广播给所有节点，
+    /// 不过滤则节点持续自拨/自连，连接churn 且 catch-up 轮询先在
+    /// 自连接上空耗 30s 超时）。
+    self_addr: std::sync::Mutex<Option<String>>,
     /// 已连接 peer 的共享写端（仅用于 gossip_broadcast）。
     ///
     /// 同一连接还会由其接收循环发送 Response*/fallback 消息。每个写端单独
@@ -1157,10 +1190,24 @@ impl TcpTransport {
     /// 创建空传输层。
     fn new() -> Self {
         Self {
+            self_addr: std::sync::Mutex::new(None),
             peers: Arc::new(Mutex::new(Vec::new())),
             peer_addrs: Arc::new(Mutex::new(Vec::new())),
             light_headers: Arc::new(Mutex::new(Vec::new())),
             proof_packages: Arc::new(Mutex::new(BTreeMap::new())),
+        }
+    }
+
+    /// 注册本节点 P2P 监听地址（自连过滤基准）。
+    fn set_self_addr(&self, addr: String) {
+        *self.self_addr.lock().unwrap_or_else(|e| e.into_inner()) = Some(addr);
+    }
+
+    /// 地址是否为本节点自身（规范化比较）。
+    fn is_self_addr(&self, addr: &str) -> bool {
+        match self.self_addr.lock() {
+            Ok(guard) => guard.as_deref() == Some(addr),
+            Err(_) => false,
         }
     }
 
@@ -1197,6 +1244,9 @@ impl TcpTransport {
     /// 列表。这样主动连接与入站连接都具备双向收发能力，而不会留下一个只写
     /// 不读的 socket。
     fn connect_peer(&self, addr: &str) -> Result<TcpStream, String> {
+        if self.is_self_addr(addr) {
+            return Err(format!("跳过自身地址 {addr}（自连过滤）"));
+        }
         let stream = TcpStream::connect(addr).map_err(|e| format!("连接 peer {addr} 失败：{e}"))?;
         info!("已连接 peer：{addr}");
         self.register_peer_info(PeerInfo {
@@ -1494,10 +1544,32 @@ fn run_catch_up_loop(node: Arc<Node>, transport: Arc<TcpTransport>, shutdown: Ar
                     let mut imported = 0usize;
                     for block in &blocks {
                         match node.put_block(block) {
-                            Ok(_) => imported += 1,
+                            Ok(_) => {
+                                imported += 1;
+                                // epoch 跟随（catch-up 版，2026-09-15）：tip cert
+                                // 过 EPOCH_LENGTH 边界即推进 node epoch，否则
+                                // 后续块的 cert/vertex 全被 epoch 检查拒绝、
+                                // catch-up 永久卡住（实测 node1 卡 11）。
+                                let tip_cert_round = block
+                                    .header
+                                    .dag_commit_certificate
+                                    .commit_round;
+                                let expected_epoch = tip_cert_round.saturating_add(EPOCH_LENGTH - 1)
+                                    / EPOCH_LENGTH;
+                                while node.current_epoch() < expected_epoch {
+                                    let next = node.current_epoch() + 1;
+                                    let vrf = VRF_SECRET.get().and_then(|v| v.as_ref());
+                                    if let Err(error) =
+                                        node.advance_epoch_with_vrf(next, vrf)
+                                    {
+                                        warn!("catch-up epoch 推进到 {next} 失败：{error}");
+                                        break;
+                                    }
+                                }
+                            }
                             Err(error) => {
                                 // 典型原因：peer 返回区间稀疏导致缺父块。留给下一轮。
-                                debug!(
+                                warn!(
                                     height = block.header.height,
                                     "catch-up put_block 拒绝：{error}"
                                 );
@@ -1602,6 +1674,11 @@ impl NetworkTransport for TcpTransport {
         let mut failed = Vec::new();
         for (i, stream) in peers.iter().enumerate() {
             let mut stream = stream.lock().unwrap_or_else(|e| e.into_inner());
+            // 写超时防线（346 停滞根因）：半开/死连接的 write_all 会阻塞到
+            // TCP 重传超时（可达 15 分钟+），期间持有 per-stream 写锁——
+            // validator loop 的所有广播在 stream.lock() 排队，vertex 停产。
+            // 超时即按失败移除，与读侧的 read timeout 对称。
+            stream.set_broadcast_write_timeout();
             if let Err(e) = stream.write_all(&frame).and_then(|_| stream.flush()) {
                 warn!("广播消息到 peer {i} 失败：{e}，移除连接");
                 failed.push(Arc::clone(&peers[i]));
@@ -1662,21 +1739,74 @@ impl NetworkTransport for TcpTransport {
         }
         let req = NetworkMessage::RequestBlocksByRange(start, end);
         for peer in &peers {
-            match send_request_and_recv(&peer.address, &req) {
-                Ok(NetworkMessage::ResponseBlocks(blocks)) => {
-                    debug!(
-                        "request_blocks_by_range: 从 peer {} 获取 {} 个 block",
-                        peer.address,
-                        blocks.len()
-                    );
-                    return Ok(blocks);
+            // 临时连接 + 带谓词读循环：该连接同时会收到 gossip 混流
+            //（CommitVote / 出块成功时广播的最新单块 ResponseBlocks 等），
+            // 一律跳过，直到读到**首块高度 == start** 的区间响应
+            //（2026-09-14 346 停滞修复：此前首条非公告消息即返回，
+            // gossip 单块被误当响应 → 跳跃 put_block 拒绝 → 永追不上）。
+            let stream = TcpStream::connect(&peer.address);
+            let mut stream = match stream {
+                Ok(stream) => stream,
+                Err(e) => {
+                    warn!("request_blocks_by_range: 连接 {} 失败：{e}", peer.address);
+                    continue;
                 }
-                Ok(other) => warn!(
-                    "request_blocks_by_range: peer {} 返回非预期消息类型：{other:?}",
-                    peer.address
-                ),
-                Err(e) => warn!("request_blocks_by_range: peer {} 失败：{e}", peer.address),
+            };
+            let _ = stream.set_read_timeout(Some(P2P_REQUEST_TIMEOUT));
+            let _ = stream.set_write_timeout(Some(P2P_REQUEST_TIMEOUT));
+            if let Err(e) = send_p2p_message(&mut stream, &req) {
+                warn!("request_blocks_by_range: 发送失败：{e}");
+                continue;
             }
+            warn!(
+                "request_blocks_by_range: 向 {} 请求区间 ({start},{end})",
+                peer.address
+            );
+            let deadline = std::time::Instant::now() + P2P_REQUEST_TIMEOUT;
+            let mut got_response = false;
+            loop {
+                if std::time::Instant::now() >= deadline {
+                    warn!(
+                        "request_blocks_by_range: peer {} 响应超时（30s 未收到首块={start} 的区间）",
+                        peer.address
+                    );
+                    break;
+                }
+                match recv_p2p_message(&mut stream) {
+                    Err(e) => {
+                        warn!("request_blocks_by_range: 读取失败：{e}");
+                        break;
+                    }
+                    Ok(None) => break,
+                    Ok(Some(NetworkMessage::ResponseBlocks(mut blocks))) => {
+                        warn!(
+                            "request_blocks_by_range: 收到 {} 块（首块 {:?}）",
+                            blocks.len(),
+                            blocks.first().map(|b| b.header.height)
+                        );
+                        // 区间过滤：只接受首块 == start 的连续区间
+                        blocks.retain(|block| {
+                            block.header.height >= start && block.header.height <= end
+                        });
+                        blocks.sort_by_key(|block| block.header.height);
+                        if blocks.first().map(|b| b.header.height) != Some(start) {
+                            warn!(
+                                "request_blocks_by_range: gossip 混流（首块 {:?}≠{start}），继续等",
+                                blocks.first().map(|b| b.header.height)
+                            );
+                            continue; // gossip 单块污染 → 继续等真响应
+                        }
+                        debug!(
+                            "request_blocks_by_range: 从 peer {} 获取 {} 个 block",
+                            peer.address,
+                            blocks.len()
+                        );
+                        return Ok(blocks);
+                    }
+                    Ok(Some(_)) => continue, // gossip 混流一律跳过
+                }
+            }
+            let _ = got_response;
         }
         Err(poker_l1::error::PokerL1Error::Other(
             "request_blocks_by_range: 所有 peer 请求失败".to_string(),
@@ -1946,6 +2076,29 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
             let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
             dag_guard.insert(vertex);
         }
+        Err(poker_l1::error::PokerL1Error::InvalidVertexEpoch {
+            actual, expected,
+        }) if actual > expected => {
+            // epoch 跟随多数派（346 停滞修复）：本地 epoch 落后于全网（其它
+            // 节点已推进并清空旧 DAG，本地缺的 parent vertex 全网不复存在，
+            // vertex/commit 全部被 epoch 检查拒绝 → 永久隔离）。连续推进本地
+            // epoch 到 actual 后重试准入；validator loop 检测 node epoch 变化
+            // 自行清 DAG/重置 round。
+            for next in expected + 1..=actual {
+                let vrf = VRF_SECRET.get().and_then(|v| v.as_ref());
+                if let Err(error) = node.advance_epoch_with_vrf(next, vrf) {
+                    warn!("P2P {source} epoch 跟随推进到 {next} 失败：{error}");
+                    return;
+                }
+            }
+            match node.put_vertex(&vertex) {
+                Ok(_) => {
+                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                    dag_guard.insert(vertex);
+                }
+                Err(error) => warn!("P2P {source} vertex 拒绝（epoch 跟随后）：{error}"),
+            }
+        }
         Err(error) => warn!("P2P {source} vertex 拒绝：{error}"),
     }
 }
@@ -2089,7 +2242,22 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                             warn!("P2P commit vote rejected: invalid secp256k1 signature");
                             continue;
                         }
+                        let vote_height = vote.height;
                         votes.add_vote(vote);
+                        // 落后检测：投票携带目标 height（修复 1）。peer 投票
+                        // 的 height 显著高于本地 tip → 触发区间 catch-up，
+                        // 解除「epoch 落后 → vertex 被拒 → parent quorum 不足
+                        // → tip 永不前进」的隔离死锁（服务器实测 node0 卡
+                        // epoch 31/tip 320，其余节点 epoch 41/411）。
+                        let local_tip = node
+                            .block_store()
+                            .get_tip_height()
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0);
+                        if vote_height > local_tip + CATCHUP_LAG_THRESHOLD {
+                            request_catchup_range(&transport, local_tip, vote_height);
+                        }
                     }
                     NetworkMessage::CheckpointVote(vote) => {
                         // v1.5-c：checkpoint 投票（BLS 聚签）。签名有效性在
@@ -2177,8 +2345,10 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                         }
                     }
                     NetworkMessage::RequestBlocksByRange(start, end) => {
+                        info!("收到 RequestBlocksByRange({}, {}) — 回送区间", start, end);
                         // 重构2：响应 block range 请求
                         let blocks = collect_blocks_by_range(&node, start, end);
+                        info!("回送 ResponseBlocks {} 块", blocks.len());
                         if let Err(e) = send_p2p_message_locked(
                             &writer,
                             &NetworkMessage::ResponseBlocks(blocks),
@@ -2814,7 +2984,83 @@ fn commit_and_finalize_block_multi(
         }
         Err(e) => {
             error!("multi: put_block 失败：{e}");
+            if e.to_string().contains("already committed") {
+                request_authoritative_block(transport, block.header.height);
+            }
             false
+        }
+    }
+}
+
+/// put_block 同高度冲突后的恢复：向全网广播 `RequestBlocksByRange(h, h)`
+/// 拉取已提交的权威块（提交成功方会广播 ResponseBlocks / 响应范围请求）。
+/// 同一 height 的请求按退避限频，避免装配重试期间的请求风暴。
+/// 落后节点 catch-up：本地 tip 落后 peer 广播的 vote.height 超过阈值时，
+/// 拉取 (tip, observed] 的区块区间（ResponseBlocks 经 put_block 幂等接受：
+/// 多签 cert 验证 + 状态重放）。tip 推进后 epoch 推进条件自然满足，
+/// 解除「epoch 落后 → vertex 被拒 → parent quorum 不够 → tip 永不前进」
+/// 的隔离死锁。按 end 高度退避限频。
+fn request_catchup_range(transport: &TcpTransport, start: u64, end: u64) {
+    static LAST: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    let map = LAST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let now = std::time::Instant::now();
+    let should = {
+        let mut guard = match map.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        match guard.get(&end) {
+            Some(at) if now.duration_since(*at) < BLOCK_CONFLICT_REQUEST_BACKOFF => false,
+            _ => {
+                guard.insert(end, now);
+                true
+            }
+        }
+    };
+    if should {
+        warn!(
+            "本地 tip 落后 peer 投票高度 {end} — 广播 RequestBlocksByRange({},{end}) catch-up",
+            start + 1
+        );
+        if let Err(e) = transport.gossip_broadcast(
+            GossipTopic::DagVertex,
+            &NetworkMessage::RequestBlocksByRange(start + 1, end),
+        ) {
+            warn!("catch-up RequestBlocksByRange 广播失败：{e}");
+        }
+    }
+}
+
+fn request_authoritative_block(transport: &TcpTransport, height: u64) {
+    static LAST_REQUEST: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+    > = std::sync::OnceLock::new();
+    let map = LAST_REQUEST.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let now = std::time::Instant::now();
+    let should_request = {
+        let mut guard = match map.lock() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
+        match guard.get(&height) {
+            Some(at) if now.duration_since(*at) < BLOCK_CONFLICT_REQUEST_BACKOFF => false,
+            _ => {
+                guard.insert(height, now);
+                true
+            }
+        }
+    };
+    if should_request {
+        warn!(
+            "height {height} 与本地已提交块冲突 — 广播 RequestBlocksByRange 拉取权威块（catch-up）"
+        );
+        if let Err(e) = transport.gossip_broadcast(
+            GossipTopic::DagVertex,
+            &NetworkMessage::RequestBlocksByRange(height, height),
+        ) {
+            warn!("RequestBlocksByRange 广播失败：{e}");
         }
     }
 }
@@ -3085,6 +3331,10 @@ fn maybe_warn_fork_anchor(node: &Node, max_lag_blocks: u64) {
     }
 }
 
+/// validator VRF 私钥的进程级共享：epoch 跟随（accept 线程推进 epoch）与
+/// validator loop 都需要它（advance_epoch_with_vrf 的 randomness 派生）。
+static VRF_SECRET: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+
 fn run_validator_loop(
     node: Arc<Node>,
     validator_key: ValidatorKey,
@@ -3098,6 +3348,7 @@ fn run_validator_loop(
 ) {
     // 缺口 #3 §3.6：提取 VRF 私钥（若配置），用于 epoch_randomness 派生。
     let vrf_secret: Option<[u8; 32]> = validator_key.vrf_secret;
+    let _ = VRF_SECRET.set(vrf_secret);
     // 从 ValidatorKey 提取 secp256k1 SecretKey
     let secret_key = match secp256k1::SecretKey::from_slice(&validator_key.secret_key_bytes) {
         Ok(sk) => sk,
@@ -3119,7 +3370,22 @@ fn run_validator_loop(
     let mut signed_threshold_sites: BTreeSet<(u64, u64)> = BTreeSet::new();
 
     let mut epoch = node.current_epoch();
-    let mut round: u64 = 1;
+    // 重启恢复：round 必须越过本节点重启前已产出的最高 DAG round——
+    // 否则重启后同 author 同 round 重产 vertex 触发 equivocation，节点
+    // 永久无法产出（数据保留重启路径实测）。内存 DAG 重启后为空，因此
+    // 从**持久 vertex 存储**按作者取历史最高 round。
+    let mut round: u64 = {
+        let history = node
+            .vertex_store()
+            .get_by_author(&author_pubkey)
+            .unwrap_or_default();
+        history
+            .iter()
+            .map(|v| v.round)
+            .max()
+            .map(|r| r.saturating_add(1))
+            .unwrap_or(1)
+    };
     let (mut commit_round, mut prev_commit_hash, mut prev_block_hash) = node
         .block_store()
         .get_tip_height()
@@ -3209,10 +3475,27 @@ fn run_validator_loop(
                 warn!("da receipt 广播失败：{e}");
             }
         }
+        // epoch 跟随检测（346 停滞修复）：accept 线程可能已把 node epoch
+        // 推进到多数派位置——loop 同步局部 epoch 并按推进语义清 DAG/round，
+        // 使本节点立即参与新 epoch 的 vertex/commit 生产。
+        if node.current_epoch() != epoch {
+            while epoch < node.current_epoch() {
+                epoch += 1;
+            }
+            round = 1;
+            last_vertex = None;
+            committed_vertices.clear();
+            *dag.lock().unwrap_or_else(|e| e.into_inner()) = Dag::new();
+            info!(
+                "[validator-loop] epoch 跟随多数派至 {}（DAG round 已重置）",
+                epoch
+            );
+        }
         // 混合模式核心：等待 tx 或超时
         // - 有 tx 时被 submit_tx 的 notify_one 立即唤醒 → 零延迟出 vertex
         // - 超时返回 false → 检查是否需要出空 vertex 推进 commit
         // info!("[validator-loop] round={} 进入 wait_for_pending_tx", round);
+        let mut leader_gate_skip: u64 = 0;
         let _has_tx = node.wait_for_pending_tx(block_interval);
         // info!(
         //     "[validator-loop] round={} wait_for_pending_tx 返回 has_tx={}",
@@ -3783,6 +4066,7 @@ fn run_validator_loop(
                             let self_vote = CommitVote {
                                 epoch,
                                 commit_round: tip_commit_round,
+                                height,
                                 cert_signing_hash,
                                 signer_pubkey: author_pubkey.clone(),
                                 signature: self_sig,
@@ -3825,6 +4109,42 @@ fn run_validator_loop(
                                 // 恰 quorum 修复：本周期已为本 cert 投票并广播，绝不
                                 // 再为同高度的其他候选投票（防双票等价错误）。票数由
                                 // gossip 持续累积，下一生产周期重试同一 intent。
+                                break;
+                            }
+                            // 方案 A（leader-only 装配，2026-09-15）：块字节含签名
+                            // 子集——各 validator 独立装配会产出同语句不同字节的
+                            // 块（prev_hash 链互不承认 → epoch 边界 tip 分裂卡死，
+                            // 实测 330/331）。只有 commit leader 装配并广播完整块，
+                            // 其余 validator 通过 gossip ResponseBlocks 分支走完整
+                            // put_block 验证接受（cert 多签 + 重放 + state_root），
+                            // 块字节全网唯一。leader 缺席时该轮无块，活性由 leader
+                            // 轮换保证（Bullshark 语义）。
+                            // leader 超时兜底：leader（本轮装配者）在
+                            // COMMIT_VOTE_PIN_RELEASE 内未出块 → 距投票时间最久的
+                            // follower 兜底装配。兜底块与 leader 块同语句
+                            //（signing_hash 相同），put_block 的语句级去重保证
+                            // 只有一份入库，无分叉风险。
+                            let pinned_at_ref = commit_vote_pins
+                                .get(&(epoch, tip_commit_round))
+                                .map(|(_, at)| *at);
+                            let leader_timed_out = pinned_at_ref
+                                .map(|at| {
+                                    std::time::Instant::now().duration_since(at)
+                                        >= COMMIT_VOTE_PIN_RELEASE
+                                })
+                                .unwrap_or(false);
+                            let this_node_is_leader =
+                                leader_vertex.author_pubkey == author_pubkey;
+                            if !this_node_is_leader && !leader_timed_out {
+                                leader_gate_skip += 1;
+                                if leader_gate_skip % 50 == 1 {
+                                    info!(
+                                        commit_round = tip_commit_round,
+                                        height,
+                                        skips = leader_gate_skip,
+                                        "非 commit leader，等待 leader 广播块"
+                                    );
+                                }
                                 break;
                             }
                             // 修复：verify 端（validate_commit_certificate_signatures）按
@@ -4931,6 +5251,7 @@ mod tests {
         CommitVote {
             epoch: 1,
             commit_round: 5,
+            height: 10,
             cert_signing_hash: [cert_hash_byte; 32],
             signer_pubkey: TaggedPubkey {
                 tag: encode_tag(SignatureScheme::Secp256k1, 1),

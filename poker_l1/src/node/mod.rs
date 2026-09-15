@@ -1017,6 +1017,7 @@ fn build_default_precompile_registry() -> Arc<PrecompileRegistry> {
     let mut registry = PrecompileRegistry::new();
     registry.register(GamePrecompile::new_arc(1));
     registry.register(TexasPokerPrecompile::new_arc(1));
+    registry.register(crate::vm::contracts::cairo_fact_registry::CairoFactRegistryPrecompile::new_arc(1));
     Arc::new(registry)
 }
 

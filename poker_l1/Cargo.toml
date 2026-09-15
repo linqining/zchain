@@ -15,6 +15,8 @@ client = []
 path = "src/lib.rs"
 
 [dependencies]
+# ===== 方案①：节点内 Cairo/Stwo 证明验证（poker_texas_air 同源 2.4.0 验证栈）=====
+fact-verify = { path = "../../poker_texas_air/fact-verify" }
 poker_protocol = { workspace = true }
 vm-common = { path = "../vm-common" }
 # 结算语义唯一事实源（plan-appchain §5.2-1）：settlement/side_pot/RIT 搬运目标 crate。
@@ -54,6 +56,7 @@ vrf = "0.2.5"
 openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
+starknet-crypto = "0.8.1"
 # 测试专用，避免影响生产二进制大小
 tempfile = "3.10"
 criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }

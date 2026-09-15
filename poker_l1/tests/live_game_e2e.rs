@@ -31,6 +31,7 @@ use poker_protocol::zk_shuffle::transcript_ext::CryptoTranscript as _;
 use secp256k1::{Message, Secp256k1};
 
 const TABLE_ID: ObjectID = reserved::texas_poker_contract_id();
+const CAIRO_REGISTRY_ID: ObjectID = reserved::cairo_registry_contract_id();
 
 /// 复制 `economics::genesis_coin_nonce`（私有但为共识级常量）。
 fn genesis_coin_nonce(chain_id: u64, owner: &[u8; 20]) -> u64 {
@@ -78,9 +79,19 @@ impl Actor {
     }
 }
 
-/// 构造并签名一笔合约调用交易（Public 通道，免费策略）。
+/// 构造并签名一笔合约调用交易（Public 通道，免费策略；可指定目标合约）。
 fn contract_call_tx(
     actor: &mut Actor,
+    selector: [u8; 32],
+    args: Vec<u8>,
+    inputs: Vec<ObjectID>,
+) -> Transaction {
+    contract_call_tx_to(actor, TABLE_ID, selector, args, inputs)
+}
+
+fn contract_call_tx_to(
+    actor: &mut Actor,
+    contract_id: ObjectID,
     selector: [u8; 32],
     args: Vec<u8>,
     inputs: Vec<ObjectID>,
@@ -92,7 +103,7 @@ fn contract_call_tx(
         inputs,
         outputs: vec![],
         contract_call: Some(ContractCall {
-            contract_id: TABLE_ID,
+            contract_id,
             method_selector: selector,
             args,
         }),
@@ -522,9 +533,89 @@ fn live_node_poker_hand_e2e() {
     assert_eq!(onchain.pot, 0, "彩池已清零");
     assert_eq!(stacks[0] + stacks[1], 2 * buy_in, "筹码守恒（总买入 = 总栈，差值即抽水）");
     println!("[9] ✅ 合约结算完成：彩池清零、筹码守恒、状态重置");
+
+    // ===== 10. Cairo/Stwo 证明的节点内验证 + fact 注册（方案①接线）=====
+    // 真实 settlement 电路证明（poker_texas_air prove-hand 2.4.0 栈产出，
+    // program_hash 与主网 DualSettlement 钉扎值一致）。
+    let proof_json =
+        "/Users/mac/projects/poker_texas_air/proving-tool/output/settlement/proof.json";
+    let pinned = hex_to_32("0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4");
+
+    // [10.1] 钉扎程序哈希（creator = host，对标 set_circuit_program_hash）
+    let args = borsh::to_vec(&poker_l1::vm::contracts::cairo_fact_registry::SetProgramHashArgs {
+        program_hash: pinned,
+    })
+    .unwrap();
+    let tx = contract_call_tx_to(
+        &mut host,
+        CAIRO_REGISTRY_ID,
+        poker_l1::vm::contracts::cairo_fact_registry::selectors::set_program_hash(),
+        args,
+        vec![],
+    );
+    commit_block(&node, &validator, &mut chain, vec![tx]);
+    println!("[10] set_program_hash(0x744d16d3…) 落块 ✓");
+
+    // [10.2] 证明二进制 wire（bzip2+bincode ≈1MB）按 60KB 分块，单一 caller
+    //        （alice）上传——finalize 按 caller 分组重组，混传会拆散字节流
+    let wire = fact_verify::proof_binary_bytes_from_json(std::path::Path::new(proof_json))
+        .expect("binary wire");
+    let chunk_size = 60_000usize;
+    let chunks: Vec<&[u8]> = wire.chunks(chunk_size).collect();
+    println!(
+        "[10] 证明 wire = {} 字节 → {} 个分块（≤{chunk_size}B/块）",
+        wire.len(),
+        chunks.len()
+    );
+    for chunk in &chunks {
+        let args = borsh::to_vec(
+            &poker_l1::vm::contracts::cairo_fact_registry::SubmitProofChunkArgs {
+                chunk: chunk.to_vec(),
+            },
+        )
+        .unwrap();
+        let tx = contract_call_tx_to(
+            &mut alice,
+            CAIRO_REGISTRY_ID,
+            poker_l1::vm::contracts::cairo_fact_registry::selectors::submit_proof_chunk(),
+            args,
+            vec![],
+        );
+        commit_block(&node, &validator, &mut chain, vec![tx]);
+    }
+    println!("[10] {} 个分块全部落块 ✓", chunks.len());
+
+    // [10.3] finalize：节点内重组 + 真验证（cairo-air verify_cairo）+ fact 注册
+    let args = borsh::to_vec(&poker_l1::vm::contracts::cairo_fact_registry::FinalizeProofArgs {
+        program_hash: pinned,
+    })
+    .unwrap();
+    let tx = contract_call_tx_to(
+        &mut alice,
+        CAIRO_REGISTRY_ID,
+        poker_l1::vm::contracts::cairo_fact_registry::selectors::finalize_proof(),
+        args,
+        vec![],
+    );
+    let receipts = commit_block(&node, &validator, &mut chain, vec![tx]);
+    assert!(receipts[0].success, "finalize 必须成功");
+    println!("[10] ✅ 节点内验证通过（cairo-air verify_cairo），fact 已注册");
+
+    // [10.4] 链上读回：fact 已注册 + 程序哈希已钉扎
+    let reg = decode_cairo_registry(&node);
+    assert!(!reg.facts.is_empty(), "fact 必须已注册");
+    assert!(
+        reg.program_hashes.iter().any(|h| *h == pinned),
+        "程序哈希必须已钉扎（32B 与钉扎值逐位一致）"
+    );
+    println!("[10] ✅ 链上读回：fact 已注册、程序哈希已钉扎");
 }
 
-/// 提交并返回回执（不要求成功）——负路径/试探用。
+fn bytes_hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// 提交并返回回执（不要求成功）——负路径用。
 fn commit_block_lenient(
     node: &Node,
     validator: &Actor,
@@ -588,4 +679,30 @@ fn commit_block_lenient(
     let put = node.put_block(&block).expect("put_block lenient");
     *chain = [put, cert_signing_hash];
     outcome.receipts
+}
+
+/// hex → [u8; 32]。
+fn hex_to_32(s: &str) -> [u8; 32] {
+    let mut t = s.trim_start_matches("0x").to_owned();
+    // felt 惯用写法允许省略前导零（如 63 字符的 251-bit 值）：右对齐补足 64
+    while t.len() < 64 {
+        t.insert_str(0, "0");
+    }
+    let mut out = [0u8; 32];
+    for i in 0..32 {
+        out[i] = u8::from_str_radix(&t[i * 2..i * 2 + 2], 16).expect("hex byte");
+    }
+    out
+}
+
+/// 解码链上 Cairo 注册表状态。
+fn decode_cairo_registry(
+    node: &Node,
+) -> poker_l1::vm::contracts::cairo_fact_registry::CairoRegistryState {
+    let id = poker_l1::vm::precompile::reserved::cairo_registry_contract_id();
+    let obj = node
+        .get_object(&id)
+        .expect("db")
+        .unwrap_or_else(|| panic!("cairo registry object 不存在"));
+    borsh::from_slice(&obj.data).expect("decode cairo registry")
 }

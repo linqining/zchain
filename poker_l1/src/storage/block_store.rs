@@ -97,10 +97,15 @@ impl BlockStore {
         if self.exists(&hash)? {
             return Ok(hash);
         }
-        let height_le = block.header.height.to_le_bytes();
+        // height_index key 必须 big-endian：RocksDB 按**字节序**迭代/比较，
+        // LE 编码下 256(00 01..) 字节序小于 255(FF 00..)——get_tip_height 的
+        // End 迭代与 get_range 的字节序比较在高度 255→256 处全部断裂
+        //（链卡 256、FORK ANCHOR WARNING、catch-up range 拿不到块的根因）。
+        // BE 编码下数值序 = 字节序，全部迭代/比较自然正确。
+        let height_key = block.header.height.to_be_bytes();
         if let Some(existing_hash) = self
             .db
-            .get_cf(self.height_cf(), height_le)
+            .get_cf(self.height_cf(), height_key)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
         {
             if existing_hash.as_ref() != hash {
@@ -114,7 +119,7 @@ impl BlockStore {
 
         let mut batch = WriteBatch::default();
         batch.put_cf(self.blocks_cf(), hash, &value);
-        batch.put_cf(self.height_cf(), height_le, hash);
+        batch.put_cf(self.height_cf(), height_key, hash);
         self.db
             .write(batch)
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
@@ -138,7 +143,7 @@ impl BlockStore {
     pub fn get_by_height(&self, height: BlockHeight) -> PokerL1Result<Block> {
         let hash_bytes = self
             .db
-            .get_cf(self.height_cf(), height.to_le_bytes())
+            .get_cf(self.height_cf(), height.to_be_bytes())
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
             .ok_or(PokerL1Error::BlockNotFound)?;
         if hash_bytes.len() != 32 {
@@ -175,7 +180,7 @@ impl BlockStore {
         for item in iter {
             let (key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
             if key.len() == 8 && value.len() == 32 {
-                let height = u64::from_le_bytes(key.as_ref().try_into().unwrap());
+                let height = u64::from_be_bytes(key.as_ref().try_into().unwrap());
                 if height < prune_below {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&value);
@@ -185,9 +190,9 @@ impl BlockStore {
         }
         if !to_delete.is_empty() {
             let mut batch = WriteBatch::default();
-            for (height_le, hash) in &to_delete {
+            for (height_key, hash) in &to_delete {
                 batch.delete_cf(self.blocks_cf(), hash);
-                batch.delete_cf(self.height_cf(), height_le);
+                batch.delete_cf(self.height_cf(), height_key);
             }
             self.db
                 .write(batch)
@@ -230,7 +235,7 @@ impl BlockStore {
                 }
                 let mut bytes = [0u8; 8];
                 bytes.copy_from_slice(&key);
-                Ok(Some(u64::from_le_bytes(bytes)))
+                Ok(Some(u64::from_be_bytes(bytes)))
             }
         }
     }
@@ -242,7 +247,7 @@ impl BlockStore {
             Some(height) => {
                 let hash_bytes = self
                     .db
-                    .get_cf(self.height_cf(), height.to_le_bytes())
+                    .get_cf(self.height_cf(), height.to_be_bytes())
                     .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?
                     .ok_or(PokerL1Error::BlockNotFound)?;
                 if hash_bytes.len() != 32 {
@@ -269,8 +274,8 @@ impl BlockStore {
         if start > end {
             return Ok(Vec::new());
         }
-        let start_key = start.to_le_bytes();
-        let end_key = end.to_le_bytes();
+        let start_key = start.to_be_bytes();
+        let end_key = end.to_be_bytes();
         let iter = self.db.iterator_cf(
             self.height_cf(),
             IteratorMode::From(&start_key, Direction::Forward),

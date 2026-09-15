@@ -871,6 +871,11 @@ pub struct CommitVote {
     pub epoch: crate::consensus::Epoch,
     /// commit round。
     pub commit_round: u64,
+    /// 目标块高（分叉防线：VoteCollector 按 (signer, height) last-write-wins
+    /// 去重——视图切换会让 commit_round 前进而 height 不动，按 round 去重时
+    /// 同一 signer 对同一 height 的两张不同 cert 票共存，双 quorum 各自凑齐
+    /// 即成同高度分叉；绑定 height 后任何时刻每 height 每 signer 至多一票）。
+    pub height: u64,
     /// 签名对象（cert.signing_hash(chain_id)，32 字节）。供收集方校验签名一致性。
     pub cert_signing_hash: Hash,
     /// 签名者 tagged pubkey。

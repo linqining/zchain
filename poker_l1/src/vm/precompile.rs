@@ -567,6 +567,37 @@ pub mod reserved {
         ObjectID::new(BRIDGE_CONTRACT_ADDRESS, 0)
     }
 
+    /// Cairo Fact Registry 预编译地址（0xFF..05，方案①：节点内 Cairo/Stwo
+    /// 证明验证 + fact 注册）。
+    pub const CAIRO_REGISTRY_CONTRACT_ADDRESS: Address = [
+        PRECOMPILE_PREFIX,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x00,
+        0x05,
+    ];
+
+    /// Cairo Fact Registry 预编译 ObjectID（0xFF..05）。
+    #[must_use]
+    pub const fn cairo_registry_contract_id() -> ObjectID {
+        ObjectID::new(CAIRO_REGISTRY_CONTRACT_ADDRESS, 0)
+    }
+
     /// 原生转账合约预编译地址（0xFF..04，缺口 #4-M1）。
     pub const TRANSFER_CONTRACT_ADDRESS: Address = [
         PRECOMPILE_PREFIX,

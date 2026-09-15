@@ -24,6 +24,7 @@
 //! 协议层规则在 `force_advance` 模块实现，合约层可调用或覆盖。
 
 pub mod ack_protocol;
+pub mod cairo_fact_registry;
 pub mod censor_detection;
 pub mod challenge_delta;
 pub mod checkpoint_anchor;
