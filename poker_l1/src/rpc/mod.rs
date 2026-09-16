@@ -1397,6 +1397,8 @@ pub struct MemoryBackend {
     now_ms: std::sync::atomic::AtomicU64,
     /// M3-ACC-6：审查检测窗口（块数，v1 近似）。
     censorship_window_blocks: u64,
+    /// 强制包含期限（与节点配置对齐；CensorshipProof::verify 强核对）。
+    inclusion_deadline_ms: u64,
 }
 
 impl MemoryBackend {
@@ -1416,6 +1418,8 @@ impl MemoryBackend {
             now_ms: std::sync::atomic::AtomicU64::new(0),
             censorship_window_blocks:
                 crate::force_include::DEFAULT_CENSORSHIP_WINDOW_BLOCKS,
+            inclusion_deadline_ms:
+                crate::force_include::DEFAULT_INCLUSION_DEADLINE_MS,
         })
     }
 
@@ -1438,6 +1442,12 @@ impl MemoryBackend {
     /// M3-ACC-6：设置审查检测窗口（块数）。
     pub fn set_censorship_window_blocks(&mut self, window_blocks: u64) {
         self.censorship_window_blocks = window_blocks;
+    }
+
+    /// 设置强制包含期限（毫秒）。CensorshipProof 的 deadline_ms 必须与之
+    /// 一致才可通过验证（P0 修复：防自报期限的罚没攻击）。
+    pub fn set_inclusion_deadline_ms(&mut self, deadline_ms: u64) {
+        self.inclusion_deadline_ms = deadline_ms;
     }
 
     fn current_now_ms(&self) -> u64 {
@@ -1605,7 +1615,12 @@ impl RpcBackend for MemoryBackend {
                 }
             }
         }
-        proof.verify(self.chain_id, self.current_now_ms(), &recent)
+        proof.verify(
+            self.chain_id,
+            self.current_now_ms(),
+            &recent,
+            self.inclusion_deadline_ms,
+        )
     }
 
     fn chain_id(&self) -> ChainId {

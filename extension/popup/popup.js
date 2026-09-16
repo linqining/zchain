@@ -1705,7 +1705,7 @@ async function renderStk() {
 function renderStkCreate() {
   const c = card('创建 Starknet 钱包');
   c.appendChild(el('div', { class: 'warn-box' },
-    '随机生成 STARK curve 私钥（< 2^125，生态惯例），账户地址 = UDC 公式推导' +
+    '随机生成 STARK curve 私钥（< 2^251，grindKey 语义，兼容标准钱包），账户地址 = UDC 公式推导' +
     '（class hash + 随机盐 + 公钥）。口令派生密钥（PBKDF2 60 万次）+ AES-256-GCM 加密存本地；口令丢失无法恢复。'));
   c.append(
     evmRowOf('stk-label', '账户标签（可选）'),
@@ -1731,7 +1731,7 @@ function renderStkCreate() {
 
 function renderStkImport() {
   const c = card('导入私钥（STARK curve）');
-  c.appendChild(el('div', { class: 'dim' }, '导入 felt 私钥（0x 可选，< 2^125），按当前网络 class hash + 随机盐推导地址并以口令重新加密。'));
+  c.appendChild(el('div', { class: 'dim' }, '导入 felt 私钥（0x 可选，< 2^251，grindKey 语义），按当前网络 class hash + 随机盐推导地址并以口令重新加密。'));
   c.append(
     evmRowOf('stk-import-key', '私钥（0x…）'),
     evmRowOf('stk-import-pw', '加密口令（≥ 8 字符）', 'password'),

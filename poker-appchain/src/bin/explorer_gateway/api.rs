@@ -690,10 +690,12 @@ fn settlement_detail(state: &Arc<GatewayState>, binding_hex: &str) -> Response {
             // TE-M5：资产维度展示（v1 note 经冻结映射 of_v1 升维——
             // Real → real:native / Play → game:play(legacy)，唯一换算）
             let asset = asset_id_json(&AssetId::of_v1(i.note.asset_class));
+            // nullifier/owner 与列表端点同款缩写（short_hex 摘要）——
+            // 明细端点此前内联全量 hex，构成隐私维度的额外泄露面（已修复）。
             serde_json::json!({
                 "commitment": hex::encode(i.spend.commitment),
-                "nullifier": hex::encode(i.spend.nullifier),
-                "owner": hex::encode(i.note.owner),
+                "nullifier": short_hex(&i.spend.nullifier),
+                "owner": short_hex(&i.note.owner),
                 "amount": i.note.amount,
                 "asset_class": i.note.asset_class.name(),
                 "asset_id": asset,
@@ -703,7 +705,7 @@ fn settlement_detail(state: &Arc<GatewayState>, binding_hex: &str) -> Response {
         "payouts": r.payouts.iter().map(|p| {
             let asset = asset_id_json(&AssetId::of_v1(p.asset_class));
             serde_json::json!({
-                "owner": hex::encode(p.owner),
+                "owner": short_hex(&p.owner),
                 "amount": p.amount,
                 "asset_class": p.asset_class.name(),
                 "asset_id": asset,
@@ -715,13 +717,13 @@ fn settlement_detail(state: &Arc<GatewayState>, binding_hex: &str) -> Response {
         "rake": {
             "total": r.rake.total,
             "treasury_out": r.rake.treasury_out.as_ref().map(|o| serde_json::json!({
-                "owner": hex::encode(o.owner),
+                "owner": short_hex(&o.owner),
                 "amount": o.amount,
                 "asset_class": o.asset_class.name(),
                 "asset_id": asset_id_json(&AssetId::of_v1(o.asset_class)),
             })),
             "operator_out": r.rake.operator_out.as_ref().map(|o| serde_json::json!({
-                "owner": hex::encode(o.owner),
+                "owner": short_hex(&o.owner),
                 "amount": o.amount,
                 "asset_class": o.asset_class.name(),
                 "asset_id": asset_id_json(&AssetId::of_v1(o.asset_class)),

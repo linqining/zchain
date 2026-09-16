@@ -386,13 +386,24 @@ pub fn parse_env_file(
         if k.is_empty() {
             continue;
         }
-        let mut v = v.trim();
-        // 去引号 + 行内 ` #` 注释（保守：仅处理带引号前的注释）
-        if let Some(pos) = v.find(" #") {
-            v = v[..pos].trim_end();
-        }
-        let v = v.trim_matches('"').trim_matches('\'').to_owned();
-        map.entry(k).or_insert(v);
+        let v = v.trim();
+        // 值解析（dotenv 约定）：
+        // - 引号开头的值取引号 span（闭引号后内容丢弃）——引号内的
+        //   ` #` 是字面内容，**不做**注释剥离（旧实现会静默截断含
+        //   ` #` 的引号值，已修复）；未闭合引号退化为取行尾剩余；
+        // - 无引号值才剥离行内 ` #` 注释；
+        // - 重复键 **last-wins**（dotenv/导出语义：后定义覆盖先定义；
+        //   旧 first-wins 会静默吞掉重定义，已修复）。
+        let v = if v.starts_with('"') || v.starts_with('\'') {
+            let quote = v.chars().next().unwrap_or('"');
+            v[1..]
+                .split_once(quote)
+                .map_or_else(|| v[1..].to_owned(), |(inner, _rest)| inner.to_owned())
+        } else {
+            let end = v.find(" #").unwrap_or(v.len());
+            v[..end].trim_end().to_owned()
+        };
+        map.insert(k, v);
     }
     Ok(map)
 }
@@ -484,6 +495,40 @@ mod tests {
         assert_eq!(cfg.rpc_url, "https://rpc.example");
         assert_eq!(cfg.account_address.unwrap(), parse_felt("0xabc").unwrap());
         assert_eq!(cfg.private_key.unwrap(), parse_felt("0x01").unwrap());
+    }
+
+    /// .env 解析纪律（审计修复）：引号值含 ` #` 不截断；无引号值才剥
+    /// 离行内注释；重复键 last-wins。
+    #[test]
+    fn env_file_quoted_hash_duplicate_keys() {
+        let dir = std::env::temp_dir().join("poker-contracts-test-env");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(".env.parser-test");
+        std::fs::write(
+            &path,
+            concat!(
+                "DQ=\"a # b\"\n",        // 双引号值含 " #" → 字面保留
+                "SQ='x # y'\n",          // 单引号同款
+                "BARE=value # comment\n", // 无引号 → 剥离行内注释
+                "TRAIL=no-space#hash\n",  // 无空格前导的 # 不是注释
+                "DUP=first\n",
+                "DUP=second\n",           // 重复键 last-wins
+                "UNCLOSED=\"tail # text\n", // 未闭合引号 → 取行尾剩余
+            ),
+        )
+        .unwrap();
+        let map = parse_env_file(&path).unwrap();
+        assert_eq!(map.get("DQ").map(String::as_str), Some("a # b"));
+        assert_eq!(map.get("SQ").map(String::as_str), Some("x # y"));
+        assert_eq!(map.get("BARE").map(String::as_str), Some("value"));
+        assert_eq!(map.get("TRAIL").map(String::as_str), Some("no-space#hash"));
+        assert_eq!(
+            map.get("DUP").map(String::as_str),
+            Some("second"),
+            "duplicate keys: dotenv convention is last-wins"
+        );
+        assert_eq!(map.get("UNCLOSED").map(String::as_str), Some("tail # text"));
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

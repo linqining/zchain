@@ -311,6 +311,11 @@ pub enum Operation {
         amount: u64,
     },
     /// 出金销毁（owner 签名授权；vault 侧打款）。
+    ///
+    /// 审计 P1 修复：载荷新增 `payout_recipient` 并纳入效果摘要（见
+    /// [`Operation::effect_digest`]）——打款收款人从此被 owner 签名绑定，
+    /// 操作方无法在持签请求上偷换收款地址（vault 受理侧另有
+    /// `WithdrawalRequest::ensure_matches_op` fail-closed 核对）。
     WithdrawRequest {
         /// 花费授权（销毁 balance note）。
         spend: SpendAuth,
@@ -318,6 +323,9 @@ pub enum Operation {
         note: crate::note::Note,
         /// 提现幂等键。
         request_id: [u8; 32],
+        /// 外部收款地址（抽象 32B；与 v2 `WithdrawRequestV2Op::
+        /// external_recipient` 同纪律——进效果摘要，被 spend 签名覆盖）。
+        payout_recipient: [u8; 32],
     },
     /// 玩家间转账（守恒，同类）。
     Transfer {
@@ -452,8 +460,15 @@ impl Operation {
         match self {
             Operation::OpenTable { .. } | Operation::CloseTable { .. }
             | Operation::Deposit { .. } => [0u8; 32],
-            Operation::WithdrawRequest { request_id, .. } => {
-                crate::keys::blake2s32(&[b"effect.withdraw.v1", request_id])
+            // 审计 P1 修复：效果摘要绑定 payout_recipient（与 v2 绑定
+            // external_recipient 同纪律）——同一签名授权不能被挪到另一个
+            // 收款地址（换地址必摘要失配 → BadSignature）。
+            Operation::WithdrawRequest { request_id, payout_recipient, .. } => {
+                crate::keys::blake2s32(&[
+                    b"effect.withdraw.v1",
+                    request_id,
+                    payout_recipient,
+                ])
             }
             Operation::Transfer { outputs, .. } => {
                 let bytes =

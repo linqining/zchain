@@ -70,6 +70,13 @@ lake build
 lake env lean PokerLean.lean
 ```
 
+### `.lake/` 目录（lake 构建产物，永不入库）
+
+`.lake/` 由 lake 全权管理：依赖按 `lake-manifest.json` 拉取缓存，`lake
+build` 的全部中间产物（.olean、IR、生成的 C 文件等）都写在这里。它是纯
+本地构建状态——**不要提交、不要手工编辑**；需要干净重建时删除整个
+`.lake/` 再 `lake build` 即可（仓库根 `.gitignore` 已全局忽略 `.lake/`）。
+
 ### 在 VS Code 中使用
 
 1. 安装 `lean4` 扩展

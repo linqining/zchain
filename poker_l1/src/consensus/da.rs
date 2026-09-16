@@ -14,6 +14,9 @@
 //! 3. [`DaCertificate`]：≥2f+1 个回执的**聚合凭证**（复用 v1.5-c checkpoint
 //!    的 BLS 聚合基建：G1 点加法聚合 + 单次配对验证）。凭证可独立于原数据
 //!    持有方验证 —— M8-ACC-8（Sequencer 停机注入下 DA 凭证仍可验证）。
+//!    P1 修复：聚合/验证均要求**签名者成员资格**（自声明公钥 ∈ 调用方传入
+//!    的 validator BLS 公钥注册表，见 [`DaCertificate::verify_against_signers`]），
+//!    防"自造 quorum(n) 全新 BLS 键伪造凭证"。
 //!
 //! # 命名与边界（如实）
 //!
@@ -165,9 +168,19 @@ pub struct DaCertificate {
 }
 
 impl DaCertificate {
-    /// 由回执集合聚合 DA 凭证（逐回执验证 + 去重 + 2f+1 计数）。
+    /// 由回执集合聚合 DA 凭证（**签名者成员资格** + 逐回执验证 + 去重 +
+    /// 2f+1 计数）。
+    ///
+    /// P1 修复：每份回执的 `signer_pubkey_g2` 必须 ∈ `allowed_g2`
+    /// （validator BLS 公钥注册表）—— 防"自造 quorum(n) 全新 BLS 键拼出
+    /// 密码学合法聚合签名"的凭证伪造；注册表为空 fail-closed 拒。
+    ///
+    /// # Errors
+    /// 任一签名者非成员/注册表为空，或既有拒绝条件（位点异构/签名无效/
+    /// 不足 quorum/聚合验证失败）。
     pub fn form_from_receipts(
         receipts: &[DaReceipt],
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
         validator_count: usize,
     ) -> PokerL1Result<Self> {
         let Some(first) = receipts.first() else {
@@ -187,6 +200,12 @@ impl DaCertificate {
                     "da certificate: 回执位点不一致（异构回执拒绝）".into(),
                 ));
             }
+            // 成员资格先行（集合查找，成本低于配对验证）
+            crate::consensus::checkpoint::ensure_bls_signer_member(
+                "da certificate",
+                &receipt.signer_pubkey_g2,
+                allowed_g2,
+            )?;
             receipt.verify()?;
             if pks.iter().any(|pk| *pk == receipt.signer_pubkey_g2) {
                 continue;
@@ -227,7 +246,14 @@ impl DaCertificate {
         })
     }
 
-    /// 验证 DA 凭证（聚合配对 + 2f+1 计数 + 去重）。
+    /// 验证 DA 凭证（**不含签名者成员资格**：聚合配对 + 2f+1 计数 + 去重）。
+    ///
+    /// # Safety-boundary（P1 修复后口径）
+    ///
+    /// 本方法不校验自声明 `signer_pubkeys_g2` 是否属于 validator 集 ——
+    /// 生产路径必须用 [`Self::verify_against_signers`]；本方法仅供密码学
+    /// 层单测（篡改/域分隔断言）。
+    #[doc(hidden)]
     pub fn verify(&self, validator_count: usize) -> PokerL1Result<()> {
         if self.signer_pubkeys_g2.is_empty() {
             return Err(PokerL1Error::Other("da certificate: 签名者为空".into()));
@@ -266,6 +292,29 @@ impl DaCertificate {
             return Err(PokerL1Error::Other("da certificate: 聚合签名验证失败".into()));
         }
         Ok(())
+    }
+
+    /// 验证 DA 凭证（P1 修复：**成员资格 + 密码学全量**）。
+    ///
+    /// 自声明 `signer_pubkeys_g2` 的每一项必须 ∈ `allowed_g2`（validator
+    /// BLS 公钥注册表），叠加既有去重/quorum/聚合配对。注册表为空 →
+    /// fail-closed 拒。
+    ///
+    /// # Errors
+    /// 任一签名者非成员/注册表为空，或 [`Self::verify`] 的任一拒绝条件。
+    pub fn verify_against_signers(
+        &self,
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
+        validator_count: usize,
+    ) -> PokerL1Result<()> {
+        for pk in &self.signer_pubkeys_g2 {
+            crate::consensus::checkpoint::ensure_bls_signer_member(
+                "da certificate",
+                pk,
+                allowed_g2,
+            )?;
+        }
+        self.verify(validator_count)
     }
 
     /// 签名者数量。
@@ -453,9 +502,17 @@ pub struct DaCertificateV2 {
 }
 
 impl DaCertificateV2 {
-    /// 由 v2 回执集合聚合凭证（逐回执验证 + 去重 + 2f+1 计数）。
+    /// 由 v2 回执集合聚合凭证（**签名者成员资格** + 逐回执验证 + 去重 +
+    /// 2f+1 计数）。
+    ///
+    /// P1 修复：每份回执的 `signer_pubkey_g2` 必须 ∈ `allowed_g2`
+    /// （validator BLS 公钥注册表）；注册表为空 fail-closed 拒。
+    ///
+    /// # Errors
+    /// 任一签名者非成员/注册表为空，或既有拒绝条件。
     pub fn form_from_receipts(
         receipts: &[DaReceiptV2],
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
         validator_count: usize,
     ) -> PokerL1Result<Self> {
         let Some(first) = receipts.first() else {
@@ -481,6 +538,12 @@ impl DaCertificateV2 {
                     "da v2 certificate: 回执位点不一致（异构回执拒绝）".into(),
                 ));
             }
+            // 成员资格先行（集合查找，成本低于配对验证）
+            crate::consensus::checkpoint::ensure_bls_signer_member(
+                "da v2 certificate",
+                &receipt.signer_pubkey_g2,
+                allowed_g2,
+            )?;
             receipt.verify()?;
             if pks.iter().any(|pk| *pk == receipt.signer_pubkey_g2) {
                 continue;
@@ -527,7 +590,13 @@ impl DaCertificateV2 {
         })
     }
 
-    /// 验证 DA v2 凭证。
+    /// 验证 DA v2 凭证（**不含签名者成员资格**）。
+    ///
+    /// # Safety-boundary（P1 修复后口径）
+    ///
+    /// 不校验签名者是否属于 validator 集 —— 生产路径必须用
+    /// [`Self::verify_against_signers`]；本方法仅供密码学层单测。
+    #[doc(hidden)]
     pub fn verify(&self, validator_count: usize) -> PokerL1Result<()> {
         if self.signer_pubkeys_g2.is_empty() {
             return Err(PokerL1Error::Other("da v2 certificate: 签名者为空".into()));
@@ -569,6 +638,29 @@ impl DaCertificateV2 {
             ));
         }
         Ok(())
+    }
+
+    /// 验证 DA v2 凭证（P1 修复：**成员资格 + 密码学全量**）。
+    ///
+    /// 自声明 `signer_pubkeys_g2` 的每一项必须 ∈ `allowed_g2`（validator
+    /// BLS 公钥注册表），叠加既有去重/quorum/聚合配对。注册表为空 →
+    /// fail-closed 拒。
+    ///
+    /// # Errors
+    /// 任一签名者非成员/注册表为空，或 [`Self::verify`] 的任一拒绝条件。
+    pub fn verify_against_signers(
+        &self,
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
+        validator_count: usize,
+    ) -> PokerL1Result<()> {
+        for pk in &self.signer_pubkeys_g2 {
+            crate::consensus::checkpoint::ensure_bls_signer_member(
+                "da v2 certificate",
+                pk,
+                allowed_g2,
+            )?;
+        }
+        self.verify(validator_count)
     }
 
     /// 签名者数量。
@@ -700,6 +792,11 @@ mod tests {
         bls_derive_secret_key(&[seed; 32])
     }
 
+    /// 由种子集构造允许签名者注册表（P1 成员资格测试辅助）。
+    fn allowed_from_seeds(seeds: &[u8]) -> std::collections::BTreeSet<[u8; 96]> {
+        seeds.iter().map(|&s| bls_key(s).pubkey_g2()).collect()
+    }
+
     fn receipts_for(digest: Hash, seeds: &[u8]) -> Vec<DaReceipt> {
         seeds
             .iter()
@@ -715,10 +812,11 @@ mod tests {
     #[test]
     fn m8_acc_8_da_certificate_verifiable_after_sequencer_down() {
         let batch_root = [0xBAu8; 32];
+        let allowed = allowed_from_seeds(&[0x10, 0x11, 0x12, 0x13, 0x14]);
         // Sequencer 停机前：5 个 validator 各自从本地副本签回执
         let receipts = receipts_for(batch_root, &[0x10, 0x11, 0x12, 0x13, 0x14]);
         // Sequencer 停机（此处无任何 Sequencer 依赖：不再触碰"数据源"）
-        let cert = DaCertificate::form_from_receipts(&receipts, 7)
+        let cert = DaCertificate::form_from_receipts(&receipts, &allowed, 7)
             .expect("2f+1 回执必须成凭证");
         assert_eq!(cert.digest, batch_root);
         assert_eq!(cert.signer_count(), 5);
@@ -747,20 +845,21 @@ mod tests {
     #[test]
     fn da_certificate_rejects_insufficient_quorum() {
         let digest = [2u8; 32];
+        let allowed = allowed_from_seeds(&[0x21, 0x22, 0x23, 0x24, 0x25, 0x26]);
         // 7 validator 需 5 回执，仅 4 → 拒
         let receipts = receipts_for(digest, &[0x21, 0x22, 0x23, 0x24]);
-        let err = DaCertificate::form_from_receipts(&receipts, 7).unwrap_err();
+        let err = DaCertificate::form_from_receipts(&receipts, &allowed, 7).unwrap_err();
         assert!(matches!(err, PokerL1Error::InsufficientQuorum { actual: 4, required: 5 }));
         // 异构位点混入 → 拒
         let mut mixed = receipts_for(digest, &[0x21, 0x22, 0x23, 0x24, 0x25]);
         mixed.push(DaReceipt::sign([0xEEu8; 32], 1, 42, &bls_key(0x26)).unwrap());
-        let err2 = DaCertificate::form_from_receipts(&mixed, 7).unwrap_err();
+        let err2 = DaCertificate::form_from_receipts(&mixed, &allowed, 7).unwrap_err();
         assert!(err2.to_string().contains("位点不一致"));
         // 重复签名者去重后不足 → 拒
         let single = DaReceipt::sign(digest, 1, 42, &bls_key(0x21)).unwrap();
         let dup = vec![single.clone(), single];
         assert!(matches!(
-            DaCertificate::form_from_receipts(&dup, 7).unwrap_err(),
+            DaCertificate::form_from_receipts(&dup, &allowed, 7).unwrap_err(),
             PokerL1Error::InsufficientQuorum { .. }
         ));
     }
@@ -768,8 +867,9 @@ mod tests {
     #[test]
     fn da_types_serialize_roundtrip() {
         let digest = [3u8; 32];
+        let allowed = allowed_from_seeds(&[0x30, 0x31, 0x32, 0x33, 0x34]);
         let receipts = receipts_for(digest, &[0x30, 0x31, 0x32, 0x33, 0x34]);
-        let cert = DaCertificate::form_from_receipts(&receipts, 7).unwrap();
+        let cert = DaCertificate::form_from_receipts(&receipts, &allowed, 7).unwrap();
         // JSON（RPC/sidecar 友好）
         let json = serde_json::to_string(&cert).unwrap();
         let back: DaCertificate = serde_json::from_str(&json).unwrap();
@@ -818,8 +918,9 @@ mod tests {
     #[test]
     fn da_v2_certificate_form_and_verify() {
         let digest = [0xD3u8; 32];
+        let allowed = allowed_from_seeds(&[0x40, 0x41, 0x42, 0x43, 0x44, 0x45]);
         let cert =
-            DaCertificateV2::form_from_receipts(&v2_receipts(digest, DaObjectKind::Blob, &[0x40, 0x41, 0x42, 0x43, 0x44]), 7)
+            DaCertificateV2::form_from_receipts(&v2_receipts(digest, DaObjectKind::Blob, &[0x40, 0x41, 0x42, 0x43, 0x44]), &allowed, 7)
                 .expect("2f+1 v2 回执必须成凭证");
         assert_eq!(cert.signer_count(), 5);
         cert.verify(7).expect("v2 凭证必须可验证");
@@ -830,8 +931,80 @@ mod tests {
         // 异构回执（类型不一致）聚合拒
         let mut mixed = v2_receipts(digest, DaObjectKind::Blob, &[0x40, 0x41, 0x42, 0x43]);
         mixed.push(DaReceiptV2::sign(digest, DaObjectKind::Batch, 1, 42, &bls_key(0x45)).unwrap());
-        let err = DaCertificateV2::form_from_receipts(&mixed, 7).unwrap_err();
+        let err = DaCertificateV2::form_from_receipts(&mixed, &allowed, 7).unwrap_err();
         assert!(err.to_string().contains("位点不一致"));
+    }
+
+    /// P1（DA 凭证伪造）修复：签名者成员资格校验（v1 + v2 双变体）。
+    ///
+    /// 攻击场景：攻击者自造 quorum(n)=5 把全新非成员 BLS 键对某 digest 签
+    /// 回执（每份签名密码学合法、聚合签名正确）——修复前 form/verify 只做
+    /// possession + 计数，伪造凭证通过；修复后必须拒。成员键正例对照通过。
+    #[test]
+    fn da_certificate_membership_rejects_forged_non_member_signers() {
+        let digest = [0xD5u8; 32];
+        // 委员会（允许注册表）：7 把成员键 0x60..=0x66
+        let allowed = allowed_from_seeds(&[0x60, 0x61, 0x62, 0x63, 0x64, 0x65, 0x66]);
+
+        // ---- v1 ----
+        // (a) 非成员键的合法回执聚合 → form 拒
+        let forged = receipts_for(digest, &[0xF0, 0xF1, 0xF2, 0xF3, 0xF4]);
+        let err = DaCertificate::form_from_receipts(&forged, &allowed, 7).unwrap_err();
+        assert!(
+            err.to_string().contains("非成员"),
+            "v1 非成员回执必须被拒: {err:?}"
+        );
+        // (a') 手工构造的非成员凭证（自声明公钥 + 正确聚合签名）→ verify_against_signers 拒
+        let member_receipts = receipts_for(digest, &[0x60, 0x61, 0x62, 0x63, 0x64]);
+        let cert = DaCertificate::form_from_receipts(&member_receipts, &allowed, 7).unwrap();
+        let mut forged_cert = cert.clone();
+        // 用非成员键重签同位点并手工聚合（绕过 form 的成员检查）
+        let sigs: Vec<[u8; 48]> = forged
+            .iter()
+            .map(|r| {
+                let mut arr = [0u8; 48];
+                arr.copy_from_slice(&r.signature_g1);
+                arr
+            })
+            .collect();
+        let pks: Vec<[u8; 96]> = forged
+            .iter()
+            .map(|r| {
+                let mut arr = [0u8; 96];
+                arr.copy_from_slice(&r.signer_pubkey_g2);
+                arr
+            })
+            .collect();
+        forged_cert.agg_signature_g1 =
+            crate::consensus::checkpoint::bls_aggregate_g1(&sigs).unwrap().to_vec();
+        forged_cert.signer_pubkeys_g2 = pks.iter().map(|p| p.to_vec()).collect();
+        assert!(
+            forged_cert.verify(7).is_ok(),
+            "测试前提：伪造 v1 聚合签名本身密码学合法（旧口径会放过）"
+        );
+        let err2 = forged_cert.verify_against_signers(&allowed, 7).unwrap_err();
+        assert!(err2.to_string().contains("非成员"), "v1 伪造凭证必须拒: {err2:?}");
+        // (b) 成员键 → 通过
+        cert.verify_against_signers(&allowed, 7)
+            .expect("v1 成员凭证必须通过");
+        // (d) 空注册表 → fail-closed
+        assert!(cert.verify_against_signers(&allowed_from_seeds(&[]), 7).is_err());
+
+        // ---- v2 ----
+        // (a) 非成员键 v2 回执聚合 → form 拒
+        let forged_v2 = v2_receipts(digest, DaObjectKind::Blob, &[0xF0, 0xF1, 0xF2, 0xF3, 0xF4]);
+        let err3 = DaCertificateV2::form_from_receipts(&forged_v2, &allowed, 7).unwrap_err();
+        assert!(err3.to_string().contains("非成员"), "v2 非成员回执必须被拒: {err3:?}");
+        // (b) 成员键 v2 → form + verify_against_signers 通过
+        let cert_v2 = DaCertificateV2::form_from_receipts(
+            &v2_receipts(digest, DaObjectKind::Blob, &[0x60, 0x61, 0x62, 0x63, 0x64]),
+            &allowed,
+            7,
+        )
+        .expect("v2 成员凭证必须成立");
+        cert_v2.verify_against_signers(&allowed, 7).unwrap();
+        // (d) 空注册表 → fail-closed
+        assert!(cert_v2.verify_against_signers(&allowed_from_seeds(&[]), 7).is_err());
     }
 
     /// 挑战-应答闭环：持有方应答任意挑战成功；丢数据方（错块/假块）失败。
@@ -846,6 +1019,7 @@ mod tests {
         // 凭证（v2 域，digest 位即承诺位）
         let cert = DaCertificateV2::form_from_receipts(
             &v2_receipts(root, DaObjectKind::Blob, &[0x50, 0x51, 0x52, 0x53, 0x54]),
+            &allowed_from_seeds(&[0x50, 0x51, 0x52, 0x53, 0x54]),
             7,
         )
         .unwrap();

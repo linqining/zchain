@@ -408,6 +408,24 @@ appchain_watcher --appchain-wal <path> --sequencer-public <64hex> \
 
 ---
 
+## 6. 开发者环境前置（Developer environment prerequisites）
+
+- **poker_protocol 必须以同级目录形式检出**：根 `Cargo.toml` 的
+  `poker_protocol` 是 path 依赖 `../zgame/poker_protocol`（独立仓库
+  https://github.com/linqining/poker_protocol ）。本仓库检出后需执行：
+
+  ```bash
+  git clone --depth 1 https://github.com/linqining/poker_protocol ../zgame/poker_protocol
+  ```
+
+  缺少该目录时，任何 `cargo build` / `cargo test` 都会在依赖解析阶段
+  直接失败（不是编译错误，不要按代码问题排查）。
+- **CI 自动克隆**：`.github/workflows/ci.yml` 中所有运行 cargo 的 job
+  已在 cargo 步骤前克隆该仓库到 `$GITHUB_WORKSPACE/../zgame/poker_protocol`
+  （见各 job 的 `checkout poker_protocol (path dependency)` 步骤）。
+
+---
+
 ## 附：与其他验收项的对应
 
 | 手册章节 | 对应验收项 | 现状 |

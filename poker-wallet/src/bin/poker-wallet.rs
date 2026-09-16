@@ -436,6 +436,8 @@ struct RequestJson {
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
+    payout_recipient: Option<String>,
+    #[serde(default)]
     vault_target: Option<String>,
     #[serde(default)]
     new_owner: Option<String>,
@@ -494,6 +496,12 @@ fn build_request(r: &RequestJson) -> SigningRequest {
             asset_class: asset,
             input: r.input.as_deref().map(parse_hex32).unwrap_or_else(|| die(WalletError::InvalidArgument("input"))),
             request_id: r.request_id.as_deref().map(parse_hex32).unwrap_or_else(|| die(WalletError::InvalidArgument("request_id"))),
+            // P1：收款人必填（进 op 载荷与签名摘要——缺省即拒绝，fail-closed）
+            payout_recipient: r
+                .payout_recipient
+                .as_deref()
+                .map(parse_hex32)
+                .unwrap_or_else(|| die(WalletError::InvalidArgument("payout_recipient"))),
             vault_target: r.vault_target.clone().unwrap_or_default(),
         },
         "key_rotation" => SigningRequest::KeyRotation {

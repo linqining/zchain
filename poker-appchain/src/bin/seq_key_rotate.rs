@@ -9,6 +9,9 @@
 //! 1. `--old-key-file <p>`：密钥文件，兼容两种形态——
 //!    a. `zchain keygen` 输出的 JSON（取 `secret_key_hex` 字段，32B hex）；
 //!    b. 纯 32 字节 hex 的裸文件（64 个 hex 字符，空白容忍）。
+//!    读取走 [`poker_appchain::key_provider::FileKeyProvider`] 同一条纪律：
+//!    Unix 权限校验（group/other 位非零拒绝）+ 全零种子拒绝——与生产
+//!    装配完全同源（此前本工具本地解析绕过了这两道检查，已修复）。
 //! 2. `--provider <env|file|remote>`（+ 可选 `--provider-prefix <p>`，默认
 //!    `ZCHAIN`）：经 `poker_appchain::key_provider::from_config` 取钥——
 //!    与生产装配同一条 KeyProvider 通道（env 变量 / 密钥文件（含 Unix
@@ -29,7 +32,7 @@
 
 use std::path::PathBuf;
 
-use poker_appchain::key_provider::{SequencerKeyExt, from_config};
+use poker_appchain::key_provider::{FileKeyProvider, KeyProvider, SequencerKeyExt, from_config};
 use poker_appchain::keys::SequencerKey;
 use poker_appchain::rotation::{self, KeyRotationRecord};
 
@@ -41,25 +44,6 @@ enum OldKeySource {
     File(PathBuf),
     /// KeyProvider 工厂 + 配置前缀（生产同源通道）。
     Provider(String),
-}
-
-/// 读旧钥文件：zchain keygen JSON（secret_key_hex）或裸 32B hex。
-fn read_secret_key_file(path: &std::path::Path) -> Result<[u8; 32], String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("key file unreadable: {e}"))?;
-    let trimmed = text.trim();
-    // 形态 1：keygen JSON（含 secret_key_hex 字段）
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        if let Some(Some(sk)) = v.get("secret_key_hex").map(serde_json::Value::as_str) {
-            return parse_seed(sk)
-                .ok_or_else(|| "key file secret_key_hex is not 32 bytes of hex".to_string());
-        }
-    }
-    // 形态 2：裸 32B hex
-    parse_seed(trimmed).ok_or_else(|| "key file is neither keygen JSON nor 32-byte hex".to_string())
-}
-
-fn parse_seed(s: &str) -> Option<[u8; 32]> {
-    hex::decode(s.trim()).ok()?.try_into().ok()
 }
 
 fn real_main() -> i32 {
@@ -155,14 +139,18 @@ fn real_main() -> i32 {
             };
             let old: SequencerKey = match &old_key_source {
                 OldKeySource::File(path) => {
-                    let seed = match read_secret_key_file(path) {
-                        Ok(s) => s,
+                    // 复用 FileKeyProvider 的取钥纪律（单一事实来源，与生产
+                    // 装配同一条代码路径）：Unix 权限校验（mode & 0o077 == 0）
+                    // + keygen JSON / 裸 hex 双形态解析 + 全零种子拒绝。
+                    // attestor 路径传同一路径占位——只调 sequencer_key()，
+                    // 第二个文件永不读取。
+                    match FileKeyProvider::new(path.clone(), path.clone()).sequencer_key() {
+                        Ok(k) => k,
                         Err(e) => {
-                            eprintln!("error: {e}");
+                            eprintln!("error: old key file load failed: {e}");
                             return 1;
                         }
-                    };
-                    SequencerKey::from_seed(&seed)
+                    }
                 }
                 OldKeySource::Provider(prefix) => {
                     // 生产同源取钥通道（KeyProvider）：失败即失败——

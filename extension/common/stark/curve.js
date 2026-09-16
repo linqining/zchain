@@ -417,16 +417,16 @@ export function ecSign(digest, priv) {
   const z = toDigestFelt(digest);
   const d = typeof priv === 'bigint' ? priv : hexToBigInt(priv);
   if (d <= 0n || d >= EC_ORDER_N) throw new Error('stark: private key out of range');
-  for (;;) {
-    const k = deterministicK(d, z);
-    const R = jacToAffine(jacMul(k, [GENERATOR.x, GENERATOR.y, 1n]));
-    if (!R) continue;
-    const r = modN(R[0]);
-    if (r === 0n) continue;
-    const s = modN(modInverse(k, EC_ORDER_N) * (z + d * r));
-    if (s === 0n) continue;
-    return { r, s };
-  }
+  // 确定性 k：同输入必得同 k，r/s 退化（≈0）时重试只会重算出相同结果
+  // → 死循环；直接抛错（概率 ~2^-128，实践不可达）。
+  const k = deterministicK(d, z);
+  const R = jacToAffine(jacMul(k, [GENERATOR.x, GENERATOR.y, 1n]));
+  if (!R) throw new Error('stark: degenerate nonce (R at infinity)');
+  const r = modN(R[0]);
+  if (r === 0n) throw new Error('stark: degenerate nonce (r = 0)');
+  const s = modN(modInverse(k, EC_ORDER_N) * (z + d * r));
+  if (s === 0n) throw new Error('stark: degenerate nonce (s = 0)');
+  return { r, s };
 }
 
 /** ECDSA 验证（公钥 = x 坐标 felt；语义同 starknet-crypto：±Q 两种符号任一匹配）。 */
@@ -478,12 +478,15 @@ export function ecRecover(digest, r, s, v) {
   throw new Error('stark: recovery failed');
 }
 
-/** 随机私钥（生态惯例：< 2^125，grind 等效）。 */
+/**
+ * 随机私钥（scure-starknet / starknet.js grindKey 语义：私钥 ∈ [1, 2^251)）。
+ * 32 字节随机数掩码到 251 位后拒绝采样（n > 2^251，仅 0 需重采样）。
+ */
 export function generatePrivateKey() {
   for (;;) {
-    const bytes = new Uint8Array(16);
+    const bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
-    const v = bytesToBigInt(bytes) & (2n ** 125n - 1n);
+    const v = bytesToBigInt(bytes) & (FELT_BOUND - 1n); // 掩码到 251 位
     if (v > 0n && v < EC_ORDER_N) return v;
   }
 }

@@ -1410,6 +1410,10 @@ pub fn rake_outputs(
 /// `gross_pot - Σawards` 全部记为该层 rake（调用方保证非负且与费率策略
 /// 一致——`validate_settlement` 第 8 条会独立强制；contested 单层的
 /// `rake_base() == gross_pot`，费率关系退化为 `rake_of(gross_pot)`）。
+///
+/// 前置条件 `Σawards ≤ gross_pot` 在此强制（fail-closed）：违约即显式
+/// panic——绝不静默回绕出天文数字 rake（release 下 `u64` 减法回绕曾是
+/// 静默坏值；debug/release 行为现已一致）。
 #[must_use]
 pub fn flat_settlement_plan(
     gross_pot: u64,
@@ -1420,7 +1424,9 @@ pub fn flat_settlement_plan(
         RunoutPotPlan, SettlementPotPlan, SettlementRunoutSchedule, SETTLEMENT_PLAN_VERSION,
     };
     let total_awards: u64 = awards.iter().sum();
-    let rake = gross_pot - total_awards;
+    let rake = gross_pot.checked_sub(total_awards).expect(
+        "flat_settlement_plan: total awards exceed gross pot (precondition Σawards <= gross_pot violated)",
+    );
     let mut runout = RunoutPotPlan::inactive();
     runout.amount = total_awards;
     runout.winner_mask = seats_mask;
@@ -1550,5 +1556,27 @@ mod shuffle_consume_tests {
 
     fn hex_of(bytes: &[u8; 32]) -> String {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod flat_settlement_plan_tests {
+    use super::flat_settlement_plan;
+
+    /// 前置条件违约（Σawards > gross_pot）必须显式 panic（fail-closed），
+    /// 而不是 release 下 u64 减法回绕出天文数字 rake。
+    #[test]
+    #[should_panic(expected = "total awards exceed gross pot")]
+    fn awards_exceeding_pot_panics_instead_of_wrapping() {
+        let awards = [10u64, 10, 0, 0, 0, 0, 0, 0, 0];
+        let _ = flat_settlement_plan(15, 0b11, awards);
+    }
+
+    /// 合法输入照旧：净额全部记为单层 rake。
+    #[test]
+    fn equal_awards_yield_zero_rake() {
+        let plan = flat_settlement_plan(20, 0b11, [10u64, 10, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(plan.rake, 0);
+        assert_eq!(plan.total_awards, 20);
     }
 }

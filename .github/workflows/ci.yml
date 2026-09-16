@@ -5,7 +5,14 @@
 # - toolchain 由根 rust-toolchain.toml 决定（pinned nightly），runner 上
 #   rustup 会按文件自动安装，无需显式 setup 步骤；
 # - gateway-smoke 依赖 scripts/explorer_gateway_smoke.sh（独立交付物），
-#   本文件只引用，不在 CI 内实现。
+#   本文件只引用，不在 CI 内实现；
+# - 根 Cargo.toml 的 poker_protocol 是 path 依赖 ../zgame/poker_protocol
+#   （独立仓库 https://github.com/linqining/poker_protocol）：所有跑 cargo
+#   的 job 必须先克隆它到 $GITHUB_WORKSPACE 的同级目录，否则全新 runner
+#   上依赖解析必然失败；
+# - proving_service 暂不进 CI：它未加入根 workspace 却用 workspace 继承
+#   依赖，且 path 依赖 ../poker_texas_air（外部仓库）在本仓库内不存在，
+#   `cargo check --manifest-path proving_service/Cargo.toml` 当前必然失败。
 name: ci
 
 on:
@@ -19,6 +26,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: checkout poker_protocol (path dependency)
+        run: git clone --depth 1 https://github.com/linqining/poker_protocol "$GITHUB_WORKSPACE/../zgame/poker_protocol"
       - name: cargo build --release
         run: cargo build --release
 
@@ -27,6 +36,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: checkout poker_protocol (path dependency)
+        run: git clone --depth 1 https://github.com/linqining/poker_protocol "$GITHUB_WORKSPACE/../zgame/poker_protocol"
       - name: poker_l1 (lib)
         run: cargo test --release -p poker_l1 --lib
       - name: poker-appchain
@@ -37,7 +48,7 @@ jobs:
         run: cargo test --release -p poker-wallet
 
   test-extension:
-    name: test-extension (node --test)
+    name: test-extension (npm test, node --test)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -47,8 +58,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: node --test
-        run: node --test tests/*.test.js tests/adapters/*.test.js
+      # package.json 无任何 npm 依赖（纯 node:test + 相对路径导入），
+      # 无需 npm install，直接跑 test 脚本（覆盖 evm/stark 套件）。
+      - name: npm test
+        run: npm test
 
   website-scans:
     name: website-scans (build + banned-words + links + a11y)
@@ -69,6 +82,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: checkout poker_protocol (path dependency)
+        run: git clone --depth 1 https://github.com/linqining/poker_protocol "$GITHUB_WORKSPACE/../zgame/poker_protocol"
       - name: build poker-appchain bins
         run: cargo build --release -p poker-appchain
       - name: explorer gateway smoke
@@ -84,6 +99,8 @@ jobs:
         working-directory: fuzz
     steps:
       - uses: actions/checkout@v4
+      - name: checkout poker_protocol (path dependency)
+        run: git clone --depth 1 https://github.com/linqining/poker_protocol "$GITHUB_WORKSPACE/../zgame/poker_protocol"
       - name: install cargo-fuzz
         run: cargo install cargo-fuzz --locked
       - name: fuzz note_abi
@@ -101,6 +118,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: checkout poker_protocol (path dependency)
+        run: git clone --depth 1 https://github.com/linqining/poker_protocol "$GITHUB_WORKSPACE/../zgame/poker_protocol"
       - name: install cargo-cyclonedx
         run: cargo install cargo-cyclonedx --locked
       - name: generate SBOM (all crates, CycloneDX json)
@@ -113,3 +132,15 @@ jobs:
           name: sbom-json
           path: "**/*.cdx.json"
           if-no-files-found: error
+
+  # 供应商拷贝（wallet-app/vendor/<crate>）与 canonical <crate>/ 的漂移检测。
+  # 信息性（continue-on-error）：漂移不阻塞合并，但会在日志中显式暴露，
+  # 供审查者判断是否需要重新同步 vendor 快照。
+  vendor-drift:
+    name: vendor drift (informational)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: vendor drift (informational)
+        run: bash scripts/check_vendor_drift.sh

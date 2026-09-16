@@ -240,7 +240,9 @@ async function main() {
     const success = successRaw?.pw ?? null;
     savedPw = success;
     const rej = await page.eval('JSON.stringify(window.__rej)').catch(() => '[]');
-    record('O2-diag', true, `raw=${JSON.stringify(successRaw)?.slice(0, 160)} rej=${rej}`);
+    // 口令不入 progress/result 工件：诊断 detail 只保留前 6 字符（同 O2 截断风格）。
+    const successDiag = successRaw?.pw != null ? { pw: String(successRaw.pw).slice(0, 6) + '…' } : successRaw;
+    record('O2-diag', true, `raw=${JSON.stringify(successDiag)?.slice(0, 160)} rej=${rej}`);
     record('O2 一键创建 → 成功页：自动口令只显一次 + 三链地址', typeof success === 'string' && success.length >= 20,
       typeof success === 'string' ? `${success.slice(0, 6)}…（${success.length} 字符）` : String(success));
     const created = await msg({ type: 'popup:overview' });

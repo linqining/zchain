@@ -2084,6 +2084,22 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
             // vertex/commit 全部被 epoch 检查拒绝 → 永久隔离）。连续推进本地
             // epoch 到 actual 后重试准入；validator loop 检测 node epoch 变化
             // 自行清 DAG/重置 round。
+            //
+            // P0 加固：epoch 声明来自远端 vertex，跟随前必须先认证（author
+            // 活跃 + 签名），并限制单次跟随跳变上限——否则一条未签名的
+            // `epoch = u64::MAX` 消息即可驱动无界推进循环卡死节点。
+            const MAX_EPOCH_FOLLOW_JUMP: u64 = 8;
+            if actual - expected > MAX_EPOCH_FOLLOW_JUMP {
+                warn!(
+                    "P2P {source} epoch 跟随拒绝：跳变 {} 超过上限 {MAX_EPOCH_FOLLOW_JUMP}",
+                    actual - expected
+                );
+                return;
+            }
+            if !node.vertex_authentic(&vertex) {
+                warn!("P2P {source} epoch 跟随拒绝：vertex 未通过认证（author/签名）");
+                return;
+            }
             for next in expected + 1..=actual {
                 let vrf = VRF_SECRET.get().and_then(|v| v.as_ref());
                 if let Err(error) = node.advance_epoch_with_vrf(next, vrf) {
@@ -2260,9 +2276,11 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                         }
                     }
                     NetworkMessage::CheckpointVote(vote) => {
-                        // v1.5-c：checkpoint 投票（BLS 聚签）。签名有效性在
-                        // record 内验证（possession + 位点一致）；凑齐 2f+1 即
-                        // 聚合 QC 并落盘 sidecar。
+                        // v1.5-c：checkpoint 投票（BLS 聚签）。签名有效性与
+                        // **签名者成员资格**（P1：必须 ∈ 节点 BLS 注册表，防
+                        // 自造全新键拼 QC）均在 record 内验证（possession +
+                        // 位点一致 + 成员资格）；凑齐 2f+1 即聚合 QC 并落盘
+                        // sidecar。
                         match node.record_checkpoint_vote(vote) {
                             Ok((_count, Some(qc))) => {
                                 info!(
@@ -2280,8 +2298,10 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                     }
                     NetworkMessage::CheckpointThresholdPartial(partial) => {
                         // v1.5-e：阈值部分份额签名。验证在 record 内逐份进行
-                        //（对 keyset.public_share(id) 单配对）；凑齐 t 即 Lagrange
-                        // 重构装配阈值 QC 并落盘 sidecar。无 keyset 的节点拒绝
+                        //（对 keyset.public_share(id) 单配对 —— 成员资格由
+                        // group_key_digest ↔ 本地活跃 keyset 绑定）；凑齐 t 即
+                        // Lagrange 重构装配阈值 QC 并落盘 sidecar（装配失败时
+                        // 后续份额会重试，P2）。无 keyset 的节点拒绝
                         //（fail-closed；聚合模式走 CheckpointVote 路径）。
                         match node.record_threshold_partial(partial) {
                             Ok((_count, Some(qc))) => {
@@ -2299,7 +2319,9 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                         }
                     }
                     NetworkMessage::DaReceipt(receipt) => {
-                        // v1.5-d：DA 回执（validator 侧可用性签名）。
+                        // v1.5-d：DA 回执（validator 侧可用性签名）。签名有效
+                        // 性与**签名者成员资格**（P1：必须 ∈ 节点 BLS 注册表，
+                        // 防自造全新键拼凭证）均在 record 内验证。
                         if let Err(e) = node.record_da_receipt(receipt) {
                             warn!("da receipt rejected: {e}");
                         }

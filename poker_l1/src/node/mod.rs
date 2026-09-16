@@ -623,21 +623,54 @@ struct CheckpointState {
     >,
     /// v1.5-e：阈值部分份额桶的 FIFO 驱逐序。
     threshold_sites_order: std::collections::VecDeque<(crate::consensus::Epoch, u64)>,
+    /// P1（QC 伪造）修复：聚合形态 checkpoint QC 的 BLS 签名者准入注册表
+    /// （G2 compressed 96B）。种子 = 本节点 validator 密钥派生键（见
+    /// [`default_allowed_bls_signers`]）；委员会其余成员经
+    /// [`Node::register_bls_signers`] 显式注册。**空表 = fail-closed**
+    /// （未声明任何允许签名者 → 聚合票/QC 全拒）。阈值形态不走本表
+    /// （成员资格由 group_key_digest ↔ 本地活跃 keyset 绑定）。
+    allowed_bls_signers: std::collections::BTreeSet<[u8; 96]>,
+    /// P2 修复：已成功装配阈值 QC 的位点集（防每份超额份额重做 Lagrange
+    /// 重构；与 `threshold_partials` 同步驱逐）。
+    threshold_formed_sites: std::collections::HashSet<(crate::consensus::Epoch, u64)>,
 }
 
 /// checkpoint 投票桶上限（位点数）。
 const MAX_CHECKPOINT_VOTE_SITES: usize = 4;
 
 impl CheckpointState {
-    fn new() -> Self {
+    fn new(allowed_bls_signers: std::collections::BTreeSet<[u8; 96]>) -> Self {
         Self {
             votes: std::collections::HashMap::new(),
             vote_sites_order: std::collections::VecDeque::new(),
             latest_qc: None,
             threshold_partials: std::collections::HashMap::new(),
             threshold_sites_order: std::collections::VecDeque::new(),
+            allowed_bls_signers,
+            threshold_formed_sites: std::collections::HashSet::new(),
         }
     }
+}
+
+/// 聚合形态 BLS 签名者注册表的初始种子（P1 修复）。
+///
+/// 权威性（如实）：validator 的 BLS 全钥由其 secp **私钥**域分隔派生
+/// （[`crate::consensus::checkpoint::bls_derive_secret_key`]），公钥面
+/// （`ValidatorEntry.pubkey` / `vrf_pubkey`）无法推导 BLS 公钥——因此节点
+/// 能权威掌握的全量 BLS 公钥只有**本节点自身**密钥的派生键。委员会其余
+/// 成员的 BLS 公钥须经 [`Node::register_bls_signers`] 显式注册（多节点
+/// 聚合模式部署接线点；`ValidatorEntry` 增加 bls_pubkey 字段属后续演进）。
+/// 阈值形态不走注册表：成员资格由 `group_key_digest` ↔ 本地活跃 keyset
+/// 绑定（keyset 经 `load_dkg_material` fail-closed 载入）。
+fn default_allowed_bls_signers(config: &NodeConfig) -> std::collections::BTreeSet<[u8; 96]> {
+    let mut allowed = std::collections::BTreeSet::new();
+    if let Some(vkey) = &config.validator_key {
+        allowed.insert(
+            crate::consensus::checkpoint::bls_derive_secret_key(&vkey.secret_key_bytes)
+                .pubkey_g2(),
+        );
+    }
+    allowed
 }
 
 /// v1.5-d：DA 请求/回执状态（原型口径：内存态；凭证验证逻辑见
@@ -649,6 +682,10 @@ struct DaState {
     order: std::collections::VecDeque<Hash>,
     /// 待 gossip 的本节点回执（validator loop 每轮 drain 并广播）。
     outbox: std::collections::VecDeque<crate::consensus::da::DaReceipt>,
+    /// P1（DA 凭证伪造）修复：回执签名者准入注册表（与 checkpoint 聚合
+    /// QC 同一委员会、同一密钥派生路径；经 [`Node::register_bls_signers`]
+    /// 与 CheckpointState 同步扩充）。
+    allowed_bls_signers: std::collections::BTreeSet<[u8; 96]>,
 }
 
 /// DA 条目。
@@ -663,11 +700,12 @@ struct DaEntry {
 const MAX_DA_ENTRIES: usize = 256;
 
 impl DaState {
-    fn new() -> Self {
+    fn new(allowed_bls_signers: std::collections::BTreeSet<[u8; 96]>) -> Self {
         Self {
             entries: std::collections::HashMap::new(),
             order: std::collections::VecDeque::new(),
             outbox: std::collections::VecDeque::new(),
+            allowed_bls_signers,
         }
     }
 
@@ -1188,7 +1226,7 @@ impl Node {
                     config.data_dir.display()
                 ))
             })?;
-        let mut checkpoint_state = CheckpointState::new();
+        let mut checkpoint_state = CheckpointState::new(default_allowed_bls_signers(&config));
         // v1.5-e：DKG 密钥材料（qc_threshold_t > 0 时载入；fail-closed 自检）。
         let (dkg_keyset, dkg_share) = load_dkg_material(&config)?;
         if let Some(ks) = &dkg_keyset {
@@ -1201,23 +1239,31 @@ impl Node {
             );
         }
         checkpoint_state.latest_qc = replay_latest_checkpoint_qc(&config.data_dir);
-        // v1.5-e：重启恢复 fail-closed 校验 —— sidecar 重放的 QC 必须通过
-        // 当前形态对应的密码学验证（阈值形态对本地 keyset 单配对；聚合形态
-        // 对活跃 validator 数 quorum 验证），损坏/挪群 QC 拒载（清为 None）。
+        // v1.5-e：重启恢复 fail-closed 密码学校验 —— sidecar 重放的 QC 必须通过
+        // 当前形态对应的密码学验证（阈值形态对本地 keyset 单配对 + digest
+        // 绑定；聚合形态去重/quorum/聚合配对），损坏/挪群 QC 拒载（清为 None）。
+        // P1 拆层：成员资格不在载入时判（注册表可运行期经
+        // [`Self::register_bls_signers`] 扩充），而在
+        // [`Self::latest_checkpoint_qc`] 读出时按**当前**注册表复核。
         if let Some(qc) = checkpoint_state.latest_qc.as_ref() {
             let vc = validator_set.active_count().max(1);
-            match qc.verify_any(vc, dkg_keyset.as_ref()) {
-                Ok(()) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "checkpoint sidecar 重放的 QC 未通过恢复校验，拒载（fail-closed）：{e}"
-                    );
-                    checkpoint_state.latest_qc = None;
-                }
+            let crypto_ok = match qc.threshold.as_ref() {
+                Some(_) => match dkg_keyset.as_ref() {
+                    Some(ks) => qc.verify_threshold(ks).is_ok(),
+                    None => false, // 阈值形态无本地 keyset → fail-closed
+                },
+                None => qc.verify(vc).is_ok(),
+            };
+            if !crypto_ok {
+                tracing::warn!(
+                    "checkpoint sidecar 重放的 QC 未通过恢复密码学校验，拒载（fail-closed）"
+                );
+                checkpoint_state.latest_qc = None;
             }
         }
         let checkpoint_state = std::sync::Mutex::new(checkpoint_state);
         let checkpoint_sidecar = std::sync::Mutex::new(Some(checkpoint_file));
+        let da_allowed_signers = default_allowed_bls_signers(&config);
         Ok(Self {
             config,
             block_store,
@@ -1244,7 +1290,7 @@ impl Node {
             checkpoint_sidecar,
             dkg_keyset,
             dkg_share,
-            da_state: std::sync::Mutex::new(DaState::new()),
+            da_state: std::sync::Mutex::new(DaState::new(da_allowed_signers)),
         })
     }
 
@@ -1330,6 +1376,9 @@ impl Node {
     ) -> PokerL1Result<Self> {
         let validator_set = build_genesis_validator_set(genesis_validators.clone())?;
         let precompile_registry = build_default_precompile_registry();
+        // P1：聚合形态 BLS 签名者注册表种子（无 validator_key → 空表，
+        // 聚合票/QC fail-closed 拒；测试经 register_bls_signers 注册）。
+        let allowed_bls_signers = std::collections::BTreeSet::new();
         Ok(Self {
             config: NodeConfig {
                 role,
@@ -1371,11 +1420,11 @@ impl Node {
             receipt_sidecar: std::sync::Mutex::new(None),
             force_include: std::sync::Mutex::new(ForceIncludeState::new()),
             slash_ledger: std::sync::Mutex::new(crate::consensus::slash::SlashLedger::new()),
-            checkpoint_state: std::sync::Mutex::new(CheckpointState::new()),
+            checkpoint_state: std::sync::Mutex::new(CheckpointState::new(allowed_bls_signers.clone())),
             checkpoint_sidecar: std::sync::Mutex::new(None),
             dkg_keyset: None,
             dkg_share: None,
-            da_state: std::sync::Mutex::new(DaState::new()),
+            da_state: std::sync::Mutex::new(DaState::new(allowed_bls_signers)),
         })
     }
 
@@ -1388,6 +1437,8 @@ impl Node {
         let validator_set = build_genesis_validator_set(config.genesis_validators.clone())?;
         // v1.5-e：与持久化路径同一 DKG 材料载入纪律（fail-closed 自检）。
         let (dkg_keyset, dkg_share) = load_dkg_material(&config)?;
+        // P1：聚合形态 BLS 签名者注册表种子（与持久化路径同一纪律）。
+        let allowed_bls_signers = default_allowed_bls_signers(&config);
         let precompile_registry = build_default_precompile_registry();
         Ok(Self {
             config,
@@ -1411,11 +1462,11 @@ impl Node {
             receipt_sidecar: std::sync::Mutex::new(None),
             force_include: std::sync::Mutex::new(ForceIncludeState::new()),
             slash_ledger: std::sync::Mutex::new(crate::consensus::slash::SlashLedger::new()),
-            checkpoint_state: std::sync::Mutex::new(CheckpointState::new()),
+            checkpoint_state: std::sync::Mutex::new(CheckpointState::new(allowed_bls_signers.clone())),
             checkpoint_sidecar: std::sync::Mutex::new(None),
             dkg_keyset,
             dkg_share,
-            da_state: std::sync::Mutex::new(DaState::new()),
+            da_state: std::sync::Mutex::new(DaState::new(allowed_bls_signers)),
         })
     }
 
@@ -1927,6 +1978,35 @@ impl Node {
     pub fn put_vertex(&self, vertex: &DagVertex) -> PokerL1Result<Hash> {
         self.validate_vertex(vertex)?;
         self.vertex_store.put(vertex)
+    }
+
+    /// 仅认证检查：author 是活跃 validator + secp 签名有效 + 大小上限。
+    ///
+    /// 供"epoch 跟随"这类需要先于 epoch 检查采信远端声明的路径使用：
+    /// epoch 字段本身来自未经认证的远端 vertex，任何据此推进本地状态的
+    /// 决策都必须先通过本认证（否则未签名消息即可驱动 epoch 推进循环）。
+    pub fn vertex_authentic(&self, vertex: &DagVertex) -> bool {
+        let vertex_size = match vertex.to_bcs() {
+            Ok(bytes) => bytes.len(),
+            Err(_) => return false,
+        };
+        if vertex_size > MAX_VERTEX_SIZE {
+            return false;
+        }
+        let set = self.validator_set.lock().unwrap_or_else(|e| e.into_inner());
+        let active_count = set.active_count();
+        if active_count == 0 && !self.allow_empty_consensus_for_tests {
+            return false;
+        }
+        if active_count > 0
+            && !set
+                .find_validator(&vertex.author_pubkey)
+                .is_some_and(ValidatorEntry::can_participate_consensus)
+        {
+            return false;
+        }
+        let signing_hash = vertex.signing_hash(self.config.chain_id);
+        verify_signature(&vertex.author_pubkey, &vertex.author_sig, &signing_hash).is_ok()
     }
 
     /// 验证 DAG vertex（P0-3）。
@@ -2723,6 +2803,14 @@ impl Node {
     /// C-2 修复：tx_cache 和 pending_tx 均有 FIFO 驱逐上限（10,000 条）。
     /// M-6 修复：tx_cache + order 合并到单个 Mutex，消除多锁死锁风险。
     pub fn submit_tx(&self, tx: Transaction) -> PokerL1Result<Hash> {
+        // P0 修复：准入校验前置（limits + chain_id + 签名）。SeenReceipt 是
+        // 审查罚没证据的锚点，若对未验签的交易签发，攻击者可提交一笔永远
+        // 无法进块的无效交易，再凭回执把签发 validator 全额罚没。
+        // 准入失败即拒绝入池：这类交易在执行侧同样会被拒，提前到提交口
+        // 只影响失败回执的产生方式，不改变合法交易语义。
+        crate::transaction::validate_tx_limits(&tx)?;
+        crate::block::validator::validate_tx_chain_id(&tx, self.config.chain_id)?;
+        crate::block::validator::validate_tx_signature(&tx)?;
         let tx_hash = tx.tx_hash();
         // M3-ACC-6：到达时间戳（节点本地可注入时钟；交易本体无时间戳）。
         let now_ms = self.now_ms();
@@ -3111,7 +3199,13 @@ impl Node {
     ) -> PokerL1Result<crate::force_include::CensorshipCheckOutcome> {
         let now_ms = self.now_ms();
         let recent = self.recent_window_tx_hashes(self.config.censorship_window_blocks)?;
-        let outcome = proof.verify(self.config.chain_id, now_ms, &recent)?;
+        // deadline 与本节点配置强核对（P0 修复：防自报 deadline_ms=0 的罚没攻击）。
+        let outcome = proof.verify(
+            self.config.chain_id,
+            now_ms,
+            &recent,
+            self.config.inclusion_deadline_ms,
+        )?;
         if outcome == crate::force_include::CensorshipCheckOutcome::Censored {
             self.metrics().inc_censorship_detected();
             tracing::warn!(
@@ -3201,11 +3295,15 @@ impl Node {
     ///
     /// 返回 `(该位点当前票数, 若凑齐则返回新形成的 QC)`。同签名者重复投票去重。
     ///
-    /// 边界（原型口径，如实）：BLS 公钥尚无 validator 集注册表，收集端只能做
-    /// **签名有效性**（possession）验证 + 2f+1 计数，不能验证"签名者属于当前
-    /// validator 集"——公钥注册表（ValidatorEntry 增加 bls_pubkey 字段或独立
-    /// registry）属后续接线点。多节点部署中投票源自 gossip 的 validator 连接，
-    /// 攻击面可接受于原型。
+    /// P1（QC 伪造）修复：投票签名者公钥必须 ∈ 本节点 BLS 签名者注册表
+    /// （种子 = 本节点 validator 密钥派生键；委员会其余成员经
+    /// [`Self::register_bls_signers`] 显式注册），注册表为空 fail-closed 拒 ——
+    /// 阻断"攻击者自造 quorum(n) 全新 BLS 键对任意位点拼出密码学合法
+    /// 聚合 QC"的伪造（与 DAG commit cert 入口的成员校验同款防御）。
+    ///
+    /// # Errors
+    /// 签名者非成员/注册表为空、签名无效，或聚合失败（见
+    /// [`CheckpointQc::form_from_votes`]）。
     pub fn record_checkpoint_vote(
         &self,
         vote: crate::consensus::checkpoint::CheckpointVote,
@@ -3217,6 +3315,12 @@ impl Node {
             .checkpoint_state
             .lock()
             .unwrap_or_else(|e| e.into_inner());
+        // P1：成员资格（集合查找）先于入桶 —— 非成员票不占收集位。
+        crate::consensus::checkpoint::ensure_bls_signer_member(
+            "checkpoint vote",
+            &vote.signer_pubkey_g2,
+            &state.allowed_bls_signers,
+        )?;
         let key = (vote.epoch, vote.height);
         if !state.vote_sites_order.contains(&key) {
             state.vote_sites_order.push_back(key);
@@ -3240,7 +3344,7 @@ impl Node {
             return Ok((collected, None));
         }
         let votes = entry.clone();
-        let qc = CheckpointQc::form_from_votes(&votes, vc)?;
+        let qc = CheckpointQc::form_from_votes(&votes, &state.allowed_bls_signers, vc)?;
         self.append_checkpoint_qc(&qc)?;
         state.latest_qc = Some(qc.clone());
         Ok((collected, Some(qc)))
@@ -3259,13 +3363,73 @@ impl Node {
     }
 
     /// 最新已验证 checkpoint QC（重启后由 sidecar 恢复）。
+    ///
+    /// P1：聚合形态 QC 读出时按**当前** BLS 签名者注册表复核成员资格 ——
+    /// 重放恢复的 QC 可能形成于注册表扩充前，或重启后签名者尚未重新注册；
+    /// 复核失败按无 QC 处理（fail-closed）。阈值形态成员资格已由
+    /// group_key_digest ↔ 本地活跃 keyset 在载入时绑定，读出不重复检查。
     #[must_use]
     pub fn latest_checkpoint_qc(&self) -> Option<crate::consensus::checkpoint::CheckpointQc> {
-        self.checkpoint_state
+        let state = self
+            .checkpoint_state
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .latest_qc
-            .clone()
+            .unwrap_or_else(|e| e.into_inner());
+        let qc = state.latest_qc.as_ref()?;
+        if qc.threshold.is_none() {
+            for pk in &qc.signer_pubkeys_g2 {
+                if let Err(e) = crate::consensus::checkpoint::ensure_bls_signer_member(
+                    "checkpoint qc replay",
+                    pk,
+                    &state.allowed_bls_signers,
+                ) {
+                    tracing::debug!("latest QC 成员资格复核未过（按无 QC 处理）：{e}");
+                    return None;
+                }
+            }
+        }
+        Some(qc.clone())
+    }
+
+    /// 显式注册聚合形态 checkpoint QC / DA 凭证的 BLS 签名者公钥（P1 修复的
+    /// 部署接线点）。
+    ///
+    /// 权威性（如实）：validator 的 BLS 全钥由其 secp 私钥域分隔派生，公钥
+    /// 面无法反推——各节点只能权威派生**自身**密钥（构造时已自动入表）；
+    /// 多节点聚合模式部署必须把委员会全量 BLS 公钥显式注册给每个收集节点
+    /// （`ValidatorEntry` 增加 bls_pubkey 字段属后续演进）。注册表同时供
+    /// checkpoint 投票与 DA 回执两个 intake 路径使用。重复注册幂等；非法点
+    /// （非 96B / 子群检查失败）fail-closed 拒绝整批。返回新插入的公钥数。
+    ///
+    /// # Errors
+    /// 任一公钥非法（[`crate::consensus::checkpoint::parse_g2`] 拒）。
+    pub fn register_bls_signers(
+        &self,
+        pubkeys: impl IntoIterator<Item = [u8; 96]>,
+    ) -> PokerL1Result<usize> {
+        let pubkeys: Vec<[u8; 96]> = pubkeys.into_iter().collect();
+        // fail-closed：先全量校验点合法性，任一非法拒整批
+        for pk in &pubkeys {
+            crate::consensus::checkpoint::parse_g2(pk)?;
+        }
+        let mut added = 0usize;
+        {
+            let mut cs = self
+                .checkpoint_state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for pk in &pubkeys {
+                if cs.allowed_bls_signers.insert(*pk) {
+                    added += 1;
+                }
+            }
+        }
+        {
+            let mut da = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+            for pk in &pubkeys {
+                da.allowed_bls_signers.insert(*pk);
+            }
+        }
+        Ok(added)
     }
 
     // ===== v1.5-e：阈值 QC 形态（真 t-of-n；密钥来自 consensus::dkg） =====
@@ -3294,6 +3458,12 @@ impl Node {
     /// 同参与者重复份额去重。**无 keyset 的节点拒绝（fail-closed）**——聚合
     /// 模式节点走 [`Self::record_checkpoint_vote`]（零回退路径）。
     ///
+    /// P2 修复：`collected >= t` 且该位点尚未成型时（重）试装配 —— 原
+    /// `== t` 语义下第 t 份到达时的瞬时装配失败（如 sidecar 写失败）会使
+    /// 后续份额的 collected 永久 `> t`，该位点再也无法成型。成型成功的
+    /// 位点记入内部集合，此后到位的份额只计数（QC 签名者数确定为当时的
+    /// 参与集，避免每份超额份额都重做 Lagrange 重构）。
+    ///
     /// # Errors
     /// 节点无 DKG keyset、份额签名验证失败（尺寸/点/配对）、位点异构或装配
     /// 失败（见 [`CheckpointQc::form_threshold_from_partials`]）。
@@ -3318,26 +3488,31 @@ impl Node {
             while state.threshold_sites_order.len() > MAX_CHECKPOINT_VOTE_SITES {
                 if let Some(old) = state.threshold_sites_order.pop_front() {
                     state.threshold_partials.remove(&old);
+                    state.threshold_formed_sites.remove(&old);
                 }
             }
         }
-        let entry = state.threshold_partials.entry(key).or_default();
-        if entry
-            .iter()
-            .any(|p| p.participant_id == partial.participant_id)
-        {
-            return Ok((entry.len(), None));
-        }
-        entry.push(partial);
-        let collected = entry.len();
-        // 仅在恰好凑齐 t 时装配一次（此后到位的份额只计数：QC 签名者数
-        // 确定为 t，避免每个超额份额都重做 Lagrange 重构）。
-        if collected != keyset.t as usize {
+        // P2：已成型标记先读后用 —— entry 的可变借用结束之后才能再访问
+        // `state` 的其他字段（借用检查），语义与成型集合的更新顺序一致。
+        let already_formed = state.threshold_formed_sites.contains(&key);
+        let (collected, partials) = {
+            let entry = state.threshold_partials.entry(key).or_default();
+            if entry
+                .iter()
+                .any(|p| p.participant_id == partial.participant_id)
+            {
+                return Ok((entry.len(), None));
+            }
+            entry.push(partial);
+            (entry.len(), entry.clone())
+        };
+        // `>= t` 才尝试（未成型位点上后续份额触发重试）；已成型位点只计数。
+        if collected < keyset.t as usize || already_formed {
             return Ok((collected, None));
         }
-        let partials = entry.clone();
         let qc = CheckpointQc::form_threshold_from_partials(&partials, keyset)?;
         self.append_checkpoint_qc(&qc)?;
+        state.threshold_formed_sites.insert(key);
         state.latest_qc = Some(qc.clone());
         Ok((collected, Some(qc)))
     }
@@ -3381,6 +3556,7 @@ impl Node {
         };
         let vc = self.active_validator_count().max(1);
         let mut state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        let allowed_signers = state.allowed_bls_signers.clone();
         let status = {
             let entry = state.entry_mut(request);
             if !entry
@@ -3390,14 +3566,14 @@ impl Node {
             {
                 entry.receipts.push(receipt.clone());
             }
-            // 尝试聚合凭证
+            // 尝试聚合凭证（P1：成员资格对注册表校验）
             if entry.certificate.is_none() {
                 let required = crate::consensus::required_quorum(vc);
                 if entry.receipts.len() >= required {
                     let receipts = entry.receipts.clone();
                     entry.certificate =
                         Some(crate::consensus::da::DaCertificate::form_from_receipts(
-                            &receipts, vc,
+                            &receipts, &allowed_signers, vc,
                         )?);
                 }
             }
@@ -3411,6 +3587,13 @@ impl Node {
     ///
     /// 未请求过的 digest：接受为"被动见证"（validator gossip 的回执本身就
     /// 说明了该 digest 的可用性动议）——与请求路径共用条目结构。
+    ///
+    /// P1（凭证伪造）修复：回执签名者公钥必须 ∈ 本节点 BLS 签名者注册表
+    /// （与 checkpoint 投票同一注册表；种子 = 自身派生键，委员会其余成员经
+    /// [`Self::register_bls_signers`] 注册），注册表为空 fail-closed 拒。
+    ///
+    /// # Errors
+    /// 签名者非成员/注册表为空、签名/位点无效，或聚合失败。
     pub fn record_da_receipt(
         &self,
         receipt: crate::consensus::da::DaReceipt,
@@ -3430,6 +3613,13 @@ impl Node {
             },
         };
         let mut state = self.da_state.lock().unwrap_or_else(|e| e.into_inner());
+        // P1：成员资格先于入桶（非成员回执不占收集位；集合查找先于聚合配对）
+        crate::consensus::checkpoint::ensure_bls_signer_member(
+            "da receipt",
+            &receipt.signer_pubkey_g2,
+            &state.allowed_bls_signers,
+        )?;
+        let allowed_signers = state.allowed_bls_signers.clone();
         let entry = state.entry_mut(request);
         if !entry
             .receipts
@@ -3444,7 +3634,7 @@ impl Node {
                 let receipts = entry.receipts.clone();
                 entry.certificate =
                     Some(crate::consensus::da::DaCertificate::form_from_receipts(
-                        &receipts, vc,
+                        &receipts, &allowed_signers, vc,
                     )?);
             }
         }
@@ -4019,20 +4209,7 @@ mod tests {
     #[test]
     fn node_submit_tx_validator_buffers() {
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
-        let tx = Transaction {
-            inputs: vec![ObjectID::new([0u8; 20], 1)],
-            outputs: vec![],
-            contract_call: None,
-            tagged_pubkey: dummy_tagged_pubkey(),
-            signature: vec![0u8; 65],
-            gas: crate::transaction::Gas::zero(),
-            lane_hint: crate::transaction::TxLane::Public,
-            route_hint: crate::transaction::RouteHint::AnyValidator,
-            chain_id: DEFAULT_CHAIN_ID,
-            nonce: 1,
-            gameturn_nonce: None,
-            is_fallback: false,
-        };
+        let tx = signed_test_tx();
         let expected_hash = tx.tx_hash();
         let returned_hash = node.submit_tx(tx).unwrap();
         assert_eq!(returned_hash, expected_hash);
@@ -4043,14 +4220,16 @@ mod tests {
         assert_eq!(pending[0].tx_hash(), expected_hash);
     }
 
-    #[test]
-    fn node_submit_tx_full_does_not_buffer() {
-        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
-        let tx = Transaction {
+    /// submit_tx 相关测试用的已签名交易（准入校验前置后 dummy 签名不可用）。
+    fn signed_test_tx() -> Transaction {
+        let mut tx = Transaction {
             inputs: vec![ObjectID::new([0u8; 20], 1)],
             outputs: vec![],
             contract_call: None,
-            tagged_pubkey: dummy_tagged_pubkey(),
+            tagged_pubkey: TaggedPubkey {
+                tag: encode_tag(SignatureScheme::Secp256k1, 1),
+                raw: pubkey_raw_for(0x77),
+            },
             signature: vec![0u8; 65],
             gas: crate::transaction::Gas::zero(),
             lane_hint: crate::transaction::TxLane::Public,
@@ -4060,6 +4239,14 @@ mod tests {
             gameturn_nonce: None,
             is_fallback: false,
         };
+        resign_tx_with(0x77, &mut tx);
+        tx
+    }
+
+    #[test]
+    fn node_submit_tx_full_does_not_buffer() {
+        let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
+        let tx = signed_test_tx();
         let tx_hash = tx.tx_hash();
         node.submit_tx(tx).unwrap();
 
@@ -4075,20 +4262,7 @@ mod tests {
     #[test]
     fn node_get_tx_after_submit() {
         let node = Node::open_inmemory(NodeRole::Full, DEFAULT_CHAIN_ID).unwrap();
-        let tx = Transaction {
-            inputs: vec![ObjectID::new([0u8; 20], 1)],
-            outputs: vec![],
-            contract_call: None,
-            tagged_pubkey: dummy_tagged_pubkey(),
-            signature: vec![0u8; 65],
-            gas: crate::transaction::Gas::zero(),
-            lane_hint: crate::transaction::TxLane::Public,
-            route_hint: crate::transaction::RouteHint::AnyValidator,
-            chain_id: DEFAULT_CHAIN_ID,
-            nonce: 1,
-            gameturn_nonce: None,
-            is_fallback: false,
-        };
+        let tx = signed_test_tx();
         let tx_hash = tx.tx_hash();
         node.submit_tx(tx).unwrap();
         let got = node.get_tx(&tx_hash).unwrap();
@@ -5604,13 +5778,21 @@ mod tests {
     // ===== 缺口 #3：Priority Mempool 测试 =====
 
     fn make_pub_tx(pubkey_byte: u8, nonce: u64, gas_price: u64) -> Transaction {
-        Transaction {
+        // P0 修复（submit_tx 准入前置验签）后测试交易必须携带真实签名；
+        // caller 身份由 pubkey_byte 确定性派生（同 byte ⇒ 同 caller，供
+        // FIFO/RBF/强制包含等排序断言使用）。
+        let secp = secp256k1::Secp256k1::new();
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = pubkey_byte;
+        let secret = secp256k1::SecretKey::from_slice(&sk_bytes).unwrap();
+        let public = secp256k1::PublicKey::from_secret_key(&secp, &secret);
+        let mut tx = Transaction {
             inputs: vec![],
             outputs: vec![],
             contract_call: None,
             tagged_pubkey: TaggedPubkey {
                 tag: encode_tag(SignatureScheme::Secp256k1, 1),
-                raw: vec![pubkey_byte; 33],
+                raw: public.serialize().to_vec(),
             },
             signature: vec![0u8; 65],
             gas: crate::transaction::Gas::new(1_000_000, gas_price),
@@ -5620,7 +5802,39 @@ mod tests {
             nonce,
             gameturn_nonce: None,
             is_fallback: false,
-        }
+        };
+        let msg = secp256k1::Message::from_digest(tx.signing_hash());
+        let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+        let (rid, compact) = sig.serialize_compact();
+        let mut sig_bytes = compact.to_vec();
+        sig_bytes.push(rid.to_i32() as u8);
+        tx.signature = sig_bytes;
+        tx
+    }
+
+    /// 与 make_pub_tx 同源派生的 caller 公钥原始字节（排序断言身份用）。
+    fn pubkey_raw_for(pubkey_byte: u8) -> Vec<u8> {
+        let secp = secp256k1::Secp256k1::new();
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = pubkey_byte;
+        let secret = secp256k1::SecretKey::from_slice(&sk_bytes).unwrap();
+        secp256k1::PublicKey::from_secret_key(&secp, &secret)
+            .serialize()
+            .to_vec()
+    }
+
+    /// 对（被测试改动过签名覆盖字段的）交易按同源私钥重新签名。
+    fn resign_tx_with(pubkey_byte: u8, tx: &mut Transaction) {
+        let secp = secp256k1::Secp256k1::new();
+        let mut sk_bytes = [0u8; 32];
+        sk_bytes[0] = pubkey_byte;
+        let secret = secp256k1::SecretKey::from_slice(&sk_bytes).unwrap();
+        let msg = secp256k1::Message::from_digest(tx.signing_hash());
+        let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+        let (rid, compact) = sig.serialize_compact();
+        let mut sig_bytes = compact.to_vec();
+        sig_bytes.push(rid.to_i32() as u8);
+        tx.signature = sig_bytes;
     }
 
     #[test]
@@ -5697,9 +5911,9 @@ mod tests {
         node.submit_tx(make_pub_tx(0x21, 1, 5)).unwrap();
         node.submit_tx(make_pub_tx(0x22, 1, 5)).unwrap();
         let drained = node.drain_pending_tx();
-        assert_eq!(drained[0].tagged_pubkey.raw[0], 0x20, "arrival 顺序保持");
-        assert_eq!(drained[1].tagged_pubkey.raw[0], 0x21);
-        assert_eq!(drained[2].tagged_pubkey.raw[0], 0x22);
+        assert_eq!(drained[0].tagged_pubkey.raw, pubkey_raw_for(0x20), "arrival 顺序保持");
+        assert_eq!(drained[1].tagged_pubkey.raw, pubkey_raw_for(0x21));
+        assert_eq!(drained[2].tagged_pubkey.raw, pubkey_raw_for(0x22));
     }
 
     // ===== M3-ACC-6：ForceInclude 抗审查测试 =====
@@ -5929,6 +6143,12 @@ mod tests {
         let votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(1, 64, [0xAu8; 32], &bls_derive_secret_key(&[0xA0 + i as u8; 32])).unwrap())
             .collect();
+        // P1：5 名"委员会成员"的 BLS 公钥先注册（未注册键的票在 record 内
+        // 被成员资格校验拒绝）
+        let signer_pubkeys: Vec<[u8; 96]> = (0..5u8)
+            .map(|i| bls_derive_secret_key(&[0xA0 + i; 32]).pubkey_g2())
+            .collect();
+        node.register_bls_signers(signer_pubkeys.clone()).unwrap();
         // 直接经 record 路径收集 5 票（位点是测试构造的，Node 侧不要求 tip 一致 ——
         // 投票位点真实性由签名者自律与 gossip 来源保证，见方法边界说明）
         let mut formed_qc: Option<CheckpointQc> = None;
@@ -5948,12 +6168,21 @@ mod tests {
         assert_eq!(count, 5);
         assert!(none.is_none());
 
-        // 侧车已落盘：重开节点重放恢复最新 QC
+        // 侧车已落盘：重开节点重放。P1：重启后注册表只剩种子（本节点自身
+        // 派生键）—— 多签 QC 读出时成员复核 fail-closed，按无 QC 处理；
+        // 重新注册委员会成员后同一重放 QC 恢复可读。
         drop(node);
         let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
         let config = NodeConfig::validator(dir.clone(), vkey);
         let node2 = Node::open(config).unwrap();
-        let restored = node2.latest_checkpoint_qc().expect("重启必须恢复最新 QC");
+        assert!(
+            node2.latest_checkpoint_qc().is_none(),
+            "未注册成员的重放 QC 必须按无 QC 处理（fail-closed）"
+        );
+        node2.register_bls_signers(signer_pubkeys).unwrap();
+        let restored = node2
+            .latest_checkpoint_qc()
+            .expect("注册委员会成员后必须恢复最新 QC");
         assert_eq!(restored, qc, "sidecar 重放的 QC 必须与落盘一致");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -5982,6 +6211,12 @@ mod tests {
         let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_ckpt_bad"), vkey);
         config.checkpoint_interval_blocks = 32;
         let node = Node::open_inmemory_with_config(config).unwrap();
+        // P1：先注册签名者（0xB1 与 0xC0..0xC2），使断言聚焦签名/位点错误
+        node.register_bls_signers([0xB1u8, 0xC0, 0xC1, 0xC2]
+            .iter()
+            .map(|&s| bls_derive_secret_key(&[s; 32]).pubkey_g2())
+            .collect::<Vec<_>>())
+        .unwrap();
         let mut vote =
             CheckpointVote::sign(1, 32, [7u8; 32], &bls_derive_secret_key(&[0xB1u8; 32])).unwrap();
         vote.signature_g1 = vec![0u8; 48]; // 伪签名（非曲线点）
@@ -5994,6 +6229,64 @@ mod tests {
         }
         assert_eq!(node.checkpoint_vote_count(1, 32), 3);
         assert_eq!(node.checkpoint_vote_count(1, 64), 0);
+    }
+
+    /// P1（QC 伪造）Node 接线：投票/回执 intake 的签名者成员资格 fail-closed。
+    ///
+    /// 攻击场景：外来键（密码学上完全合法的签名）投 checkpoint 票 / DA 回执
+    /// —— 修复前仅 possession 验证即入桶，凑数可拼出伪造 QC/凭证；修复后
+    /// 必须被注册表成员校验拒绝。自身派生键（注册表种子）与注册成员通过。
+    #[test]
+    fn checkpoint_vote_and_da_receipt_membership_enforced_at_intake() {
+        use crate::consensus::checkpoint::{CheckpointVote, bls_derive_secret_key};
+        use crate::consensus::da::DaReceipt;
+        let vkey = ValidatorKey::from_secret_bytes([0x42u8; 32]).unwrap();
+        let mut config = NodeConfig::validator(PathBuf::from("/tmp/poker_l1_ckpt_member"), vkey);
+        config.checkpoint_interval_blocks = 32;
+        let node = Node::open_inmemory_with_config(config).unwrap();
+
+        // ---- checkpoint 投票 ----
+        // 外来键（未注册）的合法签名票 → 成员资格拒绝
+        let outsider = bls_derive_secret_key(&[0xE1; 32]);
+        let forged_vote = CheckpointVote::sign(1, 32, [7u8; 32], &outsider).unwrap();
+        let err = node.record_checkpoint_vote(forged_vote).unwrap_err();
+        assert!(
+            err.to_string().contains("非成员") || err.to_string().contains("注册表为空"),
+            "外来键的合法票必须被成员资格校验拒绝: {err:?}"
+        );
+        assert_eq!(node.checkpoint_vote_count(1, 32), 0, "被拒票不得入桶");
+
+        // 自身派生键（注册表种子，无需注册）→ 接受（vc=1 → quorum=1 即成 QC）
+        let self_sk = bls_derive_secret_key(&[0x42; 32]);
+        let self_vote = CheckpointVote::sign(1, 32, [7u8; 32], &self_sk).unwrap();
+        let (count, qc) = node.record_checkpoint_vote(self_vote).unwrap();
+        assert_eq!(count, 1);
+        assert!(qc.is_some(), "自身派生键是种子，单票（quorum=1）必须成 QC");
+
+        // 显式注册成员后：成员票接受；非法公钥点注册 → fail-closed 拒整批
+        let member = bls_derive_secret_key(&[0xD1; 32]);
+        node.register_bls_signers([member.pubkey_g2()]).unwrap();
+        let member_vote = CheckpointVote::sign(1, 64, [7u8; 32], &member).unwrap();
+        let (count, qc2) = node.record_checkpoint_vote(member_vote).unwrap();
+        assert_eq!(count, 1);
+        assert!(qc2.is_some());
+        assert!(node.register_bls_signers([[0u8; 96]]).is_err(), "非法点必须拒整批");
+
+        // ---- DA 回执 ----
+        let digest = [0xD9u8; 32];
+        let forged_receipt = DaReceipt::sign(digest, 1, 10, &outsider).unwrap();
+        let err2 = node.record_da_receipt(forged_receipt).unwrap_err();
+        assert!(
+            err2.to_string().contains("非成员") || err2.to_string().contains("注册表为空"),
+            "外来键的合法回执必须被成员资格校验拒绝: {err2:?}"
+        );
+        // 注册 2 名成员（vc=1 → quorum=1，首份即成凭证）
+        let m1 = bls_derive_secret_key(&[0xD2; 32]);
+        node.register_bls_signers([m1.pubkey_g2()]).unwrap();
+        let r1 = DaReceipt::sign(digest, 1, 10, &m1).unwrap();
+        let status = node.record_da_receipt(r1).unwrap();
+        assert_eq!(status.receipt_count, 1);
+        assert!(status.certified, "成员回执（quorum=1）必须成凭证");
     }
 
     // ===== v1.5-e：阈值 QC（Node 接线） =====
@@ -6201,14 +6494,93 @@ mod tests {
             "无 keyset 节点必须拒阈值份额（fail-closed）"
         );
         use crate::consensus::checkpoint::CheckpointVote;
-        let vote = CheckpointVote::sign(epoch, height, root, &bls_derive_secret_key(&[0xC5; 32]))
-            .unwrap();
+        // P1：用 agg_node 自身 validator 密钥（[0x44]）派生的 BLS 键签票 ——
+        // 自身派生键是注册表种子（外来键会被成员资格校验拒绝）。
+        let self_sk = bls_derive_secret_key(&[0x44; 32]);
+        let vote = CheckpointVote::sign(epoch, height, root, &self_sk).unwrap();
         let (_, agg_qc) = agg_node.record_checkpoint_vote(vote).unwrap();
         assert!(
             agg_qc.is_some(),
             "聚合模式（t=0）路径必须零回退可用"
         );
         assert!(agg_qc.unwrap().threshold.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// P2 修复：第 t 份 partial 到达时装配瞬时失败（如 sidecar 写失败）后，
+    /// 后续份额必须触发重试装配 —— 原 `collected != t` 语义下 collected 永久
+    /// `> t`，该位点再也无法成型。成型后超额份额只计数不重做装配。
+    #[test]
+    fn threshold_partial_retries_assembly_after_transient_failure() {
+        use crate::consensus::checkpoint::{ThresholdQcPartial, checkpoint_qc_signing_hash};
+        use crate::consensus::dkg::{assemble_group_keyset, dealer_deal};
+        let dir = std::env::temp_dir().join(format!(
+            "pokerl1_thr_retry_{}_{}",
+            std::process::id(),
+            line!()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = 7u32;
+        let t = 5u32;
+        let deals: Vec<_> = (1..=u64::from(n))
+            .map(|j| dealer_deal(&[0x95; 32], j, n, t).unwrap())
+            .collect();
+        let (keyset, shares) = assemble_group_keyset(&deals, n, t).unwrap();
+        let keyset_path = dir.join("keyset.json");
+        std::fs::write(&keyset_path, dkg_keyset_to_json(&keyset).unwrap()).unwrap();
+        for s in &shares {
+            std::fs::write(
+                dir.join(format!("share-{}.json", s.id)),
+                dkg_share_to_json(s).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut config = NodeConfig::validator(
+            PathBuf::from("/tmp/poker_l1_thr_retry_inmem"),
+            ValidatorKey::from_secret_bytes([0x46u8; 32]).unwrap(),
+        );
+        config.qc_threshold_t = t;
+        config.dkg_keyset_path = Some(keyset_path);
+        config.dkg_share_path = Some(dir.join("share-1.json"));
+        let node = Node::open_inmemory_with_config(config).unwrap();
+
+        let (epoch, height, root) = (1u64, 32u64, [0x7u8; 32]);
+        let signing = checkpoint_qc_signing_hash(epoch, height, root);
+        let mk = |id: u64| {
+            let share = shares.iter().find(|s| s.id == id).unwrap();
+            ThresholdQcPartial {
+                epoch,
+                height,
+                state_root: root,
+                participant_id: id,
+                sig_g1: share.partial_sign(&signing).unwrap().to_vec(),
+            }
+        };
+        // 模拟「第 t 份到达时装配瞬时失败」：直接把 t 份**已通过逐份验证**
+        // 的 partial 塞进收集桶（绕过 record 的装配路径），latest_qc 保持
+        // None —— 等价于装配在成型前失败退出。
+        let first_t: Vec<_> = [1u64, 2, 3, 4, 5].iter().map(|&id| mk(id)).collect();
+        {
+            let mut st = node.checkpoint_state.lock().unwrap();
+            st.threshold_partials.insert((epoch, height), first_t);
+            st.threshold_sites_order.push_back((epoch, height));
+        }
+        assert_eq!(node.threshold_partial_count(epoch, height), 5);
+        assert!(node.latest_checkpoint_qc().is_none(), "模拟瞬时失败：未成型");
+
+        // P2：第 t+1 份到达必须重试装配（旧 `!= t` 语义将永远跳过）。
+        let (count, qc) = node.record_threshold_partial(mk(6)).unwrap();
+        assert_eq!(count, 6);
+        let qc = qc.expect("collected >= t 且该位点未成型 → 必须重试装配");
+        assert_eq!(qc.signer_count(), 6, "重试以当前全量（t+1 份）装配");
+        qc.verify_threshold(&keyset).unwrap();
+        assert!(node.latest_checkpoint_qc().is_some());
+
+        // 成型后：第 7 份只计数，不重做装配（防每份超额份额重做 Lagrange）
+        let (count, none) = node.record_threshold_partial(mk(7)).unwrap();
+        assert_eq!(count, 7);
+        assert!(none.is_none(), "已成型位点不得重复装配");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -6241,6 +6613,14 @@ mod tests {
         // 未请求 → requested=false
         let before = node.da_status(&digest);
         assert!(!before.requested);
+
+        // P1：注册 peer 回执签名者（0xF0..0xF2 与伪造用 0xFF/0xFE —— 使后续
+        // 断言聚焦位点/签名错误而非成员资格）
+        node.register_bls_signers([0xF0u8, 0xF1, 0xF2, 0xFF, 0xFE]
+            .iter()
+            .map(|&s| bls_derive_secret_key(&[s; 32]).pubkey_g2())
+            .collect::<Vec<_>>())
+        .unwrap();
 
         // da_request：本节点（validator）签回执
         let status = node.submit_da_request(digest).expect("validator 可发起 DA 请求");
@@ -6382,19 +6762,21 @@ mod tests {
         let (node_a, _clock_a) = force_include_validator_node(0);
         let (node_b, _clock_b) = force_include_validator_node(0);
         // 混合序列：GameTurn / Public（不同 gas price）/ ForceSync，乱序提交。
-        // 注意 submit_tx 不验签（签名在 RPC/block 层校验），测试 tx 用 dummy 签名即可。
+        // 改动签名覆盖字段后须重签（submit_tx 已前置准入验签）。
         let sequence: Vec<Transaction> = vec![
             {
                 let mut tx = make_pub_tx(0x61, 1, 10);
                 tx.lane_hint = crate::transaction::TxLane::GameTurn;
                 tx.gameturn_nonce = Some(1);
                 tx.gas = crate::transaction::Gas::zero();
+                resign_tx_with(0x61, &mut tx);
                 tx
             },
             make_pub_tx(0x62, 1, 50),
             {
                 let mut tx = make_pub_tx(0x63, 1, 30);
                 tx.lane_hint = crate::transaction::TxLane::ForceSync;
+                resign_tx_with(0x63, &mut tx);
                 tx
             },
             make_pub_tx(0x64, 2, 20),
@@ -6447,9 +6829,9 @@ mod tests {
 
         let retried = node.drain_pending_tx();
         assert_eq!(retried.len(), 3);
-        assert_eq!(retried[0].tagged_pubkey.raw[0], 0x20);
-        assert_eq!(retried[1].tagged_pubkey.raw[0], 0x21);
-        assert_eq!(retried[2].tagged_pubkey.raw[0], 0x22);
+        assert_eq!(retried[0].tagged_pubkey.raw, pubkey_raw_for(0x20));
+        assert_eq!(retried[1].tagged_pubkey.raw, pubkey_raw_for(0x21));
+        assert_eq!(retried[2].tagged_pubkey.raw, pubkey_raw_for(0x22));
     }
 
     #[test]
@@ -6460,7 +6842,7 @@ mod tests {
         // 插入高 price 的 Public tx
         node.submit_tx(make_pub_tx(0x30, 1, 100)).unwrap();
         // 插入 GameTurn tx（免 gas, price=0）
-        let gameturn_tx = Transaction {
+        let mut gameturn_tx = Transaction {
             inputs: vec![],
             outputs: vec![],
             contract_call: None,
@@ -6477,6 +6859,10 @@ mod tests {
             gameturn_nonce: Some(1),
             is_fallback: false,
         };
+        // submit_tx 前置准入验签：用 dummy pubkey 时签名无法对应，
+        // 改为与 pubkey_raw_for(0x40) 同源的真实密钥对签名。
+        gameturn_tx.tagged_pubkey.raw = pubkey_raw_for(0x40);
+        resign_tx_with(0x40, &mut gameturn_tx);
         node.submit_tx(gameturn_tx).unwrap();
         let drained = node.drain_pending_tx();
         assert_eq!(drained.len(), 2);
@@ -6499,13 +6885,19 @@ mod tests {
         // 多个 GameTurn tx 保持 arrival 顺序（轮转规则由后续 build_game_sub_block 处理）。
         let node = Node::open_inmemory(NodeRole::Validator, DEFAULT_CHAIN_ID).unwrap();
         let make_gameturn = |byte: u8, nonce: u64| -> Transaction {
-            Transaction {
+            // 与 make_pub_tx 同源的真实签名（submit_tx 准入前置验签）。
+            let secp = secp256k1::Secp256k1::new();
+            let mut sk_bytes = [0u8; 32];
+            sk_bytes[0] = byte;
+            let secret = secp256k1::SecretKey::from_slice(&sk_bytes).unwrap();
+            let public = secp256k1::PublicKey::from_secret_key(&secp, &secret);
+            let mut tx = Transaction {
                 inputs: vec![],
                 outputs: vec![],
                 contract_call: None,
                 tagged_pubkey: TaggedPubkey {
                     tag: encode_tag(SignatureScheme::Secp256k1, 1),
-                    raw: vec![byte; 33],
+                    raw: public.serialize().to_vec(),
                 },
                 signature: vec![0u8; 65],
                 gas: crate::transaction::Gas::zero(),
@@ -6515,7 +6907,14 @@ mod tests {
                 nonce: 0,
                 gameturn_nonce: Some(nonce),
                 is_fallback: false,
-            }
+            };
+            let msg = secp256k1::Message::from_digest(tx.signing_hash());
+            let sig = secp.sign_ecdsa_recoverable(&msg, &secret);
+            let (rid, compact) = sig.serialize_compact();
+            let mut sig_bytes = compact.to_vec();
+            sig_bytes.push(rid.to_i32() as u8);
+            tx.signature = sig_bytes;
+            tx
         };
         node.submit_tx(make_gameturn(0x50, 1)).unwrap();
         node.submit_tx(make_gameturn(0x51, 2)).unwrap();
@@ -6523,9 +6922,9 @@ mod tests {
         let drained = node.drain_pending_tx();
         assert_eq!(drained.len(), 3);
         // 全部 GameTurn，保持 arrival 顺序
-        assert_eq!(drained[0].tagged_pubkey.raw[0], 0x50);
-        assert_eq!(drained[1].tagged_pubkey.raw[0], 0x51);
-        assert_eq!(drained[2].tagged_pubkey.raw[0], 0x52);
+        assert_eq!(drained[0].tagged_pubkey.raw, pubkey_raw_for(0x50));
+        assert_eq!(drained[1].tagged_pubkey.raw, pubkey_raw_for(0x51));
+        assert_eq!(drained[2].tagged_pubkey.raw, pubkey_raw_for(0x52));
     }
 
     #[test]

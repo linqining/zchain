@@ -264,6 +264,10 @@ pub fn build_index(
     let config = SequencerConfig {
         ops_per_min: u32::MAX,
         open_table_per_min: u32::MAX,
+        // 与生产方（texas 嵌入式 runtime）一致：replay 重跑 BuyIn 的
+        // max_seats 准入，未入池 seat 随动态买卖累积后，默认 10 会令
+        // 索引构建在 WAL 中途 "table full" 失败。
+        max_seats: 1000,
         ..SequencerConfig::default()
     };
     let seq = Sequencer::replay(wal, sequencer_public, config, Arc::new(MetricsRegistry::new()))?;

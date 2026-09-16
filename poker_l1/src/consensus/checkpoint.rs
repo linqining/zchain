@@ -26,8 +26,12 @@
 //!   单个签名者泄露即泄露完整密钥，聚合签名无法证明"恰好 t 人参与"
 //!   （聚合 QC 的参与人数由显式 `signer_pubkeys_g2` 列表与 2f+1 计数约束）。
 //! - **rogue-key 防护**：聚合前逐签名验证（[`CheckpointVote::verify`]，
-//!   possession 证明）+ 签名者必须属于本地 validator 集；因此"伪造公钥
-//!   抵消他人密钥"的 rogue-key 攻击在收集端被阻断。
+//!   possession 证明）+ **签名者成员资格校验**（P1 修复：自声明
+//!   `signer_pubkeys_g2` 的每一项必须 ∈ 调用方传入的 validator BLS 公钥
+//!   注册表，见 [`ensure_bls_signer_member`] 与
+//!   [`CheckpointQc::verify_against_signers`]，防"自造 quorum(n) 把全新
+//!   BLS 键拼出合法聚合签名"的 QC 伪造）；因此"伪造公钥抵消他人密钥"
+//!   的 rogue-key 攻击在收集端被阻断。
 //!
 //! ## v1.5-e：阈值 QC 形态（真 t-of-n，additive；与聚合 QC 并存，零回退）
 //!
@@ -448,6 +452,41 @@ pub fn bls_verify_aggregate_same_msg(
     Ok(bool::from(ml.final_exponentiation().is_identity()))
 }
 
+/// 校验单个自声明 BLS 签名者公钥的**成员资格**（P1 修复：QC/DA 凭证伪造）。
+///
+/// `signer_pubkey_g2`（G2 compressed 96B）必须 ∈ `allowed_g2` —— 调用方持有
+/// 的 validator BLS 公钥注册表（节点层：本节点 validator 密钥派生键 + 经
+/// 显式注册的委员会成员键；BLS 全钥由 secp 私钥域分隔派生，公钥面无法
+/// 反推，注册表是唯一权威来源）。注册表为空 → fail-closed 拒（未声明
+/// 任何允许签名者时，聚合形态 QC/凭证不可成立）。
+///
+/// # Errors
+/// 注册表为空、公钥非 96B 或不在注册表内（非成员签名者拒绝）。
+pub(crate) fn ensure_bls_signer_member(
+    domain: &str,
+    signer_pubkey_g2: &[u8],
+    allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
+) -> PokerL1Result<()> {
+    if allowed_g2.is_empty() {
+        return Err(PokerL1Error::Other(format!(
+            "{domain}: 允许的 BLS 签名者注册表为空（fail-closed 拒）"
+        )));
+    }
+    let arr: [u8; 96] = signer_pubkey_g2.try_into().map_err(|_| {
+        PokerL1Error::InvalidBlsPoint(format!(
+            "{domain}: 签名者公钥长度 {} != 96",
+            signer_pubkey_g2.len()
+        ))
+    })?;
+    if !allowed_g2.contains(&arr) {
+        return Err(PokerL1Error::Other(format!(
+            "{domain}: 签名者 0x{}.. 不在允许的 validator BLS 注册表内（非成员签名者拒绝）",
+            hex::encode(&arr[..8])
+        )));
+    }
+    Ok(())
+}
+
 /// checkpoint QC 签名对象：`blake2b_256(0x51 || epoch || height || state_root)`。
 ///
 /// v1.5 的 checkpoint 锚定 commit 高度（state_root 即该高度 block 的
@@ -573,11 +612,19 @@ pub struct CheckpointQc {
 impl CheckpointQc {
     /// 由投票集合聚合形成 QC。
     ///
+    /// - **签名者成员资格**（P1 修复）：每票 `signer_pubkey_g2` 必须 ∈
+    ///   `allowed_g2`（validator BLS 公钥注册表）——拒绝"自造全新 BLS 键
+    ///   拼合法聚合签名"的 QC 伪造；注册表为空 fail-closed 拒；
     /// - 逐票验证（签名对象一致 + 单签名配对验证 —— rogue-key 防护点）；
     /// - 签名者去重（同公钥重复投票只计一次）；
     /// - 数量 ≥ `required_quorum(validator_count)`（2f+1）才成 QC。
+    ///
+    /// # Errors
+    /// 任一签名者非成员、注册表为空，或既有拒绝条件（位点异构/签名无效/
+    /// 不足 quorum/聚合验证失败）。
     pub fn form_from_votes(
         votes: &[CheckpointVote],
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
         validator_count: usize,
     ) -> PokerL1Result<Self> {
         let Some(first) = votes.first() else {
@@ -593,6 +640,8 @@ impl CheckpointQc {
                     "checkpoint QC: 投票位点不一致（异构投票拒绝）".into(),
                 ));
             }
+            // 成员资格先行（集合查找，成本低于配对验证）
+            ensure_bls_signer_member("checkpoint QC", &vote.signer_pubkey_g2, allowed_g2)?;
             vote.verify()?;
             if pks.iter().any(|pk| *pk == vote.signer_pubkey_g2) {
                 continue; // 去重：同签名者重复投票不重复计入聚合
@@ -636,7 +685,18 @@ impl CheckpointQc {
         })
     }
 
-    /// 验证 QC：聚合签名配对验证 + 2f+1 计数 + 签名者去重。
+    /// 验证 QC（**不含签名者成员资格**）：聚合签名配对验证 + 2f+1 计数 +
+    /// 签名者去重。
+    ///
+    /// # Safety-boundary（P1 修复后口径）
+    ///
+    /// 本方法**不校验**自声明 `signer_pubkeys_g2` 是否属于 validator 集 ——
+    /// 单独使用时"任何人自造 quorum(n) 把全新 BLS 键拼出合法聚合签名"仍能
+    /// 通过。生产路径必须用 [`Self::verify_against_signers`]（成员资格 +
+    /// 密码学全量）。本方法仅供：节点重启重放的**密码学层**核验（成员资格
+    /// 层在 `latest_checkpoint_qc` 读出时按当前注册表复核）与本模块密码学
+    /// 单测。
+    #[doc(hidden)]
     pub fn verify(&self, validator_count: usize) -> PokerL1Result<()> {
         if self.signer_pubkeys_g2.is_empty() {
             return Err(PokerL1Error::Other("checkpoint QC: 签名者为空".into()));
@@ -674,6 +734,26 @@ impl CheckpointQc {
             ));
         }
         Ok(())
+    }
+
+    /// 验证 QC（P1 修复：**成员资格 + 密码学全量**）。
+    ///
+    /// 自声明 `signer_pubkeys_g2` 的**每一项**必须 ∈ `allowed_g2`
+    /// （validator BLS 公钥注册表），叠加既有去重/quorum/聚合配对检查。
+    /// 注册表为空 → fail-closed 拒。防"任何人自造 quorum(n) 全新 BLS 键
+    /// 对任意 `(epoch, height, state_root)` 拼出密码学合法 QC"的伪造。
+    ///
+    /// # Errors
+    /// 任一签名者非成员/注册表为空，或 [`Self::verify`] 的任一拒绝条件。
+    pub fn verify_against_signers(
+        &self,
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
+        validator_count: usize,
+    ) -> PokerL1Result<()> {
+        for pk in &self.signer_pubkeys_g2 {
+            ensure_bls_signer_member("checkpoint QC", pk, allowed_g2)?;
+        }
+        self.verify(validator_count)
     }
 
     /// 签名者数量（形态感知：聚合形态 = 签名者公钥数；阈值形态 = signer
@@ -874,10 +954,18 @@ impl ThresholdQc {
     /// 验证阈值形态载荷（对本地 keyset；由
     /// [`CheckpointQc::verify_threshold`] 以 QC 位点构造签名对象后调用）。
     ///
+    /// **成员资格与活跃 keyset 绑定（P1 核查结论，如实）**：阈值形态的
+    /// "签名者 ∈ 委员会"由 `group_key_digest` ↔ 本地 keyset 绑定承担 ——
+    /// 本地 keyset 即**活跃** keyset（节点启动经 `load_dkg_material`
+    /// fail-closed 载入的唯一密钥材料），digest 不匹配即拒（QC 无法挪到
+    /// 非活跃群）；`signer_bitmap` 的每一位都映射到该 keyset 的分片
+    /// （canonical 长度 + 越界位拒），签名对组公钥单配对通过即证明
+    /// "≥ t 个真实分片持有者参与"。无需独立公钥注册表。
+    ///
     /// # Errors
-    /// digest 与本地 keyset 不匹配（QC 被挪群）、t 不一致、bitmap 形状非法
-    /// （长度 ≠ ceil(n/8) 或越界位置位）、数量 < t、签名尺寸/点非法或配对
-    /// 验证失败。
+    /// digest 与本地 keyset 不匹配（QC 被挪群/非活跃 keyset）、t 不一致、
+    /// bitmap 形状非法（长度 ≠ ceil(n/8) 或越界位置位）、数量 < t、签名
+    /// 尺寸/点非法或配对验证失败。
     pub fn verify(&self, keyset: &GroupKeyset, msg_hash: &Hash) -> PokerL1Result<()> {
         if self.group_key_digest != keyset.group_key_digest() {
             return Err(PokerL1Error::Other(
@@ -983,13 +1071,17 @@ impl CheckpointQc {
     /// 双形态分派验证（v1.5-e；`get_latest_checkpoint` / fork-anchor 消费点）：
     ///
     /// - `threshold == Some` → 阈值形态验证（需本地 keyset；**无 keyset 节点
-    ///   fail-closed 拒** —— 阈值 QC 无法退化为聚合验证，签名者无完整密钥）；
-    /// - `threshold == None` → 既有聚合形态验证（零回退路径，keyset 缺席亦可验）。
+    ///   fail-closed 拒** —— 阈值 QC 无法退化为聚合验证，签名者无完整密钥；
+    ///   成员资格由 group_key_digest ↔ 本地活跃 keyset 绑定，见
+    ///   [`ThresholdQc::verify`]）；
+    /// - `threshold == None` → 聚合形态验证（P1 修复：成员资格
+    ///   [`Self::verify_against_signers`] + 密码学；`allowed_g2` 为空 fail-closed）。
     ///
     /// # Errors
     /// 分派后的对应验证错误。
     pub fn verify_any(
         &self,
+        allowed_g2: &std::collections::BTreeSet<[u8; 96]>,
         validator_count: usize,
         keyset: Option<&GroupKeyset>,
     ) -> PokerL1Result<()> {
@@ -1001,7 +1093,7 @@ impl CheckpointQc {
             };
             self.verify_threshold(ks)
         } else {
-            self.verify(validator_count)
+            self.verify_against_signers(allowed_g2, validator_count)
         }
     }
 }
@@ -1205,6 +1297,11 @@ mod tests {
         bls_derive_secret_key(&[seed; 32])
     }
 
+    /// 由种子集构造允许签名者注册表（P1 成员资格测试辅助）。
+    fn allowed_from_seeds(seeds: &[u8]) -> std::collections::BTreeSet<[u8; 96]> {
+        seeds.iter().map(|&s| bls_key(s).pubkey_g2()).collect()
+    }
+
     fn qc_height_state() -> (u64, [u8; 32]) {
         (64, [0xCCu8; 32])
     }
@@ -1240,27 +1337,35 @@ mod tests {
     fn qc_aggregate_two_f_plus_one_succeeds() {
         // 7 validator，quorum = 2*7/3+1 = 5（2f+1）
         let (height, state_root) = qc_height_state();
+        let allowed = allowed_from_seeds(&(0..7).map(|i| 0x30 + i as u8).collect::<Vec<_>>());
         let votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x30 + i as u8)).unwrap())
             .collect();
-        let qc = CheckpointQc::form_from_votes(&votes, 7).expect("5/7 签名必须达成 QC");
+        let qc =
+            CheckpointQc::form_from_votes(&votes, &allowed, 7).expect("5/7 签名必须达成 QC");
         assert_eq!(qc.signer_count(), 5);
         qc.verify(7).expect("QC 必须通过验证");
+        qc.verify_against_signers(&allowed, 7)
+            .expect("成员 QC 必须通过成员资格验证");
         // 全体 7 签也成立
         let votes7: Vec<CheckpointVote> = (0..7)
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x30 + i as u8)).unwrap())
             .collect();
-        CheckpointQc::form_from_votes(&votes7, 7).unwrap().verify(7).unwrap();
+        CheckpointQc::form_from_votes(&votes7, &allowed, 7)
+            .unwrap()
+            .verify(7)
+            .unwrap();
     }
 
     #[test]
     fn qc_aggregate_insufficient_quorum_rejected() {
         let (height, state_root) = qc_height_state();
+        let allowed = allowed_from_seeds(&[0x40, 0x41, 0x42, 0x43]);
         // 7 validator 需 5 签，仅 4 → InsufficientQuorum
         let votes: Vec<CheckpointVote> = (0..4)
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x40 + i as u8)).unwrap())
             .collect();
-        let err = CheckpointQc::form_from_votes(&votes, 7).unwrap_err();
+        let err = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap_err();
         assert!(
             matches!(err, PokerL1Error::InsufficientQuorum { actual: 4, required: 5 }),
             "不足 2f+1 必须拒绝: {err:?}"
@@ -1270,13 +1375,14 @@ mod tests {
     #[test]
     fn qc_rejects_heterogeneous_votes_and_forged_signature() {
         let (height, state_root) = qc_height_state();
+        let allowed = allowed_from_seeds(&[0x50, 0x51, 0x52, 0x53, 0x54, 0x60]);
         let mut votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x50 + i as u8)).unwrap())
             .collect();
         // 异构位点：混入不同 state_root 的合法签名 → 拒
         let rogue = CheckpointVote::sign(1, height, [0xFFu8; 32], &bls_key(0x60)).unwrap();
         votes.push(rogue);
-        let err = CheckpointQc::form_from_votes(&votes, 7).unwrap_err();
+        let err = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap_err();
         assert!(err.to_string().contains("位点不一致"), "异构投票必须拒绝: {err:?}");
 
         // 伪签名：换掉最后一票的签名字节（合法公钥 + 无效签名）→ 单签验证拒
@@ -1285,7 +1391,7 @@ mod tests {
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x50 + i as u8)).unwrap())
             .collect();
         votes2[4].signature_g1 = vec![0u8; 48];
-        let err2 = CheckpointQc::form_from_votes(&votes2, 7).unwrap_err();
+        let err2 = CheckpointQc::form_from_votes(&votes2, &allowed, 7).unwrap_err();
         let msg2 = err2.to_string();
         assert!(
             msg2.contains("signature") || msg2.contains("G1"),
@@ -1299,7 +1405,7 @@ mod tests {
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x50 + i as u8)).unwrap())
             .collect();
         votes2b[4].signature_g1 = wrong_msg_sig.to_vec();
-        let err2b = CheckpointQc::form_from_votes(&votes2b, 7).unwrap_err();
+        let err2b = CheckpointQc::form_from_votes(&votes2b, &allowed, 7).unwrap_err();
         assert!(
             err2b.to_string().contains("signature verification failed"),
             "跨消息伪签名必须被配对验证拒绝: {err2b:?}"
@@ -1308,17 +1414,18 @@ mod tests {
         // 重复签名者：同一票投两次 → 去重后不足 quorum → InsufficientQuorum
         let single = CheckpointVote::sign(1, height, state_root, &bls_key(0x51)).unwrap();
         let dup = vec![single.clone(), single];
-        let err3 = CheckpointQc::form_from_votes(&dup, 7).unwrap_err();
+        let err3 = CheckpointQc::form_from_votes(&dup, &allowed, 7).unwrap_err();
         assert!(matches!(err3, PokerL1Error::InsufficientQuorum { .. }));
     }
 
     #[test]
     fn qc_verify_rejects_tampered_aggregate_and_wrong_state_root() {
         let (height, state_root) = qc_height_state();
+        let allowed = allowed_from_seeds(&[0x70, 0x71, 0x72, 0x73, 0x74]);
         let votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(1, height, state_root, &bls_key(0x70 + i as u8)).unwrap())
             .collect();
-        let mut qc = CheckpointQc::form_from_votes(&votes, 7).unwrap();
+        let mut qc = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap();
         // 篡改聚合签名首字节 → 配对验证失败
         let mut bad_agg = qc.agg_signature_g1.clone();
         bad_agg[1] ^= 0x01;
@@ -1337,6 +1444,100 @@ mod tests {
             trimmed.verify(7).unwrap_err(),
             PokerL1Error::InsufficientQuorum { .. }
         ));
+    }
+
+    /// P1（QC 伪造）修复：签名者成员资格校验。
+    ///
+    /// 攻击场景：攻击者自造 quorum(n)=5 把**全新非成员** BLS 键，对任意
+    /// `(epoch, height, state_root)` 产出**密码学完全合法**的聚合签名 ——
+    /// 修复前 `verify`/`form_from_votes` 只做 possession + 计数，伪造 QC
+    /// 通过；修复后每一把自声明签名者公钥必须 ∈ 允许注册表，否则拒。
+    #[test]
+    fn qc_membership_rejects_forged_non_member_signers() {
+        let (height, state_root) = qc_height_state();
+        // 委员会（允许注册表）：7 把成员键 0xD0..=0xD6
+        let allowed = allowed_from_seeds(&[0xD0, 0xD1, 0xD2, 0xD3, 0xD4, 0xD5, 0xD6]);
+        // 攻击者：5 把全新非成员键 0xE0..=0xE4（合法密钥对、合法签名）
+        let forged_seeds = [0xE0u8, 0xE1, 0xE2, 0xE3, 0xE4];
+        let forged_votes: Vec<CheckpointVote> = forged_seeds
+            .iter()
+            .map(|&s| CheckpointVote::sign(1, height, state_root, &bls_key(s)).unwrap())
+            .collect();
+
+        // (a1) form 路径：非成员票 → 拒（成员资格先于配对验证）
+        let err = CheckpointQc::form_from_votes(&forged_votes, &allowed, 7).unwrap_err();
+        assert!(
+            err.to_string().contains("非成员"),
+            "非成员签名者的投票必须被拒: {err:?}"
+        );
+
+        // (a2) 手工构造的伪造 QC（自声明非成员公钥 + **正确**聚合签名）→
+        // verify_against_signers 必须拒（修复前该对象能通过 verify(7)）。
+        let sigs: Vec<[u8; 48]> = forged_votes
+            .iter()
+            .map(|v| {
+                let mut arr = [0u8; 48];
+                arr.copy_from_slice(&v.signature_g1);
+                arr
+            })
+            .collect();
+        let pks: Vec<[u8; 96]> = forged_votes
+            .iter()
+            .map(|v| {
+                let mut arr = [0u8; 96];
+                arr.copy_from_slice(&v.signer_pubkey_g2);
+                arr
+            })
+            .collect();
+        let agg_sig = bls_aggregate_g1(&sigs).unwrap();
+        let agg_pk = bls_aggregate_g2(&pks).unwrap();
+        let msg = checkpoint_qc_signing_hash(1, height, state_root);
+        assert!(
+            bls_verify_aggregate_same_msg(&agg_sig, &agg_pk, &msg).unwrap(),
+            "测试前提：伪造聚合签名本身密码学合法（攻击者可自造）"
+        );
+        let forged_qc = CheckpointQc {
+            epoch: 1,
+            height,
+            state_root,
+            proposer_g2: Vec::new(),
+            agg_signature_g1: agg_sig.to_vec(),
+            signer_pubkeys_g2: pks.iter().map(|p| p.to_vec()).collect(),
+            threshold: None,
+        };
+        let err2 = forged_qc.verify_against_signers(&allowed, 7).unwrap_err();
+        assert!(
+            err2.to_string().contains("非成员"),
+            "非成员聚合 QC（正确签名）必须被成员资格校验拒绝: {err2:?}"
+        );
+        assert!(
+            forged_qc.verify(7).is_ok(),
+            "对照：无成员资格的旧口径 verify 会放过该伪造（修复动机）"
+        );
+        // verify_any 聚合分支同样拒
+        assert!(forged_qc.verify_any(&allowed, 7, None).is_err());
+
+        // (b) 合法成员 QC：5 把成员键 → form/verify_against_signers 均通过
+        let member_votes: Vec<CheckpointVote> = [0xD0u8, 0xD1, 0xD2, 0xD3, 0xD4]
+            .iter()
+            .map(|&s| CheckpointVote::sign(1, height, state_root, &bls_key(s)).unwrap())
+            .collect();
+        let qc = CheckpointQc::form_from_votes(&member_votes, &allowed, 7)
+            .expect("成员键 QC 必须成立");
+        qc.verify_against_signers(&allowed, 7).unwrap();
+        qc.verify_any(&allowed, 7, None).unwrap();
+
+        // (c) 混合（4 成员 + 1 非成员）→ 拒（每一项都必须 ∈ 注册表）
+        let mut mixed = member_votes.clone();
+        mixed.push(forged_votes[0].clone());
+        let err3 = CheckpointQc::form_from_votes(&mixed, &allowed, 7).unwrap_err();
+        assert!(err3.to_string().contains("非成员"), "混入非成员必须拒: {err3:?}");
+
+        // (d) 注册表为空 → fail-closed 拒（未声明任何允许签名者）
+        let empty = allowed_from_seeds(&[]);
+        let err4 = CheckpointQc::form_from_votes(&member_votes, &empty, 7).unwrap_err();
+        assert!(err4.to_string().contains("注册表为空"), "空注册表必须拒: {err4:?}");
+        assert!(qc.verify_against_signers(&empty, 7).is_err());
     }
 
     #[test]
@@ -1419,7 +1620,7 @@ mod tests {
         let votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(1, 64, [6u8; 32], &bls_key(0xA1 + i as u8)).unwrap())
             .collect();
-        let qc = CheckpointQc::form_from_votes(&votes, 7).unwrap();
+        let qc = CheckpointQc::form_from_votes(&votes, &allowed_from_seeds(&[0xA1, 0xA2, 0xA3, 0xA4, 0xA5]), 7).unwrap();
         let qjson = serde_json::to_string(&qc).unwrap();
         let qback: CheckpointQc = serde_json::from_str(&qjson).unwrap();
         assert_eq!(qc, qback);
@@ -1484,7 +1685,8 @@ mod tests {
         assert!(qc.proposer_g2.is_empty() && qc.signer_pubkeys_g2.is_empty());
         // 单配对验证通过（对组公钥）
         qc.verify_threshold(&keyset).expect("阈值 QC 必须通过组公钥验证");
-        qc.verify_any(7, Some(&keyset)).expect("双形态分派：阈值形态走 keyset 验证");
+        qc.verify_any(&allowed_from_seeds(&[]), 7, Some(&keyset))
+            .expect("双形态分派：阈值形态走 keyset 验证（成员资格由 digest 绑定）");
         // 篡改聚合签名 → 拒
         let mut tampered = qc.clone();
         tampered.threshold.as_mut().unwrap().sig_g1[0] ^= 0x01;
@@ -1552,14 +1754,17 @@ mod tests {
         let (keyset, shares) = run_dkg(7, 5, 0x74);
         let (epoch, height, root) = (2u64, 64u64, [0x84u8; 32]);
         // 聚合形态（既有路径，threshold = None）
+        let allowed = allowed_from_seeds(&[0xB0, 0xB1, 0xB2, 0xB3, 0xB4]);
         let votes: Vec<CheckpointVote> = (0..5)
             .map(|i| CheckpointVote::sign(epoch, height, root, &bls_key(0xB0 + i as u8)).unwrap())
             .collect();
-        let agg_qc = CheckpointQc::form_from_votes(&votes, 7).unwrap();
+        let agg_qc = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap();
         assert!(agg_qc.threshold.is_none());
         agg_qc.verify(7).unwrap();
-        agg_qc.verify_any(7, None).expect("聚合形态无 keyset 亦可验（零回退）");
-        agg_qc.verify_any(7, Some(&keyset)).unwrap();
+        agg_qc
+            .verify_any(&allowed, 7, None)
+            .expect("聚合形态无 keyset 亦可验（零回退；成员资格对注册表）");
+        agg_qc.verify_any(&allowed, 7, Some(&keyset)).unwrap();
         // 聚合 QC JSON 不含 threshold 键（格式不变）且可解析
         let agg_json = serde_json::to_string(&agg_qc).unwrap();
         assert!(!agg_json.contains("threshold"), "聚合形态 JSON 格式必须不变");
@@ -1581,9 +1786,9 @@ mod tests {
         assert!(t_json.contains("\"threshold\""));
         let t_back: CheckpointQc = serde_json::from_str(&t_json).unwrap();
         assert_eq!(t_qc, t_back, "阈值 QC JSON 往返必须一致（落盘/恢复）");
-        t_back.verify_any(7, Some(&keyset)).unwrap();
+        t_back.verify_any(&allowed_from_seeds(&[]), 7, Some(&keyset)).unwrap();
         // 无 keyset 验阈值 QC → fail-closed 拒
-        assert!(t_qc.verify_any(7, None).is_err());
+        assert!(t_qc.verify_any(&allowed_from_seeds(&[]), 7, None).is_err());
         // 聚合路径（verify）验阈值形态 QC → 拒（聚合集为空）
         assert!(t_qc.verify(7).is_err());
         // 聚合形态走 verify_threshold → 拒（形态不符）
@@ -1608,10 +1813,11 @@ mod tests {
             .collect();
 
         const ITERS: u32 = 20;
+        let allowed = allowed_from_seeds(&[0xC0, 0xC1, 0xC2, 0xC3, 0xC4]);
         // ---- 收集面 ----
         let start = std::time::Instant::now();
         for _ in 0..ITERS {
-            let _qc = CheckpointQc::form_from_votes(&votes, 7).unwrap();
+            let _qc = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap();
         }
         let agg_form_us = start.elapsed().as_micros() as f64 / ITERS as f64;
         let start = std::time::Instant::now();
@@ -1621,7 +1827,7 @@ mod tests {
         let thr_form_us = start.elapsed().as_micros() as f64 / ITERS as f64;
 
         // ---- 独立重验面 ----
-        let agg_qc = CheckpointQc::form_from_votes(&votes, 7).unwrap();
+        let agg_qc = CheckpointQc::form_from_votes(&votes, &allowed, 7).unwrap();
         let thr_qc = CheckpointQc::form_threshold_from_partials(&ps, &keyset).unwrap();
         // 聚合完整重验：逐票单配对（n 次）+ 聚合配对（1 次）
         let start = std::time::Instant::now();

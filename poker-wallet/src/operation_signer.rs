@@ -136,6 +136,9 @@ pub enum SigningRequest {
         input: [u8; 32],
         /// 提现幂等键。
         request_id: [u8; 32],
+        /// 外部收款地址（32B；**进 op 载荷与效果摘要**——P1 修复：收款人被
+        /// owner 签名绑定，链与托管侧均不可偷换）。
+        payout_recipient: [u8; 32],
         /// 展示用 vault 收款目标（地址串；仅入预览，不入账本摘要）。
         vault_target: String,
     },
@@ -777,12 +780,13 @@ impl<'a> Signer<'a> {
                 let notes: Vec<Note> = recs.iter().map(|r| r.note.clone()).collect();
                 Ok(Operation::BuyIn { table_id: *table_id, spends, notes, seat_owner: *seat_owner })
             }
-            SigningRequest::Withdraw { asset_class, input, request_id, .. } => {
+            SigningRequest::Withdraw { asset_class, input, request_id, payout_recipient, .. } => {
                 let rec = self.resolve_any(*asset_class, input)?;
                 if !rec.spendable() {
                     return Err(WalletError::InvalidArgument("note already spent or seated"));
                 }
                 let note = rec.note.clone();
+                // P1：收款人进效果摘要 → 进 spend 签名（链侧换地址必 BadSignature）
                 let effect = Operation::WithdrawRequest {
                     spend: SpendAuth {
                         commitment: [0; 32],
@@ -791,10 +795,16 @@ impl<'a> Signer<'a> {
                     },
                     note: note.clone(),
                     request_id: *request_id,
+                    payout_recipient: *payout_recipient,
                 }
                 .effect_digest();
                 let spend = make_spend(key, rec.spend_secret.expose(), &note, op_scope::WITHDRAW, &effect);
-                Ok(Operation::WithdrawRequest { spend, note, request_id: *request_id })
+                Ok(Operation::WithdrawRequest {
+                    spend,
+                    note,
+                    request_id: *request_id,
+                    payout_recipient: *payout_recipient,
+                })
             }
             SigningRequest::Settle { record, .. } => {
                 let scope = settle_spend_scope(&record.hand_binding);
@@ -883,8 +893,9 @@ pub fn preview_digest(
         SigningRequest::BuyIn { inputs, seat_owner, asset_class, .. } => {
             borsh::to_vec(&(inputs, seat_owner, asset_class.as_u8())).unwrap_or_default()
         }
-        SigningRequest::Withdraw { input, request_id, asset_class, vault_target, .. } => {
-            borsh::to_vec(&(input, request_id, asset_class.as_u8(), vault_target)).unwrap_or_default()
+        SigningRequest::Withdraw { input, request_id, asset_class, payout_recipient, vault_target, .. } => {
+            borsh::to_vec(&(input, request_id, asset_class.as_u8(), payout_recipient, vault_target))
+                .unwrap_or_default()
         }
         SigningRequest::Settle { record, policy, .. } => {
             borsh::to_vec(&(record, policy)).unwrap_or_default()

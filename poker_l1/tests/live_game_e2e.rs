@@ -250,7 +250,7 @@ fn decode_onchain_table(
 #[test]
 fn live_node_poker_hand_e2e() {
     // ===== 1. 节点与参与者 =====
-    let validator = Actor::new(0xF0, 0xE0);
+    let mut validator = Actor::new(0xF0, 0xE0);
     let mut host = Actor::new(0x01, 0xB1); // 建桌者
     let mut alice = Actor::new(0x02, 0xB2);
     let mut bob = Actor::new(0x03, 0xB3);
@@ -275,14 +275,17 @@ fn live_node_poker_hand_e2e() {
     let mut chain: [Hash; 2] = [[0u8; 32]; 2]; // [prev_block_hash, prev_cert_signing_hash]
 
     // ===== 2. genesis 铸币 =====
+    // validator 也在分配表中：账户需存在才能发 Public tx（nonce 校验）；
+    // 且 genesis 会预建 CairoFactRegistry（creator = 首 validator，审计 P2）。
     let funded = node
         .apply_genesis_alloc(vec![
+            (validator.tagged.clone(), 1_000_000),
             (host.tagged.clone(), 1_000_000),
             (alice.tagged.clone(), 1_000_000),
             (bob.tagged.clone(), 1_000_000),
         ])
         .expect("genesis alloc");
-    assert_eq!(funded, 3);
+    assert_eq!(funded, 4);
     let host_coin = host.coin_id(DEFAULT_CHAIN_ID);
     let alice_coin = alice.coin_id(DEFAULT_CHAIN_ID);
     let bob_coin = bob.coin_id(DEFAULT_CHAIN_ID);
@@ -541,20 +544,30 @@ fn live_node_poker_hand_e2e() {
         "/Users/mac/projects/poker_texas_air/proving-tool/output/settlement/proof.json";
     let pinned = hex_to_32("0x744d16d382e7940b7b93c0a069ab0df04704c5b28d6476d23cca6c2370a7ad4");
 
-    // [10.1] 钉扎程序哈希（creator = host，对标 set_circuit_program_hash）
+    // [10.0] genesis 预建断言（审计 P2 creator 抢跑修复）：注册表对象在
+    //        apply_genesis_alloc 时已种入，creator 钉扎为首 validator 地址
+    let reg_pre = decode_cairo_registry(&node);
+    assert_eq!(
+        reg_pre.creator, validator.address,
+        "creator 必须经 genesis 预建钉扎为首 validator（防保留 ID 抢跑）"
+    );
+    assert!(reg_pre.facts.is_empty());
+
+    // [10.1] 钉扎程序哈希（creator = 首 validator：genesis 预建钉扎，
+    //        审计 P2 creator 抢跑修复——非 creator 调用会被合约拒绝）
     let args = borsh::to_vec(&poker_l1::vm::contracts::cairo_fact_registry::SetProgramHashArgs {
         program_hash: pinned,
     })
     .unwrap();
     let tx = contract_call_tx_to(
-        &mut host,
+        &mut validator,
         CAIRO_REGISTRY_ID,
         poker_l1::vm::contracts::cairo_fact_registry::selectors::set_program_hash(),
         args,
         vec![],
     );
     commit_block(&node, &validator, &mut chain, vec![tx]);
-    println!("[10] set_program_hash(0x744d16d3…) 落块 ✓");
+    println!("[10] set_program_hash(0x744d16d3…) 落块 ✓（creator = 首 validator，genesis 预建）");
 
     // [10.2] 证明二进制 wire（bzip2+bincode ≈1MB）按 60KB 分块，单一 caller
     //        （alice）上传——finalize 按 caller 分组重组，混传会拆散字节流

@@ -215,11 +215,14 @@ proptest! {
                     }
                 }
                 4 => {
-                    // withdraw：销毁 owner 的 balance note（consume 路径）
+                    // withdraw：销毁 owner 的 balance note（consume 路径）；
+                    // P1：收款人进效果摘要（确定性派生自 d，测试内取任意值）
                     let note = oracle_balance_note(seq.state(), &owner.pk(), d);
                     note.map(|note| {
                         request_seq += 1;
                         let request_id = id32(request_seq);
+                        let mut payout_recipient = [0u8; 32];
+                        payout_recipient[..4].copy_from_slice(&d.to_be_bytes()[4..]);
                         let effect = Operation::WithdrawRequest {
                             spend: SpendAuth {
                                 commitment: [0; 32],
@@ -228,12 +231,14 @@ proptest! {
                             },
                             note: note.clone(),
                             request_id,
+                            payout_recipient,
                         }
                         .effect_digest();
                         Operation::WithdrawRequest {
                             spend: owner.auth(&note, scope::WITHDRAW, &effect),
                             note,
                             request_id,
+                            payout_recipient,
                         }
                     })
                 }

@@ -26,7 +26,7 @@
 [2026-09-15T19:25:47.091Z] PASS: M3 锁定 → 错口令解锁拒绝（fail-closed）
 [2026-09-15T19:25:47.297Z] PASS: M4 正确口令解锁恢复
 [2026-09-15T19:25:47.502Z] PASS: M5 锁定时 prepareTx → SessionInvalid（SW 守卫） — {"error":{"code":"SessionInvalid","reason":"先解锁"}}
-[2026-09-15T19:25:47.959Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0x00dda75bb23ffe9f66634387b55c86ee6b32f0dde92ffef3b45754d9998c3228"}
+[2026-09-15T19:25:47.959Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0xREDACTED-test-key"}
 [2026-09-15T19:25:48.166Z] PASS: M6b 删除当前账户 → 回到创建视图
 [2026-09-15T19:25:48.371Z] PASS: M6 私钥再导入 → 同一 EIP-55 地址 — 0x1514093519A9… vs 0x1514093519A9…
 [2026-09-15T19:25:48.830Z] PASS: M7 非法私钥导入拒绝（InvalidArgument）

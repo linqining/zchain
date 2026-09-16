@@ -8,7 +8,13 @@
 //!
 //! RocksDB 列族：
 //! - `blocks`：key = `block_hash`（32 字节） → value = `BCS(Block)`
-//! - `height_index`：key = `height_le`（8 字节 LE） → value = `block_hash`（32 字节）
+//! - `height_index`：key = `height_be`（8 字节 **big-endian**，数值序 = 字节序）
+//!   → value = `block_hash`（32 字节）
+//!
+//! 历史迁移（P2 审计修复 2026-09）：commit 993029c 之前高度键为 LE 编码，
+//! 现由 [`BlockStore::open`] 启动时清扫存量 LE 键并校验/重建索引（见
+//! `migrate_height_index_le_to_be`），原地升级节点的 tip/range 查询不再被
+//! 旧键污染。
 
 use std::path::Path;
 use std::sync::Arc;
@@ -51,10 +57,14 @@ impl BlockStore {
         let db = DB::open_cf_descriptors(&db_opts, path, vec![blocks_cf, height_cf])
             .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
 
-        Ok(Self {
+        let store = Self {
             db: Arc::new(db),
             write_lock: std::sync::Mutex::new(()),
-        })
+        };
+        // P2 审计修复 2026-09：清扫 legacy LE 高度键并校验索引一致性
+        //（新库为无操作；仅持久化路径有历史数据，临时目录天然干净）。
+        store.migrate_height_index_le_to_be()?;
+        Ok(store)
     }
 
     /// 打开一个临时目录下的 BlockStore（用于测试 / 开发）。
@@ -82,6 +92,170 @@ impl BlockStore {
         self.db
             .cf_handle(HEIGHT_INDEX_CF)
             .expect("height_index CF 必须存在（由 open 创建）")
+    }
+
+    /// height_index LE→BE 一次性迁移（P2 审计修复 2026-09），`open` 时执行。
+    ///
+    /// commit 993029c 之前高度键为 `to_le_bytes()`：legacy LE 键中高度 ≥ 256
+    /// 的首字节非零，字节序排在**所有** BE 键之后，`get_tip_height`（End
+    /// 迭代）与 `get_range`（字节序比较）从此被永久污染。规则：
+    ///
+    /// - `len != 8` 的键 → 删除；
+    /// - 前 4 字节非零的键 → 不是规范 BE 键（现实高度 < 2^32，BE 键前 4 字节
+    ///   必为 0）→ 按 legacy LE 键处理：就地把 `LE(h)→hash` 转写为
+    ///   `BE(h)→hash`（该高度已有 BE 键时 BE 胜出，LE 键直接删除）。
+    ///   唯一自碰撞是 `LE(0) == BE(0)`（全零），无需特判；
+    /// - 值长度 ≠ 32 / 同一高度多个 hash / 条目指向缺失或高度不符的 block /
+    ///   索引条目数 ≠ blocks 数 → 数据不可信：**整体重建**——清空
+    ///   height_index，从 `blocks` CF（唯一权威）按 `header.height` 全量
+    ///   重索引。fail-closed：宁可重建也不返回可疑 tip。
+    ///
+    /// 干净库（无 legacy 痕迹且计数一致）零写入返回；启动成本为两个 CF 的
+    /// 顺序迭代（devnet 规模可忽略）。
+    fn migrate_height_index_le_to_be(&self) -> PokerL1Result<()> {
+        let mut to_delete: Vec<Vec<u8>> = Vec::new();
+        // 就地转写的 (height, hash)
+        let mut converted: Vec<(BlockHeight, Hash)> = Vec::new();
+        let mut canonical: Vec<(BlockHeight, Hash)> = Vec::new();
+        // legacy LE 条目：(LE 解码高度, hash, 原始键)
+        let mut legacy: Vec<(BlockHeight, Hash, [u8; 8])> = Vec::new();
+        let mut needs_rebuild = false;
+        let mut saw_trace = false;
+
+        for item in self.db.iterator_cf(self.height_cf(), IteratorMode::Start) {
+            let (key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+            if key.len() != 8 {
+                saw_trace = true;
+                to_delete.push(key.to_vec());
+                continue;
+            }
+            let bytes: [u8; 8] = key.as_ref().try_into().expect("length checked above");
+            let value_ok = value.len() == 32;
+            let mut hash = [0u8; 32];
+            if value_ok {
+                hash.copy_from_slice(&value);
+            }
+            if bytes[0..4] != [0u8, 0, 0, 0] {
+                // 非 BE 形态：legacy LE 键（或不现实高度的 BE 键，随 legacy 一并转写/淘汰）
+                saw_trace = true;
+                if value_ok {
+                    legacy.push((u64::from_le_bytes(bytes), hash, bytes));
+                } else {
+                    needs_rebuild = true;
+                }
+            } else if value_ok {
+                canonical.push((u64::from_be_bytes(bytes), hash));
+            } else {
+                saw_trace = true;
+                needs_rebuild = true;
+            }
+        }
+
+        canonical.sort_unstable_by_key(|(height, _)| *height);
+        if canonical.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            needs_rebuild = true;
+        }
+
+        // legacy LE 键就地转写：该高度无 BE 键时转写为 BE，且必须指向
+        // 真实存在、高度一致的 block；任何失联即整体重建。
+        if !needs_rebuild {
+            for (height, hash, raw_key) in legacy {
+                if canonical.binary_search_by_key(&height, |(h, _)| *h).is_ok() {
+                    // 同高度已有 BE 键：新代码的冲突检查只看 BE 键，BE 胜出
+                    to_delete.push(raw_key.to_vec());
+                    continue;
+                }
+                match self.db.get_cf(self.blocks_cf(), hash) {
+                    Ok(Some(block_bytes)) => {
+                        let block: Block = borsh::from_slice(&block_bytes)?;
+                        if block.header.height != height {
+                            needs_rebuild = true;
+                            break;
+                        }
+                        to_delete.push(raw_key.to_vec());
+                        converted.push((height, hash));
+                    }
+                    Ok(None) => {
+                        needs_rebuild = true;
+                        break;
+                    }
+                    Err(e) => return Err(PokerL1Error::Rocksdb(e.to_string())),
+                }
+            }
+        }
+
+        // 干净库快路径：无任何痕迹且索引条目数 == blocks 数
+        if !needs_rebuild && !saw_trace {
+            if canonical.len() == self.len()? {
+                return Ok(());
+            }
+            needs_rebuild = true; // 无 legacy 痕迹但计数失配（如索引被外部清空）
+        }
+
+        // 有迁移痕迹：对保留的 BE 条目做一次性深度校验（悬空引用检测）
+        if !needs_rebuild {
+            for (_, hash) in &canonical {
+                match self.db.get_cf(self.blocks_cf(), hash) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        needs_rebuild = true;
+                        break;
+                    }
+                    Err(e) => return Err(PokerL1Error::Rocksdb(e.to_string())),
+                }
+            }
+            if !needs_rebuild && canonical.len() + converted.len() != self.len()? {
+                needs_rebuild = true; // 存在无索引对应的 block
+            }
+        }
+
+        let mut batch = WriteBatch::default();
+        if needs_rebuild {
+            tracing::warn!(
+                "height_index 检测到不可信状态：清空并从 blocks CF 全量重建（P2 审计修复 2026-09：LE→BE 迁移）"
+            );
+            let mut wipe_keys: Vec<Vec<u8>> = Vec::new();
+            for item in self.db.iterator_cf(self.height_cf(), IteratorMode::Start) {
+                let (key, _) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+                wipe_keys.push(key.to_vec());
+            }
+            for key in &wipe_keys {
+                batch.delete_cf(self.height_cf(), key);
+            }
+            for item in self.db.iterator_cf(self.blocks_cf(), IteratorMode::Start) {
+                let (key, value) = item.map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+                if key.len() != 32 {
+                    tracing::warn!(
+                        "blocks CF 存在 {} 字节的非法键，重建索引时跳过",
+                        key.len()
+                    );
+                    continue;
+                }
+                // fail-closed：坏块直接报错，宁可启动失败也不带病运行
+                let block: Block = borsh::from_slice(&value)?;
+                batch.put_cf(self.height_cf(), block.header.height.to_be_bytes(), key.as_ref());
+            }
+        } else {
+            for key in &to_delete {
+                batch.delete_cf(self.height_cf(), key);
+            }
+            for (height, hash) in &converted {
+                batch.put_cf(self.height_cf(), height.to_be_bytes(), hash);
+            }
+            if !batch.is_empty() {
+                tracing::warn!(
+                    deleted = to_delete.len(),
+                    converted = converted.len(),
+                    "height_index LE→BE 迁移完成（P2 审计修复 2026-09）"
+                );
+            }
+        }
+        if !batch.is_empty() {
+            self.db
+                .write(batch)
+                .map_err(|e| PokerL1Error::Rocksdb(e.to_string()))?;
+        }
+        Ok(())
     }
 
     /// 写入区块。原子地写入 `blocks` 与 `height_index`（WriteBatch）。
@@ -268,8 +442,8 @@ impl BlockStore {
     /// 返回 `[start, end]` 闭区间内所有区块，按 height 升序排列。
     /// 若某 height 不存在则跳过（不报错）；空范围返回空 Vec。
     ///
-    /// 实现：以 `IteratorMode::From(start_le, Forward)` 正向遍历 `height_index`，
-    /// 直到 key > end_le 停止。
+    /// 实现：以 `IteratorMode::From(start_be, Forward)` 正向遍历 `height_index`，
+    /// 直到 key > end_be 停止。
     pub fn get_range(&self, start: BlockHeight, end: BlockHeight) -> PokerL1Result<Vec<Block>> {
         if start > end {
             return Ok(Vec::new());
@@ -688,5 +862,166 @@ mod tests {
         let pruned = store.prune_old_blocks(10).unwrap();
         assert_eq!(pruned, 0);
         assert_eq!(store.len().unwrap(), 3);
+    }
+
+    // ============================================================
+    // P2 审计修复 2026-09：height_index LE→BE 启动迁移
+    // ============================================================
+
+    /// 直接向 height_index 写原始键（绕过 put，模拟旧版本二进制写下的数据）。
+    fn raw_put_height_entry(store: &BlockStore, key: &[u8], hash: [u8; 32]) {
+        let mut batch = WriteBatch::default();
+        batch.put_cf(store.height_cf(), key, hash);
+        store.db.write(batch).unwrap();
+    }
+
+    /// 直接向 blocks CF 写块（不带索引），模拟旧版本二进制存下的块数据。
+    fn raw_put_block(store: &BlockStore, block: &Block, chain_id: ChainId) -> Hash {
+        let hash = block.block_hash(chain_id);
+        let mut batch = WriteBatch::default();
+        batch.put_cf(store.blocks_cf(), hash, borsh::to_vec(block).unwrap());
+        store.db.write(batch).unwrap();
+        hash
+    }
+
+    /// 场景一（就地转写）：BE 规范链 + legacy LE 键指向真实块（含 300 这类
+    /// LE 首字节非零、字节序排在全部 BE 键之后的"隐形毒键"）+ 非法长度键。
+    /// 重开后 LE 键被转写为 BE，非法键删除，tip/range 恢复正确。
+    #[test]
+    fn height_index_legacy_le_keys_migrated_in_place_on_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        // 规范链：height 0..=5（BE 键）
+        let mut prev = [0u8; 32];
+        {
+            let store = BlockStore::open(dir.path()).unwrap();
+            for h in 0..=5u64 {
+                let b = dummy_block(h, prev);
+                prev = b.header.block_hash(chain_id);
+                store.put(&b, chain_id).unwrap();
+            }
+            // 旧版本节点写下的块 + LE 索引键：height 10 与 300
+            let b10 = dummy_block(10, prev);
+            let h10 = raw_put_block(&store, &b10, chain_id);
+            let b300 = dummy_block(300, h10);
+            let h300 = raw_put_block(&store, &b300, chain_id);
+            raw_put_height_entry(&store, &10u64.to_le_bytes(), h10);
+            raw_put_height_entry(&store, &300u64.to_le_bytes(), h300);
+            // 非法长度键
+            raw_put_height_entry(&store, &[0u8; 7], h10);
+            // 注入后（未迁移）：tip 被 LE(300) 污染——LE(300) 首字节 0x2C 非零，
+            // 字节序排在全部 BE 键之后，以 BE 解读为天文数字
+            let poisoned_tip = store.get_tip_height().unwrap().unwrap();
+            assert_eq!(
+                poisoned_tip,
+                u64::from_be_bytes(300u64.to_le_bytes()),
+                "LE 键未迁移时以 BE 解读出错误 tip（复现审计缺陷）"
+            );
+        }
+        // 重开 → 迁移：LE(10)/LE(300) 转写为 BE，非法键删除
+        let store = BlockStore::open(dir.path()).unwrap();
+        assert_eq!(store.get_tip_height().unwrap(), Some(300), "tip 必须恢复为真实最高高度");
+        assert_eq!(store.len().unwrap(), 8);
+        let range = store.get_range(0, 300).unwrap();
+        assert_eq!(range.len(), 8, "range 覆盖全部块（0..5 + 10 + 300）");
+        assert_eq!(range[6].header.height, 10);
+        assert_eq!(range[7].header.height, 300);
+        assert_eq!(store.get_by_height(10).unwrap().header.height, 10);
+        assert_eq!(store.get_by_height(300).unwrap().header.height, 300);
+    }
+
+    /// 场景二（整体重建）：索引含悬空引用（BE/LE 形态键指向不存在的块）时，
+    /// 迁移清空索引并从 blocks CF 全量重建，恢复一致视图。
+    #[test]
+    fn height_index_rebuilt_from_blocks_when_index_untrusted() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let mut prev = [0u8; 32];
+        {
+            let store = BlockStore::open(dir.path()).unwrap();
+            for h in 0..=4u64 {
+                let b = dummy_block(h, prev);
+                prev = b.header.block_hash(chain_id);
+                store.put(&b, chain_id).unwrap();
+            }
+            // 悬空 BE 键：高度 9 指向不存在的块
+            raw_put_height_entry(&store, &9u64.to_be_bytes(), [0xEE; 32]);
+            // 悬空 LE 键：高度 777 指向不存在的块
+            raw_put_height_entry(&store, &777u64.to_le_bytes(), [0xDD; 32]);
+        }
+        // 重开 → 检测到不可信 → 从 blocks CF 重建
+        let store = BlockStore::open(dir.path()).unwrap();
+        assert_eq!(store.get_tip_height().unwrap(), Some(4), "重建后 tip 恢复");
+        assert_eq!(store.len().unwrap(), 5);
+        assert_eq!(store.get_range(0, 100).unwrap().len(), 5);
+        assert!(store.get_by_hash(&[0xEE; 32]).is_err());
+        assert!(store.get_by_hash(&[0xDD; 32]).is_err());
+        for h in 0..=4u64 {
+            assert_eq!(store.get_by_height(h).unwrap().header.height, h);
+        }
+    }
+
+    /// 场景三（BE 胜出）：legacy LE 键与规范 BE 键绑定同一高度但不同 hash
+    /// 时，保留 BE 键（新代码 put 的冲突检查只看 BE 键），LE 键删除。
+    #[test]
+    fn height_index_be_key_wins_over_conflicting_legacy_le_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        let block = dummy_block(3, [0u8; 32]);
+        let conflict = dummy_block(8, [0u8; 32]);
+        let (real_hash, conflict_hash) = {
+            let store = BlockStore::open(dir.path()).unwrap();
+            let h3 = store.put(&block, chain_id).unwrap();
+            let h8 = store.put(&conflict, chain_id).unwrap();
+            // 旧链分叉残留：LE(3) 指向另一高度的块；BE(3) 已存在 → BE 胜出
+            raw_put_height_entry(&store, &3u64.to_le_bytes(), h8);
+            (h3, h8)
+        };
+        let store = BlockStore::open(dir.path()).unwrap();
+        assert_eq!(store.get_tip_height().unwrap(), Some(8));
+        assert_eq!(
+            store.get_by_height(3).unwrap().block_hash(chain_id),
+            real_hash,
+            "BE 键胜出：高度 3 仍指向规范块"
+        );
+        assert_ne!(
+            store.get_by_height(3).unwrap().block_hash(chain_id),
+            conflict_hash
+        );
+        assert_eq!(store.len().unwrap(), 2);
+        // height_index 中仅剩规范 BE 键（3 与 8），LE(3) 已删除
+        let mut keys = Vec::new();
+        for item in store.db.iterator_cf(store.height_cf(), IteratorMode::Start) {
+            let (key, _) = item.unwrap();
+            keys.push(key.to_vec());
+        }
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![3u64.to_be_bytes().to_vec(), 8u64.to_be_bytes().to_vec()],
+            "仅保留规范 BE 键"
+        );
+    }
+
+    /// 场景四（幂等/零开销）：干净库重复重开不做任何写、行为不变。
+    #[test]
+    fn height_index_migration_idempotent_on_clean_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let chain_id = crate::DEFAULT_CHAIN_ID;
+        {
+            let store = BlockStore::open(dir.path()).unwrap();
+            let mut prev = [0u8; 32];
+            for h in 0..=3u64 {
+                let b = dummy_block(h, prev);
+                prev = b.header.block_hash(chain_id);
+                store.put(&b, chain_id).unwrap();
+            }
+        }
+        for _ in 0..3 {
+            let store = BlockStore::open(dir.path()).unwrap();
+            assert_eq!(store.get_tip_height().unwrap(), Some(3));
+            assert_eq!(store.len().unwrap(), 4);
+            assert_eq!(store.get_range(0, 3).unwrap().len(), 4);
+        }
     }
 }

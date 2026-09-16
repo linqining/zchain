@@ -65,6 +65,7 @@ fn make_vertex_with_txs(
         author_pubkey: author,
         tx_list,
         parent_hashes: parents,
+        forced_tx_hashes: vec![],
         author_sig: vec![0u8; 65],
     }
 }

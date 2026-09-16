@@ -547,6 +547,155 @@ fn p0_2_gross_pot_bound_to_terminal_state_image() {
     ));
 }
 
+// ===== 审计 P2：no-WAL 模式变更前预检（拒绝必须零状态变更）=====
+//
+// 背景：无 WAL 的内存模式 apply 直接落 `self.state`（无克隆态回滚），
+// 旧路径「先变更、后在 fallible 调用上失败」会留下半变更状态（note 已
+// 删 / 幂等键已烧 / burn 未记账）。以下负例钉死：拒绝路径零状态变更。
+
+/// 构造对**任意声明 nullifier** 完整签名的 v1 提现 op（nullifier 只需被
+/// 签名覆盖，链上不做派生核对——正是双花投毒的攻击面）。
+fn withdraw_with_nullifier(
+    user: &TestUser,
+    note: &Note,
+    request_id: [u8; 32],
+    nullifier: [u8; 32],
+) -> Operation {
+    use poker_appchain::keys::{spend_digest, EcdsaSig};
+    use poker_appchain::settlement::SpendAuth;
+    let effect = Operation::WithdrawRequest {
+        spend: SpendAuth {
+            commitment: [0; 32],
+            nullifier: [0; 32],
+            sig: EcdsaSig { bytes: [0; 64] },
+        },
+        note: note.clone(),
+        request_id,
+        payout_recipient: [0xEE; 32],
+    }
+    .effect_digest();
+    let d = spend_digest(&note.commitment_bytes(), &nullifier, scope::WITHDRAW, &effect);
+    Operation::WithdrawRequest {
+        spend: SpendAuth {
+            commitment: note.commitment_bytes(),
+            nullifier,
+            sig: user.key.sign(&d),
+        },
+        note: note.clone(),
+        request_id,
+        payout_recipient: [0xEE; 32],
+    }
+}
+
+/// 双花 nullifier 的提现被整笔拒绝：第二张 note **不被删除**、request_id
+/// **不被烧**、burn 不记账（旧路径：withdrawal_ids.insert 后 consume 失败
+/// → note 已删 + 幂等键已烧的半变更状态）。
+#[test]
+fn withdraw_double_spend_rejected_without_partial_state() {
+    let mut seq = new_sequencer(); // 无 WAL：apply 直接落 self.state
+    let a = TestUser::new(1);
+    let n1 = deposit_and_find(&mut seq, &a, 100, AssetClass::Play, 1);
+    let n2 = deposit_and_find(&mut seq, &a, 200, AssetClass::Play, 2);
+
+    // 首笔：n1 正常销毁（声明 nullifier = n1 的派生 nullifier）
+    let nf1 = poker_appchain::felt::felt_to_bytes32(&n1.nullifier(&a.secret));
+    seq.submit(withdraw_with_nullifier(&a, &n1, [0x71; 32], nf1), 2_000)
+        .unwrap();
+
+    // 攻击形状：第二张 note n2 复用 nf1（签名覆盖即可，无需是 n2 的派生值）
+    let err = seq
+        .submit(withdraw_with_nullifier(&a, &n2, [0x72; 32], nf1), 2_100)
+        .unwrap_err();
+    assert!(matches!(err, poker_appchain::AppchainError::DoubleSpend));
+
+    // 零状态变更：note 仍在、request_id 未烧、burn 未记账
+    assert!(
+        seq.state().notes.contains_key(&n2.commitment_bytes()),
+        "拒绝的提现不得删除 note"
+    );
+    assert!(
+        !seq.state().withdrawal_ids.contains(&[0x72; 32]),
+        "拒绝的提现不得烧幂等键"
+    );
+    assert_eq!(seq.state().burned, vec![([0x71; 32], 100)]);
+    assert_eq!(seq.state().nullifiers.spent_count, 1);
+}
+
+/// 非规范 felt nullifier（≥ p）的提现在变更前被拒：note 仍在、幂等键未烧
+/// （旧路径：note 先删，felt_from_bytes32_exact 才失败）。
+#[test]
+fn withdraw_noncanonical_nullifier_rejected_without_partial_state() {
+    let mut seq = new_sequencer();
+    let a = TestUser::new(2);
+    let n = deposit_and_find(&mut seq, &a, 300, AssetClass::Play, 1);
+
+    let err = seq
+        .submit(withdraw_with_nullifier(&a, &n, [0x81; 32], [0xFF; 32]), 2_000)
+        .unwrap_err();
+    assert!(
+        matches!(err, poker_appchain::AppchainError::OutOfRange("felt bytes")),
+        "非规范 felt 必须在变更前拒绝，got {err:?}"
+    );
+    assert!(seq.state().notes.contains_key(&n.commitment_bytes()));
+    assert!(!seq.state().withdrawal_ids.contains(&[0x81; 32]));
+    assert!(seq.state().burned.is_empty());
+}
+
+/// 投毒转账（同 op 两笔 spend 声明同一 nullifier）整笔拒绝：两张 note
+/// 都不被删除（旧路径：第 1 张先被删、第 2 张才在 nullifier 步失败）。
+#[test]
+fn transfer_poisoned_double_nullifier_rejected_without_partial_state() {
+    let mut seq = new_sequencer();
+    let a = TestUser::new(3);
+    let n1 = deposit_and_find(&mut seq, &a, 100, AssetClass::Play, 1);
+    let n2 = deposit_and_find(&mut seq, &a, 200, AssetClass::Play, 2);
+    let nf1 = poker_appchain::felt::felt_to_bytes32(&n1.nullifier(&a.secret));
+
+    let outputs = vec![NoteSpec {
+        asset_class: AssetClass::Play,
+        amount: 300,
+        owner: a.pk(),
+        table_id: None,
+        pot_index: 0,
+        runout_index: 0,
+    }];
+    let effect = Operation::Transfer {
+        spends: vec![],
+        notes: vec![],
+        outputs: outputs.clone(),
+    }
+    .effect_digest();
+    let mk_spend = |n: &Note| {
+        use poker_appchain::keys::spend_digest;
+        use poker_appchain::settlement::SpendAuth;
+        let d = spend_digest(&n.commitment_bytes(), &nf1, scope::TRANSFER, &effect);
+        SpendAuth {
+            commitment: n.commitment_bytes(),
+            nullifier: nf1,
+            sig: a.key.sign(&d),
+        }
+    };
+    let err = seq
+        .submit(
+            Operation::Transfer {
+                spends: vec![mk_spend(&n1), mk_spend(&n2)],
+                notes: vec![n1.clone(), n2.clone()],
+                outputs,
+            },
+            2_000,
+        )
+        .unwrap_err();
+    assert!(matches!(err, poker_appchain::AppchainError::DoubleSpend));
+    // 两张 note 都存活（旧路径 n1 已被删除）
+    assert!(seq.state().notes.contains_key(&n1.commitment_bytes()));
+    assert!(seq.state().notes.contains_key(&n2.commitment_bytes()));
+    assert_eq!(
+        seq.state().balances_of(&a.pk()).1,
+        300,
+        "拒绝的转账不得改变余额"
+    );
+}
+
 // ===== 测试脚手架 =====
 
 /// 标准 setup：开 rake 桌 + 双方入金买入（未结算），返回待提交的合法结算

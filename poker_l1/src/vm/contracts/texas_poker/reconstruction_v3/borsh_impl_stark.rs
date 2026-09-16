@@ -84,8 +84,18 @@ fn write_scalar_vec<W: borsh::io::Write>(v: &[StarkScalar], w: &mut W) -> borsh:
 fn read_scalar_vec<R: borsh::io::Read>(r: &mut R) -> borsh::io::Result<Vec<StarkScalar>> {
     let mut len_bytes = [0u8; 4];
     r.read_exact(&mut len_bytes)?;
-    let len = u32::from_le_bytes(len_bytes) as usize;
-    let mut out = Vec::with_capacity(len);
+    let len = u32::from_le_bytes(len_bytes);
+    // 长度上限与 read_reconstruction_len 的 1..=MAX 纪律一致（P1 修复）：
+    // 无上限的 with_capacity 会被恶意长度字段驱动预分配
+    // 0xFFFFFFFF × 32B ≈ 137GB 直接 OOM；向量长度一致性校验在解码完成后
+    // 才执行，拦不住分配阶段的失败。
+    if len == 0 || len > MAX_RECONSTRUCTION_DECK_SIZE as u32 {
+        return Err(borsh::io::Error::new(
+            borsh::io::ErrorKind::InvalidData,
+            "invalid reconstruction vector length",
+        ));
+    }
+    let mut out = Vec::with_capacity(len as usize);
     for _ in 0..len {
         out.push(read_scalar(r)?);
     }

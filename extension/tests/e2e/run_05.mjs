@@ -493,7 +493,9 @@ async function main() {
       return null;
     })()`, 10_000);
     const key2 = key2Raw?.key ?? null;
-    record('M6a 导出私钥（锁定/解锁循环后仍可用）', !!key2, JSON.stringify(key2Raw ?? null));
+    // 私钥不入 result 工件：镜像 M2 的截断（前 12 hex + 省略号）。
+    record('M6a 导出私钥（锁定/解锁循环后仍可用）', !!key2,
+      JSON.stringify(key2Raw ? { key: String(key2Raw.key).slice(0, 12) + '…' } : null));
     await openDetails('evm-remove-details');
     g = await gen();
     await click('evm-remove-btn');

@@ -525,6 +525,12 @@ pub(crate) fn genesis_mint_with_system_objects(
                     )));
                 }
             }
+            // P2（审计 2026-09）creator 抢跑修复：mint 已关闭的重放路径同样
+            // 幂等补种缺失的 CairoFactRegistry 保留对象——原地升级链在升级后
+            // 首次重启时由此获得 genesis 预建（见下方首次铸币路径同名注释）。
+            if let Some(registry) = cairo_registry_seed(object_db, chain_id, &system_objects)? {
+                object_db.apply_batch(vec![ObjectMutation::Create(registry)])?;
+            }
             return Ok(0);
         }
         if cap.total_supply != 0 || cap.total_minted != 0 || cap.total_burned != 0 {
@@ -562,9 +568,20 @@ pub(crate) fn genesis_mint_with_system_objects(
     } else {
         ObjectMutation::SystemCreate(treasury_cap_object(cap, cap_version)?)
     };
+    // P2（审计 2026-09）creator 抢跑修复：genesis 预建保留的 CairoFactRegistry
+    // 对象，creator 钉扎为**首个 validator** 的地址（系统对象里的 validator
+    // set 首位）。保留 ID 公开，若无预建，首个 `set_program_hash`/chunk 提交
+    // 者即成为永久 creator（抢跑劫持 fact 桥）。仅在对象缺失时种入：幂等，
+    // 且不触碰既成状态（含旧链已惰性绑定的 creator——无法追溯改写）。
+    // 注意：与铸币同一原子批次提交；creator 推导自本批 system_objects
+    //（首启时 validator set 对象尚不在库中，必须取自切片而非 object_db）。
+    let registry_seed = cairo_registry_seed(object_db, chain_id, &system_objects)?;
     let mut mutations = Vec::with_capacity(canonical.len() + system_objects.len() + 1);
     mutations.push(cap_mutation);
     mutations.extend(system_objects.into_iter().map(ObjectMutation::SystemCreate));
+    if let Some(registry) = registry_seed {
+        mutations.push(ObjectMutation::Create(registry));
+    }
     for (owner, amount) in &canonical {
         mutations.push(ObjectMutation::Create(native_coin_object(
             *owner,
@@ -574,6 +591,38 @@ pub(crate) fn genesis_mint_with_system_objects(
     }
     object_db.apply_batch(mutations)?;
     Ok(canonical.len())
+}
+
+/// Build the genesis-time CairoFactRegistry seed object when the reserved registry
+/// object is still missing (P2 audit fix 2026-09: creator front-run).
+///
+/// The creator is pinned to the first validator's address, derived from the
+/// validator-set system object that the node bootstrap passes alongside the
+/// genesis mint. When no usable validator set is available (non-standard
+/// deployments / unit tests), no seed is produced and the contract-side lazy
+/// initialisation (with its front-run warning) remains the only path.
+fn cairo_registry_seed(
+    object_db: &ObjectDb,
+    chain_id: ChainId,
+    system_objects: &[Object],
+) -> PokerL1Result<Option<Object>> {
+    let registry_id = crate::vm::precompile::reserved::cairo_registry_contract_id();
+    match object_db.read(&registry_id) {
+        Ok(_) => return Ok(None),
+        Err(PokerL1Error::ObjectNotFound(_)) => {}
+        Err(error) => return Err(error),
+    }
+    let Some(creator) =
+        crate::vm::contracts::cairo_fact_registry::genesis_creator_from_system_objects(
+            chain_id,
+            system_objects,
+        )
+    else {
+        return Ok(None);
+    };
+    Ok(Some(crate::vm::contracts::cairo_fact_registry::genesis_registry_object(
+        creator,
+    )?))
 }
 
 /// Atomically destroy address-owned native coin UTXOs and reduce total supply.

@@ -78,6 +78,10 @@ pub fn load(
         // 网关只读：限流参数不影响重放（replay 不走在线准入）。
         ops_per_min: u32::MAX,
         open_table_per_min: u32::MAX,
+        // 必须与生产方（texas 嵌入式 runtime 的 sequencer_config）一致：
+        // replay 会重跑 BuyIn 的 max_seats 准入，生产方未入池 seat 在账本
+        // 累积后，网关若用默认 10 会在重放中途 "table full" 直接失败。
+        max_seats: 1000,
         ..SequencerConfig::default()
     };
     let mut seq = Sequencer::replay(

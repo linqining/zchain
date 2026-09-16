@@ -63,6 +63,46 @@ pub struct WithdrawalRequest {
     pub amount: u64,
 }
 
+impl WithdrawalRequest {
+    /// 受理载荷 ↔ 链上 op 一致性断言（审计 P1 修复配套，fail-closed）。
+    ///
+    /// `Operation::WithdrawRequest` 的效果摘要绑定 `payout_recipient` 并被
+    /// owner 签名覆盖——托管受理侧必须核对受理载荷的收款地址/幂等键/金额
+    /// 与签名 op 逐字段全等，否则操作方（或桥接环节）可在持签请求上偷换
+    /// 收款人。任何失配 → [`AppchainError::WithdrawalConflict`]；op 不是
+    /// v1 WithdrawRequest → [`AppchainError::AdmissionRejected`]。受理入口
+    /// 见 [`CustodyLedger::enqueue_withdrawal_for_op`]。
+    ///
+    /// # Errors
+    /// 载荷与 op 任何字段失配，或 op 变体不符。
+    pub fn ensure_matches_op(
+        &self,
+        op: &crate::ops::Operation,
+    ) -> AppchainResult<()> {
+        match op {
+            crate::ops::Operation::WithdrawRequest {
+                request_id,
+                note,
+                payout_recipient,
+                ..
+            } => {
+                if self.request_id != *request_id
+                    || self.payout_address != *payout_recipient
+                    || self.amount != note.amount
+                {
+                    return Err(AppchainError::WithdrawalConflict(
+                        "withdrawal request does not match the signed op".into(),
+                    ));
+                }
+                Ok(())
+            }
+            _ => Err(AppchainError::AdmissionRejected(
+                "op is not a v1 WithdrawRequest",
+            )),
+        }
+    }
+}
+
 /// 提现费配置（v1：固定 flat 费，覆盖外部 gas）。
 ///
 /// 默认 0 = 免费（完全向后兼容：不配置即维持既有零费语义）。费从被提现
@@ -143,7 +183,10 @@ impl PendingWithdrawal {
     /// （`Operation::WithdrawRequest.spend.commitment`）。**诚实降级**：v1
     /// 提现队列不逐条保留这两个字段（provenance 在受理时消费、不入账），
     /// 由调用方从 sequencer 的 WithdrawRequest op 记录取——队列字段化属
-    /// 后续；`checkpoint_height` 为目标窗口高度（checkpoint 集成属后续）。
+    /// 后续；`checkpoint_height` 为目标窗口高度（队列条目**不携带**自身
+    /// checkpoint 归属，见 [`CustodyLedger::pending_withdrawal_leaves`] 的
+    /// 边界文档——调用方必须传**正被 finalize 的窗口**高度，不得把未
+    /// finalize 窗口的高度折入已 finalized 的根）。
     #[must_use]
     pub fn into_leaf(
         self,
@@ -306,6 +349,30 @@ impl CustodyLedger {
         finality: FinalityEvidence,
     ) -> AppchainResult<&WithdrawalEntry> {
         let now_ms = wallclock_ms();
+        self.enqueue_withdrawal_at(request, provenance, finality, now_ms)
+    }
+
+    /// 提现入队（**op 绑定受理入口**，审计 P1 修复配套；注入时钟版本）。
+    ///
+    /// 闸门 0 = [`WithdrawalRequest::ensure_matches_op`]：受理载荷的收款
+    /// 地址/幂等键/金额必须与链上已受理的 v1 WithdrawRequest op（owner
+    /// 签名覆盖 `payout_recipient`）逐字段全等——fail-closed，账本不可能
+    /// 记入 owner 未签名的收款人。通过后语义与
+    /// [`CustodyLedger::enqueue_withdrawal_at`] 完全一致（finality 门/
+    /// 幂等/费用按原序复审）。
+    ///
+    /// # Errors
+    /// 载荷与 op 失配 → [`AppchainError::WithdrawalConflict`]；其余见
+    /// [`CustodyLedger::enqueue_withdrawal_at`]。
+    pub fn enqueue_withdrawal_for_op(
+        &mut self,
+        request: WithdrawalRequest,
+        op: &crate::ops::Operation,
+        provenance: WithdrawalProvenance,
+        finality: FinalityEvidence,
+        now_ms: u64,
+    ) -> AppchainResult<&WithdrawalEntry> {
+        request.ensure_matches_op(op)?;
         self.enqueue_withdrawal_at(request, provenance, finality, now_ms)
     }
 
@@ -523,14 +590,19 @@ impl CustodyLedger {
     ///
     /// 返回**全部**排队条目、按 `request_id` 字典序（BTreeMap 迭代序，聚合
     /// 确定性）；每条均在受理时过了 §5.4 finality 门（proven 水位 + 批次根）。
-    /// `finalized_below_height` 是调用方声明的"已 finalized 的 checkpoint 高度
-    /// 上界"：v1 队列不逐条记录 checkpoint 归属（checkpoint 携带
-    /// withdrawal_root 字段属后续集成，见 `withdrawal_root` 模块文档），故本
-    /// 查询不做逐条窗口过滤，由调用方将结果折入高度 ≤ 该上界的窗口
-    /// （诚实降级：逐条 checkpoint 归属过滤待字段集成后收紧）。
+    ///
+    /// **边界（审计 P2 修复：诚实签名）**：v1 队列不逐条记录 checkpoint
+    /// 归属（checkpoint 携带 withdrawal_root 字段属后续集成，见
+    /// `withdrawal_root` 模块文档），故本查询**无逐条窗口高度可过滤**——
+    /// 刻意不收高度参数（旧签名的 `finalized_below_height` 从未生效，
+    /// 保留即误导）。纪律：**必须由调用方保证仅已 finalize 的窗口入根**
+    /// ——即只有当全部排队条目所属窗口已 BFT finalized 时才可聚合出根
+    /// （与 [`crate::withdrawal_root::ClaimLedger`] 的根摘要重绑定配合：
+    /// 未 finalized 的根不可 claim）。逐条 checkpoint 归属过滤待字段
+    /// 集成后收紧（届时恢复高度过滤入参）。v2 侧
+    /// [`CustodyLedgerV2::pending_withdrawals_v2`] 同纪律（无高度参数）。
     #[must_use]
-    pub fn pending_withdrawal_leaves(&self, finalized_below_height: u64) -> Vec<PendingWithdrawal> {
-        let _ = finalized_below_height; // v1 无逐条 checkpoint 归属可过滤（见文档）
+    pub fn pending_withdrawal_leaves(&self) -> Vec<PendingWithdrawal> {
         self.withdrawals
             .values()
             .filter(|e| e.status == WithdrawalStatus::Queued)
@@ -1147,8 +1219,9 @@ impl CustodyLedgerV2 {
     ///
     /// 返回**全部** token 的排队条目，按 (asset_id, request_id) 字典序
     /// （BTreeMap 迭代序，聚合确定性）；每条均在受理时过了 finality 门
-    /// 与储备核验。`finalized_below_height` 语义与 v1 相同（诚实降级：
-    /// 逐条 checkpoint 归属过滤待字段集成后收紧）。打款净额语义不变。
+    /// 与储备核验。v2 队列同样不逐条记录 checkpoint 归属——与 v1
+    /// [`CustodyLedger::pending_withdrawal_leaves`] 同纪律（无高度参数；
+    /// 必须由调用方保证仅已 finalize 的窗口入根）。打款净额语义不变。
     #[must_use]
     pub fn pending_withdrawals_v2(&self) -> Vec<PendingWithdrawalV2> {
         let mut out: Vec<PendingWithdrawalV2> = self

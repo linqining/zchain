@@ -359,6 +359,17 @@ function waitForDecision(requestId) {
 // 返回 {response} 给 bridge 转发回页面。
 // ---------------------------------------------------------------------------
 
+// 页面只读方法白名单（routePageMethod 的只读分支：无状态变更、无用户交互）。
+// 说明：只读页面探活不得续期自动锁——已授权页面高频轮询廉价只读方法（如
+// zchain_getNetwork）不能让明文会话（EVM/Starknet 私钥）无限存活、SW 无限
+// 保活；这些方法照常处理，只是不刷新 lastActivity。popup 消息不受影响。
+const PAGE_READ_ONLY_METHODS = new Set([
+  'zchain_getNetwork',     // 网络/链 ID 查询
+  'zchain_getCapabilities',// 能力矩阵查询
+  'zchain_getAccounts',    // 会话/账户状态 getter
+  'zchain_getNotes',       // note 列表查询（脱敏，无状态变更）
+]);
+
 async function handlePageMessage(msg, sender) {
   const now = Date.now();
   const senderOrigin = sender.origin ?? '';
@@ -376,7 +387,11 @@ async function handlePageMessage(msg, sender) {
     return pageError(env.code, env.reason);
   }
   await setNonceLedger(env.nextState.nonceLedger);
-  mem.lastActivity = now;
+  // 说明：只读页面探活不得续期自动锁（PAGE_READ_ONLY_METHODS 白名单跳过
+  // lastActivity 刷新）；其余页面方法（首连/换网/签名，均伴随用户交互）仍续期。
+  if (!PAGE_READ_ONLY_METHODS.has(msg.method)) {
+    mem.lastActivity = now;
+  }
 
   // ---- (2) 请求结构校验：未知 method / 缺参 / 金额 / 网络 / ABI / domain ----
   const vr = validateRequest(msg.method, msg.params ?? {}, { network: currentNetwork(account) });
@@ -1856,8 +1871,12 @@ function selectorFromName(name) {
 // popup 内部 RPC
 // ---------------------------------------------------------------------------
 
-async function handlePopupMessage(m) {
-  mem.lastActivity = Date.now();
+async function handlePopupMessage(m, { page = false } = {}) {
+  // 说明：只读页面探活不得续期自动锁——content bridge 的握手（bridge:*
+  // 消息）虽走本内部处理器，但同样源自页面（无信封、可被任意页面高频
+  // 触发），不得刷新 lastActivity；扩展自身页面（popup/options/portal）
+  // 的消息始终续期（用户正在交互）。
+  if (!page) mem.lastActivity = Date.now();
   if (typeof m?.type === 'string' && m.type.startsWith('popup:evm')) {
     return handleEvmMessage(m);
   }
@@ -2516,8 +2535,9 @@ chrome.runtime.onMessage.addListener((m, sender, sendResponse) => {
     // 页面通道：只接受有 tab 的 sender（content script）；origin 由浏览器固定。
     if (sender.tab && sender.origin?.startsWith('http')) {
       // 桥握手（bridge:getSession）走内部处理器：只下发会话令牌，非页面 RPC。
+      // page:true —— 桥握手是页面探活，不得续期自动锁（见 handlePopupMessage）。
       if (typeof m?.type === 'string' && m.type.startsWith('bridge:')) {
-        sendResponse(await handlePopupMessage(m));
+        sendResponse(await handlePopupMessage(m, { page: true }));
         return;
       }
       const response = await handlePageMessage(m, sender);

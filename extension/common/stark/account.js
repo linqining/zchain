@@ -3,7 +3,8 @@
 //
 // keystore 复用 EVM 层同一 WebCrypto 方案（PBKDF2-SHA256 + AES-256-GCM），
 // 但形状独立（version 'stark-1'）：address 字段 = Starknet 账户地址
-// （UDC 公式推导），私钥为 felt（< 2^125，生态惯例），只存密文。
+// （UDC 公式推导），私钥为 felt（scure-starknet / starknet.js grindKey
+// 语义：私钥 ∈ [1, 2^251)），只存密文。
 // 地址 = calculateContractAddress({salt, classHash, constructorCalldata:[pubkey]})
 // —— 与 ArgentX/OZ 类账户构造参数一致（constructor 只收 pubkey）。
 // =============================================================================
@@ -84,7 +85,7 @@ export function generateSalt() {
  */
 export function deriveAccount({ privKey, salt, classHash }) {
   const d = typeof privKey === 'bigint' ? privKey : hexToBigInt(privKey);
-  if (d <= 0n || d >= 2n ** 125n) throw new Error('stark account: private key out of range (< 2^125)');
+  if (d <= 0n || d >= 2n ** 251n) throw new Error('stark account: private key out of range (< 2^251)');
   const pubKey = privateKeyToPublicKey(d);
   const cls = typeof classHash === 'bigint' ? classHash : hexToBigInt(classHash);
   const address = calculateContractAddress({
@@ -123,8 +124,8 @@ export async function encryptToKeystore(privBig, {
   requirePassword(password);
   assertCrypto();
   const priv = typeof privBig === 'bigint' ? privBig : hexToBigInt(privBig);
-  if (priv <= 0n || priv >= 2n ** 125n) {
-    const e = new Error('私钥非法（需 < 2^125）');
+  if (priv <= 0n || priv >= 2n ** 251n) {
+    const e = new Error('私钥非法（需 < 2^251）');
     e.code = 'InvalidArgument';
     throw e;
   }
@@ -211,7 +212,7 @@ export async function changeKeystorePassword(keystore, currentPassword, nextPass
   });
 }
 
-/** 导入私钥解析：hex 字符串（0x 可选），范围 < 2^125 且 > 0。 */
+/** 导入私钥解析：hex 字符串（0x 可选），grindKey 语义范围 [1, 2^251)。 */
 export function parsePrivateKeyHex(hex) {
   if (typeof hex !== 'string') {
     const e = new Error('私钥必须是 hex 字符串');
@@ -225,8 +226,8 @@ export function parsePrivateKeyHex(hex) {
     throw e;
   }
   const v = BigInt('0x' + h);
-  if (v === 0n || v >= 2n ** 125n) {
-    const e = new Error('私钥非法（需 < 2^125）');
+  if (v === 0n || v >= 2n ** 251n) {
+    const e = new Error('私钥非法（需 < 2^251）');
     e.code = 'InvalidArgument';
     throw e;
   }

@@ -1574,7 +1574,9 @@ impl Sequencer {
             Operation::Deposit { deposit_id, owner, asset_class, amount } => {
                 Self::apply_deposit(state, deposit_id, owner, *asset_class, *amount)
             }
-            Operation::WithdrawRequest { spend, note, request_id } => {
+            // 审计 P1：payout_recipient 经 effect 摘要进签名验证（apply
+            // 内不再单独使用，`..` 略过——摘要已在 apply_op 顶部计算）。
+            Operation::WithdrawRequest { spend, note, request_id, .. } => {
                 Self::apply_withdraw(state, spend, note, request_id, &effect)
             }
             Operation::Transfer { spends, notes, outputs } => {
@@ -1878,6 +1880,57 @@ impl Sequencer {
         Self::mint_note(state, note)
     }
 
+    /// v1 消费路径读侧预检（审计 P2 修复：变更前全量校验，C1 加严）。
+    ///
+    /// 复用 v2 读侧预检的精确检查集（apply_withdraw_request_v2 第 5/6 条）：
+    /// 零 nullifier 拒、felt 规范性（felt_from_bytes32_exact）、nullifier
+    /// 未消费（共享 nullifier 集 + **op 内重复**一并拒——同 op 两笔 spend
+    /// 声明同一 nullifier 的投毒双花在变更前即拒）、note 仍在账本 +
+    /// op 内承诺不重复。通过后 consume_note 对同一输入不再失败——旧路径
+    /// 在 no-WAL 模式（apply 直接落 self.state，无克隆态回滚）下"先删 note
+    /// 再发现 nullifier 已花"会留下半变更状态（note 已删、幂等键已烧、
+    /// burn 未记账），此预检关闭该窗口。
+    fn precheck_consume_v1<'a, I>(state: &LedgerState, pairs: I) -> AppchainResult<()>
+    where
+        I: IntoIterator<Item = (&'a crate::settlement::SpendAuth, &'a Note)>,
+    {
+        let mut seen_nf = std::collections::HashSet::new();
+        let mut seen_c = std::collections::HashSet::new();
+        for (s, n) in pairs {
+            if s.nullifier == [0u8; 32] {
+                return Err(AppchainError::AdmissionRejected("zero nullifier"));
+            }
+            let nf = crate::felt::felt_from_bytes32_exact(&s.nullifier)?;
+            if state.nullifiers.contains(&nf) || !seen_nf.insert(nf) {
+                return Err(AppchainError::DoubleSpend);
+            }
+            let c = felt_to_bytes32(&n.commitment());
+            if !state.notes.contains_key(&c) || !seen_c.insert(c) {
+                return Err(AppchainError::NoteNotFound);
+            }
+        }
+        Ok(())
+    }
+
+    /// v2 消费路径读侧预检（v1 侧 [`Self::precheck_consume_v1`] 的 nullifier
+    /// 段；note 账本核对由各 apply 的账本检查段承担）。
+    fn precheck_nullifiers_v2<'a, I>(state: &LedgerState, nullifiers: I) -> AppchainResult<()>
+    where
+        I: IntoIterator<Item = &'a [u8; 32]>,
+    {
+        let mut seen_nf = std::collections::HashSet::new();
+        for nf_bytes in nullifiers {
+            if *nf_bytes == [0u8; 32] {
+                return Err(AppchainError::AdmissionRejected("zero nullifier"));
+            }
+            let nf = crate::felt::felt_from_bytes32_exact(nf_bytes)?;
+            if state.nullifiers.contains(&nf) || !seen_nf.insert(nf) {
+                return Err(AppchainError::DoubleSpend);
+            }
+        }
+        Ok(())
+    }
+
     fn apply_withdraw(
         state: &mut LedgerState,
         spend: &crate::settlement::SpendAuth,
@@ -1885,16 +1938,23 @@ impl Sequencer {
         request_id: &[u8; 32],
         effect: &[u8; 32],
     ) -> AppchainResult<()> {
-        // C1：签名/note/账本校验全部先行，幂等键销毁在变更段
+        // C1：签名/note/账本校验全部先行，幂等键销毁在变更段。
+        // 审计 P2：request_id 查重与 nullifier 预检一并先行（只读）——
+        // 旧序先 withdrawal_ids.insert 再 consume_note，no-WAL 模式下
+        // consume 失败（双花/非规范 felt）会留下半变更状态。
         let c = felt_to_bytes32(&note.commitment());
         if c != spend.commitment || !state.notes.contains_key(&c) {
             return Err(AppchainError::NoteNotFound);
         }
         let d = spend_digest(&spend.commitment, &spend.nullifier, scope::WITHDRAW, effect);
         crate::keys::verify_ecsdsa(&note.owner, &d, &spend.sig)?;
-        if !state.withdrawal_ids.insert(*request_id) {
+        if state.withdrawal_ids.contains(request_id) {
             return Err(AppchainError::WithdrawalConflict("duplicate request id".into()));
         }
+        Self::precheck_consume_v1(state, [(spend, note)])?;
+
+        // ===== 变更段（以上全部通过，以下不再失败）=====
+        state.withdrawal_ids.insert(*request_id);
         Self::consume_note(state, note, &spend.nullifier)?;
         state.burned.push((*request_id, note.amount));
         Ok(())
@@ -1935,6 +1995,10 @@ impl Sequencer {
                 rake: 0,
             });
         }
+        // 审计 P2：消费段读侧预检先行——旧路径第 1 张 note 先被删除后才
+        // 发现第 2 张的 nullifier 已花（投毒双花），no-WAL 模式下无回滚，
+        // 留下半转账状态。预检过后下方 consume 循环不再失败。
+        Self::precheck_consume_v1(state, spends.iter().zip(notes.iter()))?;
         for (s, n) in spends.iter().zip(notes.iter()) {
             Self::consume_note(state, n, &s.nullifier)?;
         }
@@ -1997,6 +2061,8 @@ impl Sequencer {
             total += u128::from(n.amount);
         }
         let amount = u64::try_from(total).map_err(|_| AppchainError::InvalidAmount(u64::MAX))?;
+        // 审计 P2：消费段读侧预检先行（同 apply_transfer——变更前全量校验）
+        Self::precheck_consume_v1(state, spends.iter().zip(notes.iter()))?;
         for (s, n) in spends.iter().zip(notes.iter()) {
             Self::consume_note(state, n, &s.nullifier)?;
         }
@@ -2047,6 +2113,10 @@ impl Sequencer {
                 return Err(AppchainError::AdmissionRejected("input note mismatch"));
             }
         }
+        // 审计 P2：消费段读侧预检先行——settled_bindings.insert 后 consume
+        // 失败（nullifier 已花）会烧掉绑定且留下部分消费，合法修正版会被
+        // 误判重放（C1 注释描述的窗口）。预检过后下方消费循环不再失败。
+        Self::precheck_consume_v1(state, record.inputs.iter().map(|i| (&i.spend, &i.note)))?;
         // ===== 变更段（以上全部通过，以下不再失败）=====
         if !state.settled_bindings.insert(record.hand_binding) {
             return Err(AppchainError::SettlementReplay);
@@ -2329,6 +2399,26 @@ impl Sequencer {
             OWNER_V2_ABI_VERSION,
             now,
             &nonce_of,
+        )?;
+        // 审计 P2：消费段读侧预检先行（v1/v2 双臂 nullifier + v1 臂账本
+        // 存在性/重复）——settled_bindings.insert 后 consume 失败同样会烧
+        // 绑定且留部分消费。预检过后下方消费循环不再失败。
+        Self::precheck_consume_v1(
+            state,
+            record.inputs.iter().filter_map(|i| match i {
+                SettleInputV2::V1 { note, spend } => Some((spend, note)),
+                SettleInputV2::V2 { .. } => None,
+            }),
+        )?;
+        Self::precheck_nullifiers_v2(
+            state,
+            record
+                .inputs
+                .iter()
+                .filter_map(|i| match i {
+                    SettleInputV2::V2 { nullifier, .. } => Some(nullifier),
+                    SettleInputV2::V1 { .. } => None,
+                }),
         )?;
 
         // ===== 变更段（以上全部通过，以下不再失败）=====
@@ -3909,7 +3999,8 @@ mod tests {
         );
     }
 
-    /// 测试脚手架：软确认一笔提现销毁（花费授权按 effect 摘要签名）。
+    /// 测试脚手架：软确认一笔提现销毁（花费授权按 effect 摘要签名；
+    /// P1：effect 绑定 payout_recipient——收款人进签名摘要）。
     fn burn_test_note(s: &mut Sequencer, a: &TestUser, note: &Note, request_id: [u8; 32]) {
         let effect = Operation::WithdrawRequest {
             spend: SpendAuth {
@@ -3919,6 +4010,7 @@ mod tests {
             },
             note: note.clone(),
             request_id,
+            payout_recipient: [0xEE; 32],
         }
         .effect_digest();
         let nf = felt_to_bytes32(&note.nullifier(&a.secret));
@@ -3932,6 +4024,7 @@ mod tests {
                 },
                 note: note.clone(),
                 request_id,
+                payout_recipient: [0xEE; 32],
             },
             3_000,
         )

@@ -36,6 +36,7 @@ struct OpShape {
     table_id: u64,
     deposit_id: [u8; 32],
     request_id: [u8; 32],
+    payout_recipient: [u8; 32],
     out_a: u64,
     out_b: u64,
     commitment: [u8; 32],
@@ -78,6 +79,7 @@ fn op_from_shape(s: &OpShape) -> Operation {
             spend: spend(),
             note: mk_note(class, s.amount, s.owner, s.deposit_id),
             request_id: s.request_id,
+            payout_recipient: s.payout_recipient,
         },
         4 => Operation::Transfer {
             spends: vec![spend()],

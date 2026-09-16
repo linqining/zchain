@@ -146,7 +146,7 @@
     {
       "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
       "ok": true,
-      "detail": "{\"key\":\"0x00dda75bb23ffe9f66634387b55c86ee6b32f0dde92ffef3b45754d9998c3228\"}"
+      "detail": "{\"key\":\"0xREDACTED-test-key\"}"
     },
     {
       "step": "M6b 删除当前账户 → 回到创建视图",

@@ -64,14 +64,22 @@ test('stk 私钥导入解析：形状/范围拒绝面', () => {
   assert.ok(parsePrivateKeyHex('0x123') > 0n);
   assert.throws(() => parsePrivateKeyHex('0xzz'), (e) => e.code === 'InvalidArgument');
   assert.throws(() => parsePrivateKeyHex('0x0'), (e) => e.code === 'InvalidArgument');
-  // ≥ 2^125 拒绝（生态惯例）
-  assert.throws(() => parsePrivateKeyHex('0x' + 'f'.repeat(32)), (e) => e.code === 'InvalidArgument');
+  // grindKey 语义（scure-starknet / starknet.js）：私钥 ∈ [1, 2^251)——
+  // 2^125 边界及以上（但 < 2^251）必须可导入（标准钱包密钥域）
+  assert.equal(parsePrivateKeyHex('0x2' + '0'.repeat(31)), 2n ** 125n);
+  assert.ok(parsePrivateKeyHex('0x' + 'f'.repeat(32)) > 2n ** 125n);
+  assert.equal(parsePrivateKeyHex('0x7' + 'f'.repeat(62)), 2n ** 251n - 1n); // 最大合法值
+  // ≥ 2^251 拒绝
+  assert.throws(() => parsePrivateKeyHex('0x8' + '0'.repeat(62)), (e) => e.code === 'InvalidArgument');
+  assert.throws(() => parsePrivateKeyHex('0x' + 'f'.repeat(63)), (e) => e.code === 'InvalidArgument');
+  assert.throws(() => parsePrivateKeyHex('0x' + 'f'.repeat(64)), (e) => e.code === 'InvalidArgument');
   assert.ok(generateSalt() > 0n);
   // 导入路径 encryptToKeystore → 解密一致
 });
 
-test('stk 导入：encryptToKeystore 指定 salt/class → 地址稳定', async () => {
-  const priv = parsePrivateKeyHex('0x1234');
+test('stk 导入：encryptToKeystore 指定 salt/class → 地址稳定（高位密钥）', async () => {
+  // 高位密钥（> 2^125，标准钱包密钥域）导入路径全链路：derive/加密/解密一致
+  const priv = parsePrivateKeyHex('0x' + 'f'.repeat(32));
   const salt = 0x42n;
   const ks = await encryptToKeystore(priv, { password: 'import password', salt, classHash: hexToBigInt(DEV_CLASS) });
   const re = deriveAccount({ privKey: priv, salt, classHash: DEV_CLASS });

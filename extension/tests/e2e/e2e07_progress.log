@@ -1,6 +1,6 @@
 [2026-09-15T19:24:54.904Z] PASS: O1 新用户首屏 = 欢迎页（一键创建 + 高级 + 导入入口）
 [2026-09-15T19:24:54.906Z] PASS: O1b SW 状态：onboarded=false（三层均无钱包） — false
-[2026-09-15T19:24:55.161Z] PASS: O2-diag — raw={"pw":"tGFX3c2KwARKKtGOOlNY3Hdi"} rej=[]
+[2026-09-15T19:24:55.161Z] PASS: O2-diag — raw={"pw":"REDACTED-test-pw"} rej=[]
 [2026-09-15T19:24:55.161Z] PASS: O2 一键创建 → 成功页：自动口令只显一次 + 三链地址 — tGFX3c…（24 字符）
 [2026-09-15T19:24:55.162Z] PASS: O2b 创建后 SW 状态：onboarded=true + 三层有钱包 + 全部已解锁 — {"onboarded":true}
 [2026-09-15T19:24:55.415Z] PASS: O3 统一首页：三链卡片 + 进入钱包（全部已解锁）

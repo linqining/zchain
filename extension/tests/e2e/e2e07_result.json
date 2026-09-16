@@ -19,7 +19,7 @@
     {
       "step": "O2-diag",
       "ok": true,
-      "detail": "raw={\"pw\":\"tGFX3c2KwARKKtGOOlNY3Hdi\"} rej=[]"
+      "detail": "raw={\"pw\":\"REDACTED-test-pw\"} rej=[]"
     },
     {
       "step": "O2 一键创建 → 成功页：自动口令只显一次 + 三链地址",

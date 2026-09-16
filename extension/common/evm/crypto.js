@@ -350,21 +350,21 @@ export function ecSign(digest, priv) {
   digest = toDigestBytes(digest);
   let h = bytesToBigInt(digest);
   if (h >= SECP256K1_N) h -= SECP256K1_N;
-  for (;;) {
-    const k = deterministicK(d, digest);
-    const R = jacToAffine(jacMul(k, G_JAC));
-    if (!R) continue;
-    const r = mod(R[0], SECP256K1_N);
-    if (r === 0n) continue;
-    let s = mod(modInverse(k, SECP256K1_N) * (h + d * r), SECP256K1_N);
-    if (s === 0n) continue;
-    let recovery = Number(R[1] & 1n);
-    if (s > HALF_N) {
-      s = SECP256K1_N - s;
-      recovery ^= 1;
-    }
-    return { r, s, recovery };
+  // 确定性 k（RFC 6979）：同输入必得同 k，r/s 退化（≈0）时重试只会重算出
+  // 相同结果 → 死循环；直接抛错（概率 ~2^-128，实践不可达）。
+  const k = deterministicK(d, digest);
+  const R = jacToAffine(jacMul(k, G_JAC));
+  if (!R) throw new Error('ecSign: degenerate nonce (R at infinity)');
+  const r = mod(R[0], SECP256K1_N);
+  if (r === 0n) throw new Error('ecSign: degenerate nonce (r = 0)');
+  let s = mod(modInverse(k, SECP256K1_N) * (h + d * r), SECP256K1_N);
+  if (s === 0n) throw new Error('ecSign: degenerate nonce (s = 0)');
+  let recovery = Number(R[1] & 1n);
+  if (s > HALF_N) {
+    s = SECP256K1_N - s;
+    recovery ^= 1;
   }
+  return { r, s, recovery };
 }
 
 /** ECDSA 验证（内部用；恢复路径已覆盖主用途）。 */

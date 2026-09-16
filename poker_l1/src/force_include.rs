@@ -318,12 +318,29 @@ impl CensorshipProof {
     /// # 参数
     /// - `recent_window_tx_hashes`：调用方从近 K 个块提取的 tx_hash 全集
     ///   （v1 块数近似窗口，见模块头边界说明）。
+    /// - `expected_deadline_ms`：本节点配置的强制包含期限。`deadline_ms` 是
+    ///   证明自带字段，若不与节点配置核对，攻击者可自报 `deadline_ms = 0`
+    ///   使任意回执立即"超期"（P0 修复）。`0` 表示本节点禁用强制包含路径，
+    ///   一切证明直接拒绝。
     pub fn verify(
         &self,
         chain_id: ChainId,
         now_ms: u64,
         recent_window_tx_hashes: &[Hash],
+        expected_deadline_ms: u64,
     ) -> PokerL1Result<CensorshipCheckOutcome> {
+        // 0. deadline 与节点配置强一致（防自报期限攻击）
+        if expected_deadline_ms == 0 {
+            return Err(PokerL1Error::Other(
+                "censorship proof rejected: force-include disabled on this node".into(),
+            ));
+        }
+        if self.deadline_ms != expected_deadline_ms {
+            return Err(PokerL1Error::Other(format!(
+                "censorship proof deadline_ms {} != node inclusion_deadline_ms {expected_deadline_ms}",
+                self.deadline_ms
+            )));
+        }
         // 1. tx_bytes ↔ receipt.tx_hash 一致性
         let tx = Transaction::from_bcs(&self.tx_bytes).map_err(|e| {
             PokerL1Error::Other(format!("censorship proof tx_bytes 解析失败: {e}"))
@@ -477,18 +494,23 @@ mod tests {
         };
 
         // 未超时
-        let out = proof.verify(DEFAULT_CHAIN_ID, 5_000, &[]).unwrap();
+        let out = proof.verify(DEFAULT_CHAIN_ID, 5_000, &[], deadline).unwrap();
         assert_eq!(out, CensorshipCheckOutcome::NotYetDue);
 
         // 超时且未包含 → 证据成立
-        let out = proof.verify(DEFAULT_CHAIN_ID, 11_001, &[]).unwrap();
+        let out = proof.verify(DEFAULT_CHAIN_ID, 11_001, &[], deadline).unwrap();
         assert_eq!(out, CensorshipCheckOutcome::Censored);
 
         // 已包含 → 不成立（即使已过 deadline）
         let out = proof
-            .verify(DEFAULT_CHAIN_ID, 11_001, &[tx.tx_hash()])
+            .verify(DEFAULT_CHAIN_ID, 11_001, &[tx.tx_hash()], deadline)
             .unwrap();
         assert_eq!(out, CensorshipCheckOutcome::Included);
+
+        // deadline 与节点配置不一致 → 拒绝（P0 修复：防自报期限）
+        assert!(proof.verify(DEFAULT_CHAIN_ID, 11_001, &[], deadline + 1).is_err());
+        // 节点禁用强制包含（deadline=0）→ 一切证明拒绝
+        assert!(proof.verify(DEFAULT_CHAIN_ID, 11_001, &[], 0).is_err());
     }
 
     #[test]
@@ -505,7 +527,7 @@ mod tests {
             deadline_ms: 10,
             current_height_hint: 0,
         };
-        assert!(proof.verify(DEFAULT_CHAIN_ID, u64::MAX, &[]).is_err());
+        assert!(proof.verify(DEFAULT_CHAIN_ID, u64::MAX, &[], 10).is_err());
 
         // chain_id 域不一致
         let proof = CensorshipProof {
@@ -514,7 +536,7 @@ mod tests {
             deadline_ms: 10,
             current_height_hint: 0,
         };
-        assert!(proof.verify(0xDEAD_BEEF, u64::MAX, &[]).is_err());
+        assert!(proof.verify(0xDEAD_BEEF, u64::MAX, &[], 10).is_err());
     }
 
     #[test]

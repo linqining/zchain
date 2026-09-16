@@ -536,10 +536,17 @@ fn settlement_detail_hit_miss_and_bad_hex() {
     assert_eq!(v["inputs"].as_array().unwrap().len(), 2);
     for i in v["inputs"].as_array().unwrap() {
         assert_eq!(i["commitment"].as_str().map(str::len), Some(64));
-        assert_eq!(i["nullifier"].as_str().map(str::len), Some(64));
-        assert_eq!(i["owner"].as_str().map(str::len), Some(66), "compressed pk 33B");
+        // nullifier/owner 与列表端点同款缩写（short_hex 摘要，非全量 hex）
+        let nf = i["nullifier"].as_str().unwrap();
+        assert!(nf.len() < 64 && nf.contains('…'), "abbreviated nullifier: {nf}");
+        let owner = i["owner"].as_str().unwrap();
+        assert!(owner.len() < 66 && owner.contains('…'), "abbreviated owner: {owner}");
     }
     assert_eq!(v["payouts"].as_array().unwrap().len(), 2);
+    for p in v["payouts"].as_array().unwrap() {
+        let owner = p["owner"].as_str().unwrap();
+        assert!(owner.len() < 66 && owner.contains('…'), "abbreviated owner: {owner}");
+    }
     assert_eq!(v["rake"]["total"], 0);
     assert_eq!(v["rake"]["treasury_out"], serde_json::Value::Null);
     assert_eq!(v["plan"]["gross_pot"], 2_000);
@@ -1073,4 +1080,69 @@ fn e2e_fixture_settlement_to_proof_download() {
     let v = json(&body);
     assert_eq!(v["latest_aggregate_root"], aggs[0]["root"]);
     assert_eq!(v["latest_aggregate_through_op"], 6);
+}
+
+/// 审计修复 4b：并发连接硬上限——占满上限的静默连接（连而不发，占住
+/// 每连接线程直至读超时）之后，新连接被拒（最小 503；竞态下也可能以
+/// RST/空响应丢弃——过载丢弃语义，见 server.rs 注释）；holder 释放后
+/// 计数守卫递减、服务恢复（计数不泄漏）。
+#[test]
+fn connection_cap_rejects_with_503_and_recovers() {
+    // RST 容忍探针：过载丢弃既可能是可读的最小 503，也可能是 RST/空
+    // 响应（返回 0）；硬边界是绝不返回 200。
+    let probe_status = |addr: SocketAddr| -> u16 {
+        let mut s = TcpStream::connect(addr).expect("probe connect");
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        s.write_all(b"GET /api/v1/status HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n")
+            .unwrap();
+        let mut buf = Vec::new();
+        match s.read_to_end(&mut buf) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return 0,
+            Err(e) => panic!("probe read: {e}"),
+        }
+        if buf.is_empty() {
+            return 0;
+        }
+        parse_response(&buf).0
+    };
+
+    let dir = fixture_dir("conncap");
+    let (public, _) = build_wal(&dir, 0x2F);
+    let srv = start_server(&dir.join("appchain.wal"), public, None, 1_000, 1_000, None);
+
+    // 占满上限：N 个"连而不发"的 holder（服务端 read_request 阻塞到
+    // 5s 读超时，连接槽位一直被占）。
+    let mut holders: Vec<TcpStream> = Vec::new();
+    for _ in 0..server::MAX_CONCURRENT_CONNECTIONS {
+        let s = TcpStream::connect(srv.addr).expect("holder connect");
+        s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        holders.push(s);
+    }
+
+    // 超限连接：被拒——0（RST/空丢弃）或最小 503，绝不被服务成 200。
+    let status = probe_status(srv.addr);
+    assert_ne!(status, 200, "over-cap connection must not be served");
+    assert!(
+        status == 0 || status == 503,
+        "readable over-cap rejection must be minimal 503, got {status}"
+    );
+
+    // holder 全部关闭 → 守卫递减 → 服务恢复（读超时 5s + 余量上界）。
+    drop(holders);
+    let mut recovered = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        let status = probe_status(srv.addr);
+        if status == 200 {
+            recovered = true;
+            break;
+        }
+        assert!(
+            status == 0 || status == 503,
+            "recovery window: expected 503/reset, got {status}"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(recovered, "service must recover after holders close (guard decrements)");
 }

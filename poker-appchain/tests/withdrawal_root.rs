@@ -376,7 +376,7 @@ fn vault_fee_net_amount_flows_into_leaf_and_claim() {
         .unwrap();
 
     // 投影：金额为净额（fee 从余额内扣）、request_id 字典序
-    let pending = vault.pending_withdrawal_leaves(9);
+    let pending = vault.pending_withdrawal_leaves();
     assert_eq!(
         pending,
         vec![
@@ -421,7 +421,7 @@ fn vault_fee_net_amount_flows_into_leaf_and_claim() {
 
     // 已打款条目退出投影（打款侧闭环不影响 claim 侧已聚合的根）
     vault.mark_paid([0xA1; 32], [0xDD; 32]).unwrap();
-    let pending = vault.pending_withdrawal_leaves(9);
+    let pending = vault.pending_withdrawal_leaves();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].request_id, [0xA2; 32]);
 
@@ -438,7 +438,7 @@ fn vault_fee_net_amount_flows_into_leaf_and_claim() {
         2_000,
     )
     .unwrap();
-    let p = free.pending_withdrawal_leaves(3);
+    let p = free.pending_withdrawal_leaves();
     assert_eq!(p.len(), 1);
     let l = p[0].into_leaf(REAL, [0xCC; 32], 3);
     assert_eq!(l.amount, 70, "零费：净额 == 金额");

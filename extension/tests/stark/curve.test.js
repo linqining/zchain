@@ -185,9 +185,15 @@ test('域运算：modSqrt / modInverse 边界', () => {
   assert.equal(modInverse(2n, EC_ORDER_N) * 2n % EC_ORDER_N, 1n);
 });
 
-test('generatePrivateKey：生态惯例 < 2^125', () => {
+test('generatePrivateKey：grindKey 语义 ∈ [1, 2^251)', () => {
   for (let i = 0; i < 20; i++) {
     const k = generatePrivateKey();
-    assert.ok(k > 0n && k < 2n ** 125n);
+    assert.ok(k > 0n && k < 2n ** 251n);
+    assert.ok(k < EC_ORDER_N);
   }
+  // 高位密钥（≥ 2^125，旧上限之上）全链路可用：公钥推导 + 签名/验证
+  const hi = 2n ** 250n;
+  const pubX = privateKeyToPublicKey(hi);
+  const sig = ecSign(123n, hi);
+  assert.equal(ecVerify(pubX, 123n, sig.r, sig.s), true);
 });
