@@ -1,6 +1,13 @@
 /target
 .vscode
 *.crabmap/
+# 全局忽略：任何 crate 的 target/（含独立 workspace）。
+target/
+# Lean (lake) 构建产物与包缓存。
+.lake/
+# Node 依赖与 macOS 元数据。
+node_modules/
+.DS_Store
 poker-appchain-texasair/target/
 poker-appchain-texasair/target*
 *.cdx.json
@@ -13,6 +20,6 @@ stwo-wasm-probe/dep-check/target*
 cairo-bridge-poc/target*
 cairo-bridge-poc/driver/target*
 stwo-wasm-probe/logs/*
-cairo-bridge-poc/logs/*---
+cairo-bridge-poc/logs/
 extension/dist/
 cairo-bridge-poc/logs/*
