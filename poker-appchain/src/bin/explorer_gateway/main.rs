@@ -239,6 +239,65 @@ fn run() -> i32 {
         state.data_source
     );
 
+    // ===== WAL 跟随（replay 模式）：轮询文件大小，增长即重放换入 =====
+    // 此前只在启动时重放一次：生产方（texas 嵌入式 appchain）运行期持续
+    // 落帧后，settlements/settlement 等端点对新数据一律 404，与数据面
+    // "只读实时"的承诺不符。重放与启动完全同语义（fail-closed）：失败
+    // （典型=生产方正写入的撕裂尾帧）只告警、不换入、下轮重试。
+    if state.data_source == "replay" {
+        let watcher_state = std::sync::Arc::clone(&state);
+        let watcher_wal = wal_path.to_path_buf();
+        let watcher_pub = sequencer_public;
+        std::thread::spawn(move || {
+            let mut last_good_len: u64 = std::fs::metadata(&watcher_wal)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            loop {
+                std::thread::sleep(Duration::from_secs(10));
+                let cur_len = match std::fs::metadata(&watcher_wal) {
+                    Ok(m) => m.len(),
+                    Err(_) => continue,
+                };
+                if cur_len <= last_good_len {
+                    continue;
+                }
+                match state::load(&watcher_wal, watcher_pub, None, None, None) {
+                    Ok(fresh) => {
+                        let new_seq = match fresh.seq {
+                            Some(m) => m
+                                .into_inner()
+                                .unwrap_or_else(|p| p.into_inner()),
+                            None => continue,
+                        };
+                        let mut new_seq = new_seq;
+                        // 与启动同语义：恢复 proven 水位/批次根。
+                        for entry in &fresh.proven {
+                            new_seq.mark_proven_through_with_root(
+                                entry.op_index,
+                                entry.batch_root,
+                            );
+                        }
+                        let frames = new_seq.chain().len();
+                        let Some(seq_mutex) = &watcher_state.seq else { continue };
+                        let mut guard = seq_mutex.lock().expect("gateway seq lock");
+                        *guard = new_seq;
+                        drop(guard);
+                        last_good_len = cur_len;
+                        eprintln!(
+                            "[explorer_gateway] WAL 跟随：已重放换入（{frames} 帧，{} bytes）",
+                            cur_len
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "[explorer_gateway] WAL 跟随：重放失败（尾帧可能撕裂，保留旧数据面，下轮重试）: {e}"
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     // ===== 静态快照 =====
     if let Some(dir) = snapshot_out {
         if let Err(e) = snapshot::write_to(&dir, &state) {

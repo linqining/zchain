@@ -21,6 +21,7 @@ use std::io::{BufReader, BufWriter, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use crate::error::{AppchainError, AppchainResult};
+use crate::keys::SequencerKey;
 use crate::soft_confirm::SignedFrame;
 
 /// WAL 落盘 sink 抽象：生产 = [`File`]；测试注入故障 sink（模拟磁盘满）。
@@ -201,6 +202,81 @@ impl WalSink for BudgetSink {
     fn sync(&mut self) -> std::io::Result<()> {
         self.file.sync_all()
     }
+}
+
+/// 容崩读取：解析 + 逐帧验签（链哈希连续 + 签名），在**第一个坏帧**处
+/// 截停，返回有效前缀（崩溃安全——追加写 WAL 的尾帧可能因进程被杀而撕裂；
+/// fsync 过的有效前缀必须可恢复）。首帧即坏 → 无可恢复前缀，返回错误。
+/// 返回值：(有效帧, 有效前缀字节数, 尾帧废弃原因)。
+///
+/// # Errors
+/// 文件不可读或首帧解析/验签失败 → [`AppchainError`]。
+pub fn read_all_strict_prefix(
+    path: &Path,
+    sequencer_public: &[u8; 32],
+) -> AppchainResult<(Vec<SignedFrame>, u64, Option<String>)> {
+    let file = File::open(path)
+        .map_err(|_| AppchainError::WalCorrupted("open failed"))?;
+    let mut r = BufReader::new(file);
+    let mut out: Vec<SignedFrame> = Vec::new();
+    let mut valid_bytes: u64 = 0;
+    let mut prev = crate::soft_confirm::genesis_prev_hash();
+    let mut prev_index: Option<u64> = None;
+    let mut tail_reason: Option<String> = None;
+    loop {
+        let mut len_buf = [0u8; 4];
+        match r.read_exact(&mut len_buf) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(_) => {
+                tail_reason = Some("read length".into());
+                break;
+            }
+        }
+        let len = u32::from_le_bytes(len_buf) as usize;
+        if len > 16 * 1024 * 1024 {
+            tail_reason = Some("frame length insane".into());
+            break;
+        }
+        let mut buf = vec![0u8; len];
+        if let Err(e) = r.read_exact(&mut buf) {
+            tail_reason = Some(format!("truncated frame ({e})"));
+            break;
+        }
+        let frame = match borsh::from_slice::<SignedFrame>(&buf) {
+            Ok(f) => f,
+            Err(_) => {
+                tail_reason = Some("bad frame encoding".into());
+                break;
+            }
+        };
+        // 逐帧验签（与 soft_confirm::verify_chain 同语义，增量版）。
+        let verify_ok = (|| -> bool {
+            match prev_index {
+                None => {
+                    frame.frame.index == 0
+                        && frame.frame.prev_hash == crate::soft_confirm::genesis_prev_hash()
+                        && frame
+                            .hash()
+                            .map(|h| SequencerKey::verify(sequencer_public, &h, &frame.sig))
+                            .unwrap_or(false)
+                }
+                Some(pi) => frame.verify_against(&prev, pi, sequencer_public).is_ok(),
+            }
+        })();
+        if !verify_ok {
+            tail_reason = Some(format!("frame {} signature/chain invalid", frame.frame.index));
+            break;
+        }
+        valid_bytes += 4 + len as u64;
+        prev = frame.hash()?;
+        prev_index = Some(frame.frame.index);
+        out.push(frame);
+    }
+    if out.is_empty() {
+        return Err(AppchainError::WalCorrupted("no recoverable frame"));
+    }
+    Ok((out, valid_bytes, tail_reason))
 }
 
 /// 全量读取并解析 WAL（不做语义验证——链/签名验证由 sequencer 重放执行）。

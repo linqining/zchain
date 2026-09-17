@@ -12,26 +12,32 @@
 # 自动打牌直到 TARGET_HANDS（默认 100）手全部结算并锚定上链。
 #
 # 用法：
-#   scripts/dev_poker_air.sh                     # 完整流程
+#   scripts/dev_poker_air.sh                     # 完整流程（目标 1000 手）
 #   scripts/dev_poker_air.sh --skip-build       # 跳过 cargo/pnpm 构建
 #   scripts/dev_poker_air.sh --no-browser       # 不拉浏览器（无头联调）
-#   scripts/dev_poker_air.sh --target N         # 目标手数（默认 100）
+#   scripts/dev_poker_air.sh --target N         # 目标手数（默认 1000）
 #   scripts/dev_poker_air.sh --keep             # 脚本退出不清理进程
 #
+# 环境变量：RUN_DIR（运行目录，默认 /tmp/poker-air-zchain-1000）
+#   BROWSER_TIMEOUT_SECS（浏览器阶段超时，默认 43200=12h）
+#   STRATEGY（random=随机边缘策略 raise/all-in/fold/call/check；passive=旧版）
+#
 # 关键日志：
-#   /tmp/poker-air-zchain/{zchain,gateway,texas-server,vite,bridge,browser}.log
+#   $RUN_DIR/{zchain,gateway,texas-server,vite,bridge,browser}.log
 # 验收：bridge 打印 "target reached: N >= N" 且浏览器脚本退出码 0。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AIR_ROOT="${AIR_ROOT:-/Users/mac/projects/poker_texas_air}"
-RUN_DIR="${RUN_DIR:-/tmp/poker-air-zchain}"
+RUN_DIR="${RUN_DIR:-/tmp/poker-air-zchain-1000}"
 ZCHAIN_RPC_PORT="${ZCHAIN_RPC_PORT:-18545}"
 ZCHAIN_P2P_PORT="${ZCHAIN_P2P_PORT:-19000}"
 GATEWAY_PORT="${GATEWAY_PORT:-18900}"
 GAME_PORT="${GAME_PORT:-9001}"
 CLIENT_PORT="${CLIENT_PORT:-5173}"
-TARGET_HANDS="${TARGET_HANDS:-100}"
+TARGET_HANDS="${TARGET_HANDS:-1000}"
+BROWSER_TIMEOUT_SECS="${BROWSER_TIMEOUT_SECS:-43200}"
+STRATEGY="${STRATEGY:-random}"
 PROFILE=release
 SKIP_BUILD=0
 NO_BROWSER=0
@@ -72,6 +78,11 @@ cleanup() {
     return
   fi
   for pid in "${PIDS[@]:-}"; do kill "$pid" 2>/dev/null || true; done
+  # 脱离的浏览器监督者：仅在未达标时终止（达标后它自己已退出）
+  if [[ -f "$RUN_DIR/browser-supervisor.pid" ]] && [[ ! -f "$RUN_DIR/browser.done" ]]; then
+    kill "$(cat "$RUN_DIR/browser-supervisor.pid")" 2>/dev/null || true
+    pkill -f "poker_air_chrome" 2>/dev/null || true
+  fi
   log "已停止全部后台进程（--keep 可保留）"
 }
 trap cleanup EXIT
@@ -266,6 +277,15 @@ for i in $(seq 1 60); do
 done
 curl -sf "http://127.0.0.1:$CLIENT_PORT/" >/dev/null 2>&1 || {
   echo "vite 启动超时，日志："; tail -20 "$RUN_DIR/vite.log"; exit 1; }
+# 预热：vite 首次按需变换整个模块图可能耗时 ~60s，先触发变换再拉浏览器，
+# 否则浏览器阶段会在登录按钮等待上白烧超时。
+log "预热 vite 模块图…"
+curl -sf "http://127.0.0.1:$CLIENT_PORT/src/main.tsx" >/dev/null 2>&1 || true
+for i in $(seq 1 120); do
+  T0=$(date +%s%N 2>/dev/null || echo "0")
+  curl -sf -o /dev/null --max-time 10 "http://127.0.0.1:$CLIENT_PORT/src/main.tsx" 2>/dev/null && break
+  sleep 1
+done
 log "前端就绪: http://localhost:$CLIENT_PORT"
 
 # ---------- 9) dev bot 驱动循环（空座自动重注入，驱动连续手牌）----------
@@ -295,44 +315,49 @@ print(",".join((w or "").lower() for w in (d.get("players") or {}).values()))' 2
 PIDS+=($!)
 log "bot 驱动已启动（deposit 校验在 dev 模式自动放行）"
 
-# ---------- 10) 真实浏览器 + ZChain 扩展打牌 ----------
+# ---------- 10) 真实浏览器 + ZChain 扩展打牌（独立监督进程）----------
+# 监督者以 nohup/disown 完全脱离主脚本进程树：主脚本对浏览器 node 的任何
+# 信号操作都不会级联；主脚本经 sentinel 文件（browser.done / browser.failed）
+# 感知浏览器阶段成败。
 if [[ "$NO_BROWSER" != 1 ]]; then
-  log "启动真实浏览器（Chrome for Testing + extension）打牌，目标 $TARGET_HANDS 手…"
-  POKER_AIR_RUN_DIR="$RUN_DIR" TARGET_HANDS="$TARGET_HANDS" GAME_API="http://127.0.0.1:$GAME_PORT" \
-    POKER_URL="http://localhost:$CLIENT_PORT" EXT_PATH="$ROOT/extension" \
-    node "$ROOT/scripts/poker_air_browser.mjs" >"$RUN_DIR/browser.log" 2>&1 &
-  BROWSER_PID=$!
-  PIDS+=($!)
+  log "启动真实浏览器（Chrome for Testing + extension）打牌，目标 ${TARGET_HANDS} 手（策略 ${STRATEGY}）…"
+  rm -f "$RUN_DIR/browser.done" "$RUN_DIR/browser.failed"
+  nohup env POKER_AIR_RUN_DIR="$RUN_DIR" TARGET_HANDS="$TARGET_HANDS" \
+    TIMEOUT_SECS="$BROWSER_TIMEOUT_SECS" STRATEGY="$STRATEGY" \
+    GAME_API="http://127.0.0.1:$GAME_PORT" POKER_URL="http://localhost:$CLIENT_PORT" \
+    EXT_PATH="$ROOT/extension" \
+    bash "$ROOT/scripts/poker_air_browser_supervisor.sh" "$RUN_DIR" "$TARGET_HANDS" 10 \
+    >"$RUN_DIR/browser-supervisor.log" 2>&1 &
+  disown
+  log "浏览器监督进程已脱离启动（pid $(cat "$RUN_DIR/browser-supervisor.pid" 2>/dev/null || echo "?")）"
 else
-  BROWSER_PID=""
   log "--no-browser：跳过浏览器阶段"
 fi
 
 # ---------- 11) 收尾监控 ----------
-log "全部组件已启动；等待 $TARGET_HANDS 手完成 + 全部锚定上链…"
-log "  链日志    $RUN_DIR/zchain.log"
-log "  服务器    $RUN_DIR/texas-server.log（grep 'on appchain'）"
-log "  结算桥    $RUN_DIR/bridge.log（grep ANCHORED）"
-log "  浏览器    $RUN_DIR/browser.log"
+# 浏览器监督者已脱离进程树：成败经 sentinel 文件感知（browser.done /
+# browser.failed）。桥仍以进程存活 + "target reached" 日志判定。
 BRIDGE_OK=0
-BROWSER_OK=0
 BRIDGE_DEAD=0
 BRIDGE_DEAD_SECS=0
-# 桥与浏览器各自独立达标：桥先到 100 时浏览器还要轮询到同一水位、再做
-# 区块链浏览器（Portal）验收——绝不能在桥退出的瞬间就 break（那会趁浏览
-# 器仍在打最后一手时把它连同 Portal 验收一起清理掉）。
 while true; do
-  if [[ "$BRIDGE_DEAD" == 0 ]] && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
+  if [ -f "$RUN_DIR/browser.failed" ]; then
+    log "✗ 浏览器监督进程报告失败（重启次数耗尽），最近日志："
+    tail -15 "$RUN_DIR/browser.log" || true
+    break
+  fi
+  if [ "$BRIDGE_DEAD" == 0 ] && ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
     if grep -q "target reached" "$RUN_DIR/bridge.log" 2>/dev/null; then BRIDGE_OK=1; fi
     BRIDGE_DEAD=1
   fi
-  if [[ -n "$BROWSER_PID" ]] && ! kill -0 "$BROWSER_PID" 2>/dev/null; then
-    if grep -q "DONE:" "$RUN_DIR/browser.log" 2>/dev/null; then BROWSER_OK=1; fi
+  if [ -f "$RUN_DIR/browser.done" ]; then
+    BROWSER_OK=1
+    grep -q "target reached" "$RUN_DIR/bridge.log" 2>/dev/null && BRIDGE_OK=1
     break
   fi
-  if [[ "$BRIDGE_DEAD" == 1 ]]; then
+  if [ "$BRIDGE_DEAD" == 1 ]; then
     BRIDGE_DEAD_SECS=$((BRIDGE_DEAD_SECS + 5))
-    if [[ "$BRIDGE_DEAD_SECS" -ge 300 ]]; then
+    if [ "$BRIDGE_DEAD_SECS" -ge 1800 ]; then
       log "桥已退出 ${BRIDGE_DEAD_SECS}s 而浏览器未收尾，超时收尾"
       break
     fi
@@ -342,7 +367,7 @@ done
 if [[ "$BRIDGE_OK" == 1 ]]; then log "✓ 结算桥已锚定 $TARGET_HANDS 手到 zchain"; else
   log "✗ 结算桥未达标，最近日志："; tail -10 "$RUN_DIR/bridge.log" || true; fi
 if [[ "$NO_BROWSER" != 1 ]]; then
-  if [[ "$BROWSER_OK" == 1 ]]; then log "✓ 浏览器打牌达标"; else
+  if [ -f "$RUN_DIR/browser.done" ]; then log "✓ 浏览器打牌达标（DONE sentinel）"; else
     log "✗ 浏览器阶段异常，最近日志："; tail -15 "$RUN_DIR/browser.log" || true; fi
 fi
 FINAL_HEIGHT=$(rpc_call get_block_count "$ZCHAIN_RPC_PORT" 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("result") or {}).get("height") or 0)' 2>/dev/null || echo '?')

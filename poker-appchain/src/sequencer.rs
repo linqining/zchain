@@ -1152,6 +1152,86 @@ impl Sequencer {
     ///
     /// # Errors
     /// 链断裂/签名坏/状态根分叉 → 对应错误。
+    /// 崩溃安全重放（2026-09-17 长跑复现）：追加写 WAL 的尾帧可能因进程
+    /// 被强杀而撕裂/半写——严格 [`Self::replay`] 会整链拒绝（网关数据面
+    /// 保持该纪律），生产方（嵌入式 runtime）则用本函数：对有效前缀重建
+    /// 状态并把 WAL 文件**物理截回前缀末尾**（fsync），后续追加基于干净
+    /// 尾部。截断只发生在首坏帧处；首帧即坏 → 无可恢复，返回错误。
+    ///
+    /// # Errors
+    /// 文件不可读或首帧解析/验签失败 → 对应 [`AppchainError`]。
+    pub fn replay_recover_torn_tail(
+        path: &Path,
+        key_public: [u8; 32],
+        config: SequencerConfig,
+        metrics: Arc<MetricsRegistry>,
+    ) -> AppchainResult<Self> {
+        let (frames, valid_bytes, tail_reason) =
+            crate::wal::read_all_strict_prefix(path, &key_public)?;
+        if let Some(reason) = tail_reason {
+            let drop = std::fs::metadata(path)
+                .map(|m| m.len().saturating_sub(valid_bytes))
+                .unwrap_or(0);
+            let f = std::fs::OpenOptions::new()
+                .write(true)
+                .open(path)
+                .map_err(|e| AppchainError::WalCorrupted("truncate open failed"))?;
+            f.set_len(valid_bytes)
+                .map_err(|e| AppchainError::WalCorrupted("truncate set_len failed"))?;
+            f.sync_all()
+                .map_err(|e| AppchainError::WalCorrupted("truncate sync failed"))?;
+            eprintln!(
+                "[sequencer] WAL torn-tail recovery: dropped {drop} trailing byte(s) ({reason});                  {} valid frame(s) kept",
+                frames.len()
+            );
+        }
+        Self::rebuild_from_frames(path, frames, key_public, config, metrics)
+    }
+
+    fn rebuild_from_frames(
+        path: &Path,
+        frames: Vec<SignedFrame>,
+        key_public: [u8; 32],
+        config: SequencerConfig,
+        metrics: Arc<MetricsRegistry>,
+    ) -> AppchainResult<Self> {
+        crate::soft_confirm::verify_chain(&frames, &key_public)?;
+        // 证明水位不入 WAL（崩溃重启后保守归零）。历史帧在提交时已通过
+        // 全部在线准入（含"桌准入只收 proven note"），重放是**重建已承诺
+        // 状态**而非新准入——若按原配置重放，任何含成功 BuyIn 的 WAL 都会
+        // 因水位丢失而无法恢复（破坏 P0-4"重启后从 WAL 全量重放恢复"的
+        // 承诺点语义）。恢复期覆盖该单项，重放完成后恢复原始配置——
+        // 重启后的**新**提交仍受完整在线准入约束（M8 污染防御不变）。
+        let recovery_config = SequencerConfig {
+            admission_proven_only: false,
+            ..config.clone()
+        };
+        let mut seq = Self::new(
+            SequencerKey::from_seed(&[0u8; 32]),
+            recovery_config,
+            metrics,
+        );
+        seq.chain = Vec::with_capacity(frames.len());
+        for f in &frames {
+            let expect_root = f.frame.state_root;
+            let ts = f.frame.ts_ms;
+            Self::apply_op(&seq.config, &seq.metrics, &mut seq.state, &f.frame.op, ts, None)?;
+            let got = seq.state.root();
+            if got != expect_root {
+                return Err(AppchainError::WalCorrupted("state root divergence on replay"));
+            }
+            seq.last_ts_ms = ts;
+            seq.chain.push(f.clone());
+        }
+        seq.config = config;
+        let _ = path;
+        Ok(seq)
+    }
+
+    /// 从 WAL 全量重放（fail-closed：链签名、每帧状态根都重验）。
+    ///
+    /// # Errors
+    /// 链断裂/签名坏/状态根分叉 → 对应错误。
     pub fn replay(
         path: &Path,
         key_public: [u8; 32],
@@ -1237,6 +1317,16 @@ impl Sequencer {
     ///
     /// 持久化语义（P0-4 复核）：水位是唯一不走 WAL 的状态变更——内存态可
     /// 由证明管道从批次重放恢复（崩溃后保守归零），无需独立持久化。
+    /// 替换签名密钥（生产方重启恢复专用）：`replay` 构建的实例携带占位
+    /// 密钥（重放只验签），若生产方（嵌入式 appchain runtime）复用该实例
+    /// 继续追加出帧，必须先重设真实密钥——否则所有新帧签名无效，下游
+    /// 验签方（网关/桥）整链拒绝。
+    pub fn set_signing_key(&mut self, key: SequencerKey) {
+        self.key = key;
+    }
+
+    /// 证明水位推进（单 op 标记 + 连续前缀折算）：标记 `op_index` 已证明，
+    /// 并把可连续的前缀一并推进（`proven_marks` 折算）。
     pub fn mark_proven(&mut self, op_index: u64) {
         if op_index <= self.state.proven_watermark || !self.proven_marks.insert(op_index) {
             return; // 已被水位覆盖或重复标记

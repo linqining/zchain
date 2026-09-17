@@ -706,6 +706,10 @@ fn settlement_detail(state: &Arc<GatewayState>, binding_hex: &str) -> Response {
             let asset = asset_id_json(&AssetId::of_v1(p.asset_class));
             serde_json::json!({
                 "owner": short_hex(&p.owner),
+                // wallet-core wasm 的 payout_root 复算需要完整 66-hex owner
+                // （短摘要无法参与根重算）；owner 保留短摘要作展示，全量值
+                // 走 owner_full。链上 WAL 本身公开可重放，不新增泄露面。
+                "owner_full": hex::encode(p.owner),
                 "amount": p.amount,
                 "asset_class": p.asset_class.name(),
                 "asset_id": asset,

@@ -291,7 +291,13 @@ mod portal_check {
     /// 网关 payout JSON → NoteSpec（同 ABI 字段；payout.table_id 为 None 时
     /// 落记录 table_id，与 payout_leaves 的 leaf 语义一致）。
     fn parse_note_spec(p: &Value, record_table_id: u64) -> WalletResult<NoteSpec> {
-        let owner_hex = str_field(p, "owner")?;
+        // 网关明细端点为展示隐私把 owner 截成 short_hex；全量 66-hex 走
+        // owner_full（wasm 复算 payout_root 必须全量）。兼容两者：优先
+        // owner_full，缺失时回落 owner（直连 WAL/旧网关载荷）。
+        let owner_hex = match p.get("owner_full").and_then(Value::as_str) {
+            Some(h) if h.len() == 66 && h.bytes().all(|b| b.is_ascii_hexdigit()) => h,
+            _ => str_field(p, "owner")?,
+        };
         if owner_hex.len() != 66 || !owner_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(WalletError::InvalidArgument("payouts[].owner"));
         }
