@@ -37,7 +37,7 @@ group = { workspace = true }
 
 [workspace.dependencies]
 # 共享依赖集中管理，便于版本一致与升级
-poker_protocol = { path = "../zgame/poker_protocol", features = ["borsh"] }
+poker_protocol = { git = "ssh://git@github.com/linqining/poker_protocol.git", tag = "v1.0.0", features = ["borsh"] }
 # vm-common 是 workspace 内的共享 path 成员。
 vm-common = { path = "vm-common" }
 # 结算语义唯一事实源（plan-appchain §5.2-1）：VM/appchain/verifier 共用。

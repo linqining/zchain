@@ -32,12 +32,15 @@ use borsh::{BorshDeserialize, BorshSerialize};
 // 2. Stark 系开发先用同曲线最稳妥，后续按 `Curve` trait 扩展其他后端；
 // 3. BLS 配对仅 SNARK 需要，STARK 证明栈用不到。
 // 切换面 = 本文件的类型别名/重导出；验证逻辑全部走 `Curve` trait 泛型。
-pub type TableCurve = poker_protocol::crypto::stark_curve::StarkCurve;
-pub type TablePoint = poker_protocol::crypto::stark_curve::StarkPoint;
-pub type TableScalar = poker_protocol::crypto::stark_curve::StarkScalar;
-pub use poker_protocol::crypto::types::StarkECPoint as ECPoint;
+// poker_protocol 已切换到独立仓库 v1.0.0（Stark 唯一世界），固有门面
+// 由 `super::super::stark_compat` 复原。
+pub type TableCurve = super::super::stark_compat::StarkCurve;
+pub type TablePoint = super::super::stark_compat::StarkPoint;
+pub type TableScalar = super::super::stark_compat::StarkScalar;
+pub use poker_protocol::crypto::types::ECPoint;
+use super::super::stark_compat::CurvePoint;
 #[cfg(test)]
-use poker_protocol::crypto::stark_curve::{StarkPoint, StarkScalar};
+use super::super::stark_compat::{StarkPoint, StarkPointExt};
 // 注：`ElGamalCiphertext` 通过下方 `pub use` 重导出，避免重复导入。
 
 use crate::Address;
@@ -161,11 +164,11 @@ pub const fn seat_mask_is_canonical(mask: SeatMask, max_players: u8) -> bool {
 // ========== ElGamal 密文 ==========
 
 // `ElGamalCiphertext` 直接复用 `poker_protocol::crypto::types::ElGamalCiphertext`
-// （= `ElGamalCiphertextGeneric<Bls12381Curve>`，字段 `c1/c2: StarkPoint`，
-//   已在 `poker_protocol::borsh_impls` impl BorshSerialize/BorshDeserialize）。
+// （= `ElGamalCiphertextGeneric<StarkCurve>`，字段 `c1/c2: StarkPoint`，
+//   Borsh impl 由独立仓库 v1.0.0 的 borsh feature 提供）。
 // 重导出供外部模块使用。
-pub use poker_protocol::crypto::types::StarkElGamalCiphertext as ElGamalCiphertext;
-/// 洗牌证明（StarkCurve 实例化；Args wire 格式见 poker_protocol::borsh_impls_stark）
+pub use poker_protocol::crypto::types::ElGamalCiphertext;
+/// 洗牌证明（StarkCurve 实例化；wire 格式以独立仓库 v1.0.0 borsh impls 为准）
 pub type ShuffleProof = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof<TableCurve>;
 /// 揭牌令牌证明（StarkCurve 实例化）
 pub type RevealTokenProof = poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof<TableCurve>;
@@ -301,7 +304,7 @@ impl Seat {
                 "Texas newly occupied seat must be waiting or active".into(),
             ));
         }
-        if bool::from(pk.0.is_identity()) {
+        if pk.0.is_identity() {
             return Err(PokerL1Error::Serialization(
                 "Texas newly occupied seat cannot use an identity public key".into(),
             ));
@@ -701,7 +704,7 @@ impl Seat {
         pending_addon: u64,
         time_bank_ms: u32,
     ) -> PokerL1Result<()> {
-        if player == EMPTY_PLAYER || bool::from(pk.0.is_identity()) {
+        if player == EMPTY_PLAYER || pk.0.is_identity() {
             return Err(PokerL1Error::Serialization(
                 "Texas playing seat requires a live identity and key".into(),
             ));
@@ -832,7 +835,7 @@ fn validate_occupied_seat(occupied: &OccupiedSeat) -> PokerL1Result<()> {
             "Texas occupied seat cannot use the empty player address".into(),
         ));
     }
-    if bool::from(occupied.pk.0.is_identity()) {
+    if occupied.pk.0.is_identity() {
         return Err(PokerL1Error::Serialization(
             "Texas occupied seat cannot use an identity public key".into(),
         ));
@@ -2693,7 +2696,7 @@ impl TexasPokerTable {
             }
             aggregate = Some(match aggregate {
                 None => *pk,
-                Some(current) => ECPoint::from(super::utils::g1_add(&current.0, &pk.0)),
+                Some(current) => ECPoint(super::utils::g1_add(&current.0, &pk.0)),
             });
         }
         if aggregate

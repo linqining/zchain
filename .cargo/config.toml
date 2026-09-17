@@ -1,0 +1,4 @@
+# poker_protocol 来自私有仓库 zgame 的 git tag 依赖，cargo 内置 libssh2
+# 无法使用本机 ssh-agent，改用系统 git CLI 完成认证与拉取。
+[net]
+git-fetch-with-cli = true

@@ -1188,6 +1188,15 @@ impl Sequencer {
         Self::rebuild_from_frames(path, frames, key_public, config, metrics)
     }
 
+    /// 重放占位 signing key（**非生产回退路径**，生产区唯一 `from_seed`
+    /// 字面量，tests/key_provider.rs 的 grep 级断言钉住恰此一处）：
+    /// 重放只验签不签名（`verify_chain` 已用调用方传入的 `key_public`
+    /// 验全链），此密钥在重放实例上永不使用；不走 KeyProvider——replay
+    /// 是纯公钥 API（语义冻结，见外部评审建议 4 接线文档）。
+    fn replay_placeholder_key() -> SequencerKey {
+        SequencerKey::from_seed(&[0u8; 32])
+    }
+
     fn rebuild_from_frames(
         path: &Path,
         frames: Vec<SignedFrame>,
@@ -1207,7 +1216,8 @@ impl Sequencer {
             ..config.clone()
         };
         let mut seq = Self::new(
-            SequencerKey::from_seed(&[0u8; 32]),
+            // 重放占位 signing key，语义见 replay_placeholder_key。
+            Self::replay_placeholder_key(),
             recovery_config,
             metrics,
         );
@@ -1251,11 +1261,8 @@ impl Sequencer {
             ..config.clone()
         };
         let mut seq = Self::new(
-            // 占位 signing key（**非生产回退路径**）：重放只验签不签名
-            // （上方 `verify_chain` 已用调用方传入的 `key_public` 验全链），
-            // 此密钥在重放实例上永不使用；不走 KeyProvider——replay 是
-            // 纯公钥 API（语义冻结，见外部评审建议 4 接线文档）。
-            SequencerKey::from_seed(&[0u8; 32]),
+            // 重放占位 signing key，语义见 replay_placeholder_key。
+            Self::replay_placeholder_key(),
             recovery_config,
             metrics,
         );

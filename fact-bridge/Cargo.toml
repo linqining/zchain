@@ -8,7 +8,7 @@ license = "BUSL-1.1"
 [dependencies]
 poker_l1 = { path = "../poker_l1" }
 fact-verify = { path = "../../poker_texas_air/fact-verify" }
-poker_protocol = { path = "../../zgame/poker_protocol" }
+poker_protocol = { workspace = true }
 secp256k1 = { version = "0.29", features = ["recovery", "rand-std"] }
 hex = "0.4"
 clap = { version = "4", features = ["derive"] }

@@ -24,11 +24,11 @@
 //! - 外部命令序号仅由 dispatch 原子提交边界递增 `call_seq`
 //! - 错误用 `PokerL1Error::Serialization` 包裹（带上下文 message）
 
-use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use crate::vm::contracts::stark_compat::{CurvePoint, StarkCurve, StarkPoint};
 use poker_protocol::zk_shuffle::dleq_proof::LeaveKind;
 
 use super::types::{ShuffleProof, RevealTokenProof};
-use poker_protocol::crypto::types::{StarkECPoint as ECPoint, StarkElGamalCiphertext as ElGamalCiphertext};
+use poker_protocol::crypto::types::{ECPoint, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
 // V3 reconstruction 家族为 vendored 模块（zgame 版 poker_protocol 从未提供 V3 API）。
 use super::reconstruction_v3::{
@@ -1468,10 +1468,10 @@ pub fn apply_submit_shuffle_v2(
 
     // 链上注入：new_cts[i] = add_pk_to_c2(output_cts[i], player_pk)
     // ECPoint → StarkPoint（Seat.pk 字段为 ECPoint）
-    let player_pk: StarkPoint = (*table.seats[seat_index as usize]
+    let player_pk: StarkPoint = table.seats[seat_index as usize]
         .pk()
-        .ok_or_else(|| PokerL1Error::Serialization("shuffle seat has no live key".into()))?)
-    .into();
+        .ok_or_else(|| PokerL1Error::Serialization("shuffle seat has no live key".into()))?
+        .0;
     let new_cts: Vec<ElGamalCiphertext> = output_cts
         .iter()
         .map(|ct| utils::add_pk_to_c2(ct, &player_pk))
@@ -1542,10 +1542,10 @@ pub fn apply_submit_player_reveal_tokens(
         )));
     }
     // ECPoint → StarkPoint（Seat.pk 字段为 ECPoint）
-    let expected_pk: StarkPoint = (*table.seats[seat_index as usize]
+    let expected_pk: StarkPoint = table.seats[seat_index as usize]
         .pk()
-        .ok_or_else(|| PokerL1Error::Serialization("reveal seat has no live key".into()))?)
-    .into();
+        .ok_or_else(|| PokerL1Error::Serialization("reveal seat has no live key".into()))?
+        .0;
 
     for k in 0..assignment_indices.len() {
         let ai = assignment_indices[k] as usize;
@@ -1646,7 +1646,7 @@ pub fn apply_submit_player_reveal_tokens(
             }
             assignment
                 .reveal_tokens
-                .insert(insert_index, ECPoint::from(token));
+                .insert(insert_index, ECPoint(token));
             seat_mask_remove(&mut assignment.pending_mask, seat_index);
             assignment.submitted_mask |= 1u16 << seat_index;
         }
@@ -4151,13 +4151,13 @@ mod tests {
         for (seat_index, owner_pk) in owner_public_keys.iter().enumerate() {
             table.seats[seat_index].fixture_set_player([(seat_index as u8) + 1; 20]);
             table.seats[seat_index].set_stack(1_000).unwrap();
-            table.seats[seat_index].fixture_set_pk(ECPoint::from(*owner_pk));
+            table.seats[seat_index].fixture_set_pk(ECPoint(*owner_pk));
         }
         set_initial_encrypted_deck(&mut table).unwrap();
         table.deck_state.contributor_mask = 0b11;
         assert_eq!(
             table.derived_aggregated_pk().unwrap(),
-            Some(ECPoint::from(aggregate_pk))
+            Some(ECPoint(aggregate_pk))
         );
         table.hand_id = 7;
         table
@@ -4338,7 +4338,7 @@ mod tests {
         let pk = g * scalar_from_u64(0xAB);
         assert!(!is_pk_registered(&table.seats, &pk));
         table.seats[0].fixture_set_player([0x01; 20]);
-        table.seats[0].fixture_set_pk(ECPoint::from(pk));
+        table.seats[0].fixture_set_pk(ECPoint(pk));
         assert!(is_pk_registered(&table.seats, &pk));
         let other_pk = g * scalar_from_u64(0xCD);
         assert!(!is_pk_registered(&table.seats, &other_pk));
@@ -4789,14 +4789,14 @@ mod tests {
         let pk2 = g * scalar_from_u64(44);
         table.seats[0].fixture_set_player([0x01; 20]);
         table.seats[0].set_stack(500).unwrap();
-        table.seats[0].fixture_set_pk(ECPoint::from(pk0));
+        table.seats[0].fixture_set_pk(ECPoint(pk0));
         table.seats[1].fixture_set_player([0x02; 20]);
         table.seats[1].set_stack(500).unwrap();
-        table.seats[1].fixture_set_pk(ECPoint::from(pk1));
+        table.seats[1].fixture_set_pk(ECPoint(pk1));
         table.seats[2].fixture_set_player([0x03; 20]);
         table.seats[2].set_stack(500).unwrap();
         table.chip_pool = 1_500;
-        table.seats[2].fixture_set_pk(ECPoint::from(pk2));
+        table.seats[2].fixture_set_pk(ECPoint(pk2));
         table.deck_state.contributor_mask = 0b111;
         // 用一个非 NONE 的 round_state，使 reset_for_next_hand 不会被触发
         // （count_active_players 在 kick 后仍 >= MIN_PLAYERS_TO_START）。

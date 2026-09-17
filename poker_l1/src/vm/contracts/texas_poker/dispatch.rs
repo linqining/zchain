@@ -25,12 +25,12 @@
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use crate::vm::contracts::stark_compat::{StarkCurve, StarkPoint, StarkScalar};
 use poker_protocol::zk_shuffle::dleq_proof::LeaveKind;
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use super::types::{ShuffleProof, RevealTokenProof};
-use poker_protocol::crypto::types::{StarkECPoint as ECPoint, StarkElGamalCiphertext as ElGamalCiphertext};
+use super::types::ShuffleProof;
+use poker_protocol::crypto::types::{ECPoint, ElGamalCiphertext};
 // V3 reconstruction 家族为 vendored 模块（zgame 版 poker_protocol 从未提供 V3 API）。
 use super::reconstruction_v3::{ReconstructProofV3, ReconstructionV3Statement};
 
@@ -1686,7 +1686,7 @@ fn dispatch_join_table(
         ));
     }
     // ECPoint → StarkPoint（state_machine::is_pk_registered / Seat.pk 使用裸 StarkPoint）
-    let pk: StarkPoint = input.pk.into();
+    let pk: StarkPoint = input.pk.0;
     if super::utils::g1_is_identity(&pk) {
         return Err(PokerL1Error::Serialization(
             "join_table public key cannot be identity".into(),
@@ -1726,7 +1726,7 @@ fn dispatch_join_table(
     table.seats[seat_idx as usize] = Seat::occupied(
         context.caller,
         input.buy_in,
-        ECPoint::from(pk),
+        ECPoint(pk),
         SeatStatus::Active,
     )?; // WAITING 状态加入，立即参与下一局
 
@@ -1901,7 +1901,7 @@ fn dispatch_submit_player_reveal_tokens(
     )?;
     // ECPoint → StarkPoint（state_machine 接口使用裸 StarkPoint）
     let reveal_tokens: Vec<StarkPoint> =
-        input.reveal_tokens.into_iter().map(Into::into).collect();
+        input.reveal_tokens.into_iter().map(|t| t.0).collect();
     state_machine::apply_submit_player_reveal_tokens(
         table,
         seat_index,
@@ -2055,7 +2055,7 @@ mod tests {
     use super::*;
     use crate::object_model::ObjectID;
     use crate::signature::TaggedPubkey;
-    use group::Group;
+    use crate::vm::contracts::stark_compat::{CurvePoint, StarkPointExt};
 
     fn make_table() -> TexasPokerTable {
         // creator 设为 [0xAA;20]，与 make_context().caller 一致，

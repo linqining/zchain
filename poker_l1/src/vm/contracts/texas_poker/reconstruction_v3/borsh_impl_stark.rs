@@ -1,22 +1,22 @@
 //! Vendored Borsh wire encodings for the reconstruction V3 family, specialized
-//! on the zchain default curve (`StarkCurve`, i.e. zgame `DefaultCurve`).
+//! on the zchain default curve (`StarkCurve`，poker_protocol v1.0.0 唯一世界）。
 //!
 //! Mirrors `poker_texas_air/poker-protocol-{bg,proofs}/src/borsh_impl.rs`
 //! (2026-09-12): identical field order, u32 LE length prefixes, the same
 //! 1..=1024 / 2..=1024 length discipline and version-byte checks, so the
 //! logical wire shape is the upstream one. Point/scalar encodings follow the
-//! zgame `poker_protocol` convention (48-byte compressed BLS12-381 G1,
-//! 32-byte big-endian scalar), consistent with the existing zgame impls for
+//! poker_protocol convention (32-byte compressed felt point, 32-byte
+//! big-endian scalar), consistent with the protocol repo's own impls for
 //! `ElGamalCiphertextGeneric<StarkCurve>` / `ECPoint`.
 //!
-//! `ElGamalCiphertextGeneric<StarkCurve>` itself is implemented in zgame
-//! (`poker_protocol` crate, `borsh` feature) and is reused here.
+//! `ElGamalCiphertextGeneric<StarkCurve>` itself is implemented in the
+//! standalone `poker_protocol` repo (`borsh` feature) and is reused here.
 
 use borsh::{BorshDeserialize, BorshSerialize};
-use group::GroupEncoding;
 
-use poker_protocol::crypto::curve::CurveScalar;
-use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use poker_protocol::crypto::curve::{CurvePoint, CurveScalar};
+
+use crate::vm::contracts::stark_compat::{StarkCurve, StarkPoint, StarkScalar, StarkPointExt};
 
 use super::bayer_groth::{BayerGrothShuffleProof, MultiExponentiationArgument, ProductArgument};
 use super::chaum_pedersen::ChaumPedersenDLEQProof;

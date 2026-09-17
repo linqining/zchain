@@ -42,6 +42,7 @@ pub mod hand_started;
 pub mod request_da;
 pub mod revert;
 pub mod settle;
+pub mod stark_compat;
 pub mod texas_poker;
 pub mod texas_poker_precompile;
 pub mod types;

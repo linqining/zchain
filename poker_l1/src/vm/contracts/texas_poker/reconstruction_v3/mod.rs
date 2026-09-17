@@ -20,10 +20,10 @@
 //! - `poker_protocol_bg::BayerGrothShuffleProof` has **no** zgame counterpart
 //!   (zgame never shipped a bayer_groth module), so the backend itself is
 //!   vendored here as [`bayer_groth`].
-//! - Borsh wire support is vendored in `borsh_impl` and specialized on
-//!   [`poker_protocol::crypto::types::DefaultCurve`] (BLS12-381), mirroring the
-//!   upstream field order and length discipline while using the zgame point
-//!   encoding (48-byte compressed G1, 32-byte big-endian scalar).
+//! - Borsh wire support is vendored in `borsh_impl_stark` and specialized on
+//!   [`poker_protocol::crypto::types::DefaultCurve`] (StarkCurve，poker_protocol
+//!   v1.0.0 起唯一世界)，mirroring the upstream field order and length discipline
+//!   with the 32-byte felt compressed point / 32-byte big-endian scalar encoding.
 //!
 //! Not vendored (unused by poker_l1, and they pull `rayon`): the V2 proof glue
 //! in upstream `mod.rs` (`ReconstructProof`, `reconstruct_deck`,
@@ -41,10 +41,11 @@ mod swap_out;
 mod v3;
 
 // poker_l1 declares no `borsh` cargo feature; its `borsh` dependency (and the
-// zgame `poker_protocol` `borsh` feature feeding the ElGamal impls used below)
+// `poker_protocol` `borsh` feature feeding the ElGamal impls used below)
 // is always on, so the wire impls are compiled unconditionally.
-mod borsh_impl;
-
+// 旧 BLS 版 `borsh_impl.rs`（`ReconstructProofV3<Bls12381Curve>` 家族）随
+// poker_protocol v1.0.0 删除 BLS 世界一并移除（上游声明"不考虑兼容"）；
+// Stark wire impls 见下方 `borsh_impl_stark`。
 pub use chaum_pedersen::ChaumPedersenDLEQProof;
 pub use cross_key::CrossKeyNegationProof;
 pub use ordered_encryption::OrderedEncryptionProof;

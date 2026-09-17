@@ -22,11 +22,12 @@
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use poker_protocol::crypto::curve::Curve as _;
-use poker_protocol::crypto::stark_curve::{StarkCurve, StarkPoint, StarkScalar};
+use crate::vm::contracts::stark_compat::{CurvePoint, CurveScalar, StarkCurve, StarkPoint, StarkScalar, StarkPointExt, StarkScalarExt};
 
-// 注：StarkPoint / StarkScalar 提供 blstrs 风格固有门面（generator / identity /
-// is_identity / to_compressed / double / random / invert 等），无需 group / ff trait。
-use poker_protocol::crypto::types::StarkElGamalCiphertext as ElGamalCiphertext;
+// 注：StarkPoint / StarkScalar 的 blstrs 风格固有门面由 stark_compat 复原
+// （generator / identity / is_identity / to_compressed / double / invert 等），
+// 无需 group / ff trait。
+use poker_protocol::crypto::types::ElGamalCiphertext;
 use poker_protocol::zk_shuffle::transcript_ext::{
     CryptoTranscript, FiatShamirTranscript, MerlinTranscript,
 };

@@ -11,7 +11,7 @@
 //! 运行：`cargo test -p poker_l1 --test live_game_e2e -- --nocapture`
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
-use poker_protocol::crypto::stark_curve::{StarkPoint, StarkScalar};
+use poker_l1::vm::contracts::stark_compat::{CurvePoint, CurveScalar, StarkPoint, StarkPointExt, StarkScalar, StarkScalarExt};
 use poker_l1::account::derive_address;
 use poker_l1::block::{compute_tx_merkle_root, Block, BlockHeader};
 use poker_l1::consensus::validator_set::ValidatorEntry;
@@ -359,10 +359,10 @@ fn live_node_poker_hand_e2e() {
 
     // ===== 6. 真实 ZK 洗牌 ×2 =====
     let g = StarkPoint::generator();
-    let mut deck: Vec<poker_protocol::crypto::types::StarkElGamalCiphertext> =
+    let mut deck: Vec<poker_protocol::crypto::types::ElGamalCiphertext> =
         poker_l1::vm::contracts::texas_poker::utils::generate_plaintext_cards()
             .into_iter()
-            .map(|m| poker_protocol::crypto::types::StarkElGamalCiphertext { c1: g, c2: m })
+            .map(|m| poker_protocol::crypto::types::ElGamalCiphertext { c1: g, c2: m })
             .collect();
     let agg_pk = host.bls_pk + alice.bls_pk;
 
@@ -382,12 +382,12 @@ fn live_node_poker_hand_e2e() {
                 }
             })
             .collect();
-        let output: Vec<poker_protocol::crypto::types::StarkElGamalCiphertext> = (0..n)
+        let output: Vec<poker_protocol::crypto::types::ElGamalCiphertext> = (0..n)
             .map(|j| deck[permute[j]].re_encrypt(&agg_pk, &r_values[j]))
             .collect();
         let mut transcript =
             poker_l1::vm::contracts::texas_poker::utils::new_shuffle_transcript();
-        let proof = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof::<poker_protocol::crypto::stark_curve::StarkCurve>::prove(
+        let proof = poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof::<poker_l1::vm::contracts::stark_compat::StarkCurve>::prove(
             &deck, &output, &permute, &r_values, &agg_pk, &mut rng, &mut transcript,
         )
         .expect("本地 shuffle 证明生成");
@@ -415,7 +415,7 @@ fn live_node_poker_hand_e2e() {
     // ===== 7. 链上状态核验 =====
     let onchain = decode_onchain_table(&node);
     println!("[7] 洗牌完成：链上 street={}，进入 DealHole 揭牌阶段", onchain.round_state());
-    let onchain_deck: Vec<poker_protocol::crypto::types::StarkElGamalCiphertext> =
+    let onchain_deck: Vec<poker_protocol::crypto::types::ElGamalCiphertext> =
         onchain.deck_state.encrypted.to_vec();
     assert_eq!(onchain_deck.len(), 52);
     for (i, (oc, mc)) in onchain_deck.iter().zip(deck.iter()).enumerate() {
@@ -469,7 +469,7 @@ fn live_node_poker_hand_e2e() {
                 &mut rng,
                 &mut transcript,
             ));
-            tokens.push(poker_protocol::crypto::types::StarkECPoint::from(token));
+            tokens.push(poker_protocol::crypto::types::ECPoint(token));
         }
         borsh::to_vec(&poker_l1::vm::contracts::texas_poker::dispatch::SubmitRevealTokensArgs {
             seat_index: if card_indices[0] < 2 { 1 } else { 0 }, // 揭对方底牌

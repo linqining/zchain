@@ -29,7 +29,7 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 
-use poker_protocol::crypto::stark_curve::StarkScalar;
+
 
 use crate::error::{PokerL1Error, PokerL1Result};
 use crate::object_model::{Object, ObjectID, Ownership};

@@ -46,10 +46,10 @@
 
 use borsh::{BorshDeserialize, BorshSerialize};
 use blstrs::{G2Projective, Scalar};
+use ff::Field;
 use group::Group;
 use serde::{Deserialize, Serialize};
 use subtle::CtOption;
-use poker_protocol::crypto::curve::CurveScalar;
 
 use crate::BlockHeight;
 use crate::Hash;
@@ -101,7 +101,7 @@ fn derive_scalar(domain: &[u8], seed: &[u8; 32], counter: u64) -> Scalar {
 
 /// `base^exp`（exp 为 u64，平方乘；指数规模 = t，无性能压力）。
 fn scalar_pow(base: &Scalar, exp: u64) -> Scalar {
-    let mut acc = Scalar::one();
+    let mut acc = Scalar::ONE;
     let mut b = *base;
     let mut e = exp;
     while e > 0 {
@@ -136,8 +136,8 @@ fn lagrange_coefficients(ids: &[u64]) -> PokerL1Result<Vec<Scalar>> {
     let x = |v: u64| Scalar::from(v);
     let mut out = Vec::with_capacity(ids.len());
     for &xi in ids {
-        let mut num = Scalar::one();
-        let mut den = Scalar::one();
+        let mut num = Scalar::ONE;
+        let mut den = Scalar::ONE;
         for &xj in ids {
             if xj == xi {
                 continue;
@@ -145,8 +145,9 @@ fn lagrange_coefficients(ids: &[u64]) -> PokerL1Result<Vec<Scalar>> {
             num *= x(xj);
             den *= x(xj) - x(xi);
         }
-        // CurveScalar::invert 语义：非零分母必可逆（ids 互异 ⇒ 分母非零）
-        out.push(num * den.invert());
+        // ff::Field::invert 返回 CtOption：非零分母必可逆（ids 互异 ⇒ 分母非零），
+        // unwrap 即旧 CurveScalar::invert 的直返语义。
+        out.push(num * den.invert().unwrap());
     }
     Ok(out)
 }
@@ -278,7 +279,7 @@ pub fn deal_threshold(
     let shares = (1..=u64::from(n))
         .map(|i| {
             let x = Scalar::from(i);
-            let mut acc = Scalar::zero();
+            let mut acc = Scalar::ZERO;
             for (j, c) in coeffs.iter().enumerate() {
                 acc += c * scalar_pow(&x, j as u64);
             }

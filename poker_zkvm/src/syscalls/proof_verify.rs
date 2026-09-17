@@ -18,24 +18,21 @@
 //! 各 proof verify syscall 接受单个 length-prefixed 缓冲区（避免 a0-a7 寄存器不够用）。
 //! 详细格式见各 syscall 的 ABI 注释。
 //!
-//! # Borsh 兼容性
+//! # 曲线与 Borsh 兼容性
 //!
-//! guest 端 `guest_sdk::bls::{G1Point, Scalar, ElGamalCiphertext}` 与 host 端
-//! `poker_protocol::crypto::types::{ECPoint, ECScalar, ElGamalCiphertext}` 的 Borsh
-//! 布局逐字节一致（48B G1 compressed / 32B scalar big-endian / 96B ciphertext），
-//! 因此 guest 序列化的 buffer 可被 host 直接 `borsh::from_slice` 反序列化。
+//! poker_protocol 已切换到独立仓库 v1.0.0（Stark 唯一世界，guest 尚未迁入，
+//! ABI 待 guest 移植时一并冻结）：点 = 32B compressed felt，标量 = 32B 大端，
+//! 密文 = c1‖c2 各 32B（64B）。guest 端序列化格式须与本文件解析逐字节对齐。
 
 use blake2::Blake2bVar;
 use blake2::digest::{Update, VariableOutput};
 use borsh::BorshDeserialize;
-use pairing::group::ff::Field;
-use pairing::group::{Curve, Group, GroupEncoding};
 
-use blstrs::{G1Projective, Scalar as BlsScalar};
-
+use poker_protocol::crypto::curve::{Curve, CurvePoint};
 use poker_protocol::crypto::types::{DefaultCurve, ElGamalCiphertext};
 use poker_protocol::zk_shuffle::dleq_proof::{DLEqProof, LeaveKind, RemaskKind};
 use poker_protocol::zk_shuffle::reconstruction::ReconstructProof;
+use poker_protocol::zk_shuffle::reconstruction::ReconstructionStatement;
 use poker_protocol::zk_shuffle::reveal_token_proof::RevealTokenProof;
 use poker_protocol::zk_shuffle::shuffle_proof::ZKShuffleProof;
 use poker_protocol::zk_shuffle::transcript_ext::{CryptoTranscript, MerlinTranscript};
@@ -48,11 +45,11 @@ use crate::syscalls::{REG_A0, REG_A1, REG_A2, Syscall, SyscallContext, SyscallId
 
 // ===== 常量 =====
 
-/// G1 compressed 字节数（BLS12-381）。
-const G1_COMPRESSED_SIZE: usize = 48;
+/// 压缩点字节数（Stark curve，32B felt）。
+const POINT_COMPRESSED_SIZE: usize = 32;
 
-/// 单个 ElGamalCiphertext Borsh 序列化字节数（c1 48B + c2 48B）。
-const CT_SIZE: usize = 96;
+/// 单个 ElGamalCiphertext Borsh 序列化字节数（c1 32B + c2 32B）。
+const CT_SIZE: usize = 64;
 
 /// Blake2b-256 输出字节数。
 const BLAKE2B_256_OUT_SIZE: usize = 32;
@@ -85,19 +82,15 @@ fn read_fixed<'a>(buf: &'a [u8], n: usize) -> Result<(&'a [u8], &'a [u8]), ZkvmE
     Ok((&buf[..n], &buf[n..]))
 }
 
-/// 解析 48 字节 G1 compressed → G1Projective。
-fn parse_g1(bytes: &[u8]) -> Option<G1Projective> {
-    if bytes.len() != G1_COMPRESSED_SIZE {
+/// Stark 曲线点类型别名（`poker-protocol-core::StarkPoint`）。
+type Point = <DefaultCurve as Curve>::Point;
+
+/// 解析 32 字节 compressed felt → Stark 曲线点。
+fn parse_point(bytes: &[u8]) -> Option<Point> {
+    if bytes.len() != POINT_COMPRESSED_SIZE {
         return None;
     }
-    let mut arr = [0u8; G1_COMPRESSED_SIZE];
-    arr.copy_from_slice(bytes);
-    let ct = G1Projective::from_compressed(&arr);
-    if bool::from(ct.is_some()) {
-        Some(ct.unwrap())
-    } else {
-        None
-    }
+    Point::from_compressed(bytes)
 }
 
 /// 反序列化 Vec<ElGamalCiphertext>（与 guest 端 Borsh 布局一致）。
@@ -106,19 +99,19 @@ fn deserialize_ciphertexts(bytes: &[u8]) -> Result<Vec<ElGamalCiphertext>, ZkvmE
         .map_err(|e| ZkvmError::Other(format!("deserialize Vec<ElGamalCiphertext> failed: {e}")))
 }
 
-/// 反序列化 Vec<G1Projective>（明文点列表，Borsh 布局与 guest `Vec<G1Point>` 一致）。
+/// 反序列化 Vec<Point>（明文点列表）。
 ///
-/// guest 端 `G1Point([u8; 48])` Borsh 序列化为 48B，与 host 的 `[u8; 48]` 一致；
-/// host 端直接 borsh 反序列化 `[u8; 48]` 数组列表再逐个解析为 G1Projective。
-fn deserialize_g1_points(bytes: &[u8]) -> Result<Vec<G1Projective>, ZkvmError> {
-    let raw: Vec<[u8; G1_COMPRESSED_SIZE]> = BorshDeserialize::try_from_slice(bytes)
-        .map_err(|e| ZkvmError::Other(format!("deserialize Vec<G1> failed: {e}")))?;
+/// guest 端每个点序列化为 32B compressed felt；host 端直接 borsh 反序列化
+/// `[u8; 32]` 数组列表再逐个解析为曲线点。
+fn deserialize_points(bytes: &[u8]) -> Result<Vec<Point>, ZkvmError> {
+    let raw: Vec<[u8; POINT_COMPRESSED_SIZE]> = BorshDeserialize::try_from_slice(bytes)
+        .map_err(|e| ZkvmError::Other(format!("deserialize Vec<Point> failed: {e}")))?;
     raw.into_iter()
-        .map(|arr| parse_g1(&arr).ok_or_else(|| ZkvmError::Other("invalid G1 in vec".into())))
+        .map(|arr| parse_point(&arr).ok_or_else(|| ZkvmError::Other("invalid point in vec".into())))
         .collect()
 }
 
-/// 从 48 字节切片反序列化单个 ElGamalCiphertext（c1 || c2，各 48B）。
+/// 从 64 字节切片反序列化单个 ElGamalCiphertext（c1 || c2，各 32B）。
 fn parse_single_ciphertext(bytes: &[u8]) -> Result<ElGamalCiphertext, ZkvmError> {
     if bytes.len() != CT_SIZE {
         return Err(ZkvmError::Other(format!(
@@ -126,9 +119,9 @@ fn parse_single_ciphertext(bytes: &[u8]) -> Result<ElGamalCiphertext, ZkvmError>
             bytes.len()
         )));
     }
-    let c1 = parse_g1(&bytes[..G1_COMPRESSED_SIZE])
+    let c1 = parse_point(&bytes[..POINT_COMPRESSED_SIZE])
         .ok_or_else(|| ZkvmError::Other("invalid c1 in ciphertext".into()))?;
-    let c2 = parse_g1(&bytes[G1_COMPRESSED_SIZE..])
+    let c2 = parse_point(&bytes[POINT_COMPRESSED_SIZE..])
         .ok_or_else(|| ZkvmError::Other("invalid c2 in ciphertext".into()))?;
     Ok(ElGamalCiphertext { c1, c2 })
 }
@@ -205,7 +198,7 @@ impl Syscall for Blake2b256Syscall {
 /// [proof_len:u32 LE][proof_bytes]
 /// [input_cts_len:u32 LE][input_cts_bytes]   // Vec<ElGamalCiphertext> Borsh
 /// [output_cts_len:u32 LE][output_cts_bytes] // Vec<ElGamalCiphertext> Borsh
-/// [pk:48B]                                   // G1 compressed
+/// [pk:32B]                                   // compressed felt point
 /// ```
 ///
 /// # 返回
@@ -259,9 +252,9 @@ fn verify_dleq_proof_inner(kind: u32, buf: &[u8]) -> Result<bool, ZkvmError> {
     let (proof_bytes, rest) = read_len_prefixed(buf)?;
     let (input_cts_bytes, rest) = read_len_prefixed(rest)?;
     let (output_cts_bytes, rest) = read_len_prefixed(rest)?;
-    let (pk_bytes, _) = read_fixed(rest, G1_COMPRESSED_SIZE)?;
+    let (pk_bytes, _) = read_fixed(rest, POINT_COMPRESSED_SIZE)?;
 
-    let pk = match parse_g1(pk_bytes) {
+    let pk = match parse_point(pk_bytes) {
         Some(p) => p,
         None => return Ok(false),
     };
@@ -311,14 +304,15 @@ fn verify_dleq_proof_inner(kind: u32, buf: &[u8]) -> Result<bool, ZkvmError> {
 
 /// `zkvm_verify_reconstruct_proof(buf_ptr, buf_len) -> bool` — Reconstruct proof 验证。
 ///
+/// poker_protocol v1.0.0 的 reconstruction 家族重构为 statement/proof 二元结构
+/// （`ReconstructionStatement` 携带 context_digest / epoch / prior_state_digest /
+/// aggregate_pk / owner_pk / cards / residual_carriers / contributions），故
+/// ABI 由 V2 的 6 段明文参数改为 statement 整体 Borsh 序列化。
+///
 /// # buf 格式
 /// ```text
-/// [proof_len:u32 LE][proof_bytes]
-/// [cards_len:u32 LE][cards_bytes]             // Vec<G1Point> Borsh（明文点列表）
-/// [output_cts_len:u32 LE][output_cts_bytes]  // Vec<ElGamalCiphertext> Borsh
-/// [swap_cts_len:u32 LE][swap_cts_bytes]      // Vec<ElGamalCiphertext> Borsh
-/// [readable_cts_len:u32 LE][readable_cts_bytes] // Vec<ElGamalCiphertext> Borsh
-/// [user_pk:48B]                               // G1 compressed
+/// [proof_len:u32 LE][proof_bytes]                // ReconstructProof Borsh
+/// [statement_len:u32 LE][statement_bytes]        // ReconstructionStatement Borsh
 /// ```
 ///
 /// # 返回
@@ -359,32 +353,16 @@ impl Syscall for VerifyReconstructProofSyscall {
 
 fn verify_reconstruct_proof_inner(buf: &[u8]) -> Result<bool, ZkvmError> {
     let (proof_bytes, rest) = read_len_prefixed(buf)?;
-    let (cards_bytes, rest) = read_len_prefixed(rest)?;
-    let (output_cts_bytes, rest) = read_len_prefixed(rest)?;
-    let (swap_cts_bytes, rest) = read_len_prefixed(rest)?;
-    let (readable_cts_bytes, rest) = read_len_prefixed(rest)?;
-    let (user_pk_bytes, _) = read_fixed(rest, G1_COMPRESSED_SIZE)?;
-
-    let user_pk = match parse_g1(user_pk_bytes) {
-        Some(p) => p,
-        None => return Ok(false),
-    };
-    let cards = deserialize_g1_points(cards_bytes)?;
-    let output_cts = deserialize_ciphertexts(output_cts_bytes)?;
-    let swap_cts = deserialize_ciphertexts(swap_cts_bytes)?;
-    let readable_cts = deserialize_ciphertexts(readable_cts_bytes)?;
+    let (statement_bytes, _) = read_len_prefixed(rest)?;
 
     let proof: ReconstructProof<DefaultCurve> = BorshDeserialize::try_from_slice(proof_bytes)
         .map_err(|e| ZkvmError::Other(format!("deserialize ReconstructProof failed: {e}")))?;
+    let statement: ReconstructionStatement<DefaultCurve> =
+        BorshDeserialize::try_from_slice(statement_bytes).map_err(|e| {
+            ZkvmError::Other(format!("deserialize ReconstructionStatement failed: {e}"))
+        })?;
     let mut t = MerlinTranscript::new(TRANSCRIPT_RECONSTRUCT.as_bytes());
-    match proof.verify(
-        &cards,
-        &output_cts,
-        &swap_cts,
-        &readable_cts,
-        &user_pk,
-        &mut t,
-    ) {
+    match proof.verify(&statement, &mut t) {
         Ok(()) => Ok(true),
         Err(e) => {
             tracing::debug!("ReconstructProof verify failed: {e:?}");
@@ -402,9 +380,9 @@ fn verify_reconstruct_proof_inner(buf: &[u8]) -> Result<bool, ZkvmError> {
 /// # buf 格式
 /// ```text
 /// [proof_len:u32 LE][proof_bytes]
-/// [enc_card:96B]      // ElGamalCiphertext (c1||c2 各 48B)
-/// [token:48B]         // G1 compressed
-/// [expected_pk:48B]   // G1 compressed
+/// [enc_card:64B]      // ElGamalCiphertext (c1||c2 各 32B)
+/// [token:32B]         // compressed felt point
+/// [expected_pk:32B]   // compressed felt point
 /// ```
 ///
 /// # 返回
@@ -446,15 +424,15 @@ impl Syscall for VerifyRevealTokenProofSyscall {
 fn verify_reveal_token_proof_inner(buf: &[u8]) -> Result<bool, ZkvmError> {
     let (proof_bytes, rest) = read_len_prefixed(buf)?;
     let (enc_card_bytes, rest) = read_fixed(rest, CT_SIZE)?;
-    let (token_bytes, rest) = read_fixed(rest, G1_COMPRESSED_SIZE)?;
-    let (expected_pk_bytes, _) = read_fixed(rest, G1_COMPRESSED_SIZE)?;
+    let (token_bytes, rest) = read_fixed(rest, POINT_COMPRESSED_SIZE)?;
+    let (expected_pk_bytes, _) = read_fixed(rest, POINT_COMPRESSED_SIZE)?;
 
     let enc_card = parse_single_ciphertext(enc_card_bytes)?;
-    let token = match parse_g1(token_bytes) {
+    let token = match parse_point(token_bytes) {
         Some(p) => p,
         None => return Ok(false),
     };
-    let expected_pk = match parse_g1(expected_pk_bytes) {
+    let expected_pk = match parse_point(expected_pk_bytes) {
         Some(p) => p,
         None => return Ok(false),
     };
@@ -471,16 +449,6 @@ fn verify_reveal_token_proof_inner(buf: &[u8]) -> Result<bool, ZkvmError> {
     }
 }
 
-// 静默 unused import 警告：Field/Curve/GroupEncoding 在 parse_g1 中通过 from_compressed 间接使用，
-// Scalar 类型在 type alias 上下文中保留以备未来扩展。
-#[allow(dead_code)]
-fn _unused_imports() {
-    let _ = BlsScalar::ZERO;
-    let _ = G1Projective::generator();
-    let _ = <G1Projective as GroupEncoding>::to_bytes;
-    let _ = <G1Projective as Curve>::to_affine;
-}
-
 // ===========================================================================
 // 测试
 // ===========================================================================
@@ -488,6 +456,13 @@ fn _unused_imports() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 压缩点 → 32B 数组（`StarkCompressedPoint` 字段非 pub，走 `AsRef<[u8]>`）。
+    fn compress32(p: &Point) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        out.copy_from_slice(CurvePoint::compress(p).as_ref());
+        out
+    }
 
     // ===== Blake2b256 基础测试 =====
 
@@ -579,17 +554,16 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_g1_invalid_bytes() {
-        // 全 0x00 不是合法 G1 compressed（infinity 在 BLS12-381 用 0xC0 前缀）
-        let zeros = [0u8; 48];
-        assert!(parse_g1(&zeros).is_none());
+    fn test_parse_point_invalid_bytes() {
+        // x ≥ 2^251 非法（非 canonical felt），解析必须拒绝
+        let big = [0xFFu8; 32];
+        assert!(parse_point(&big).is_none());
     }
 
     #[test]
-    fn test_parse_g1_generator() {
-        let g = G1Projective::generator();
-        let bytes = g.to_compressed();
-        let parsed = parse_g1(&bytes);
+    fn test_parse_point_generator() {
+        let g = <DefaultCurve as Curve>::base_g();
+        let parsed = parse_point(compress32(&g).as_ref());
         assert!(parsed.is_some());
         assert_eq!(parsed.unwrap(), g);
     }
@@ -597,7 +571,7 @@ mod tests {
     #[test]
     fn test_deserialize_ciphertexts_roundtrip() {
         // 构造 2 个 ElGamalCiphertext，borsh 序列化后反序列化应一致
-        let g = G1Projective::generator();
+        let g = <DefaultCurve as Curve>::base_g();
         let g2 = g + g;
         let cts: Vec<ElGamalCiphertext> = vec![
             ElGamalCiphertext { c1: g, c2: g2 },
@@ -611,12 +585,12 @@ mod tests {
     }
 
     #[test]
-    fn test_deserialize_g1_points_roundtrip() {
-        let g = G1Projective::generator();
+    fn test_deserialize_points_roundtrip() {
+        let g = <DefaultCurve as Curve>::base_g();
         let g2 = g + g;
-        let points: Vec<[u8; 48]> = vec![g.to_compressed(), g2.to_compressed()];
+        let points: Vec<[u8; 32]> = vec![compress32(&g), compress32(&g2)];
         let bytes = borsh::to_vec(&points).unwrap();
-        let recovered = deserialize_g1_points(&bytes).unwrap();
+        let recovered = deserialize_points(&bytes).unwrap();
         assert_eq!(recovered.len(), 2);
         assert_eq!(recovered[0], g);
         assert_eq!(recovered[1], g2);

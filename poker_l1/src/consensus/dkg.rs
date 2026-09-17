@@ -56,7 +56,7 @@
 use borsh::{BorshDeserialize, BorshSerialize};
 use blstrs::{G2Projective, Scalar};
 use group::Group;
-use poker_protocol::crypto::curve::CurveScalar;
+use ff::Field;
 use serde::{Deserialize, Serialize};
 use subtle::CtOption;
 
@@ -101,7 +101,7 @@ fn derive_scalar(domain: &[u8], seed: &[u8; 32], counter: u64) -> Scalar {
 
 /// `base^exp`（exp 为 u64，平方乘；指数规模 = t，无性能压力）。
 fn scalar_pow(base: &Scalar, exp: u64) -> Scalar {
-    let mut acc = Scalar::one();
+    let mut acc = Scalar::ONE;
     let mut b = *base;
     let mut e = exp;
     while e > 0 {
@@ -146,8 +146,8 @@ pub fn lagrange_coefficients_at_zero(ids: &[u64]) -> PokerL1Result<Vec<Scalar>> 
     let x = |v: u64| Scalar::from(v);
     let mut out = Vec::with_capacity(ids.len());
     for &xi in ids {
-        let mut num = Scalar::one();
-        let mut den = Scalar::one();
+        let mut num = Scalar::ONE;
+        let mut den = Scalar::ONE;
         for &xj in ids {
             if xj == xi {
                 continue;
@@ -155,9 +155,9 @@ pub fn lagrange_coefficients_at_zero(ids: &[u64]) -> PokerL1Result<Vec<Scalar>> 
             num *= x(xj);
             den *= x(xj) - x(xi);
         }
-        // ids 互异 ⇒ 分母非零（已在前置检查排除 0/重复），CurveScalar::invert
-        // 语义下必可逆；零分母面在此不可达。
-        out.push(num * den.invert());
+        // ids 互异 ⇒ 分母非零（已在前置检查排除 0/重复），ff::Field::invert
+        // 返回 CtOption，unwrap 即直返语义；零分母面在此不可达。
+        out.push(num * den.invert().unwrap());
     }
     Ok(out)
 }
@@ -369,7 +369,7 @@ pub fn dealer_deal(seed: &[u8; 32], dealer_id: u64, n: u32, t: u32) -> PokerL1Re
     let shares = (1..=u64::from(n))
         .map(|i| {
             let x = Scalar::from(i);
-            let mut acc = Scalar::zero();
+            let mut acc = Scalar::ZERO;
             for (k, c) in coeffs.iter().enumerate() {
                 acc += c * scalar_pow(&x, k as u64);
             }
@@ -491,7 +491,7 @@ pub fn assemble_group_keyset(
     // 参与者群份额 x_i = Σ_j s_{j,i}
     let shares = (1..=u64::from(n))
         .map(|i| {
-            let mut acc = Scalar::zero();
+            let mut acc = Scalar::ZERO;
             for d in &ordered {
                 let s = d
                     .shares

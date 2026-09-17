@@ -1,7 +1,7 @@
 //! Texas Poker 模块单元测试 — 覆盖核心游戏逻辑。
 
-use poker_protocol::crypto::stark_curve::{StarkPoint, StarkScalar};
-use poker_protocol::crypto::types::StarkECPoint as ECPoint;
+use poker_l1::vm::contracts::stark_compat::{CurvePoint, CurveScalar, StarkPoint, StarkPointExt, StarkScalar, StarkScalarExt};
+use poker_protocol::crypto::types::ECPoint;
 use poker_l1::Address;
 use poker_l1::signature::TaggedPubkey;
 use poker_l1::vm::contracts::texas_poker::{
