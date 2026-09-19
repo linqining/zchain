@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-15T19:24:58.356Z",
+  "date": "2026-09-19T07:40:07.859Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
   "total": 13,
@@ -19,12 +19,12 @@
     {
       "step": "O2-diag",
       "ok": true,
-      "detail": "raw={\"pw\":\"REDACTED-test-pw\"} rej=[]"
+      "detail": "raw={\"pw\":\"VkmZXZ…\"} rej=[]"
     },
     {
       "step": "O2 一键创建 → 成功页：自动口令只显一次 + 三链地址",
       "ok": true,
-      "detail": "tGFX3c…（24 字符）"
+      "detail": "VkmZXZ…（24 字符）"
     },
     {
       "step": "O2b 创建后 SW 状态：onboarded=true + 三层有钱包 + 全部已解锁",
@@ -32,7 +32,7 @@
       "detail": "{\"onboarded\":true}"
     },
     {
-      "step": "O3 统一首页：三链卡片 + 进入钱包（全部已解锁）",
+      "step": "O3 统一首页：三链账户层卡片 + 进入账簿（全部已解锁）",
       "ok": true,
       "detail": ""
     },
@@ -52,17 +52,17 @@
       "detail": ""
     },
     {
-      "step": "O6a 首页进入 EVM 钱包视图（直接是已解锁面板）",
+      "step": "O6a 首页进入 EVM 账簿面板（直接是已解锁数据面）",
       "ok": true,
       "detail": ""
     },
     {
-      "step": "O6b 切到 Starknet 视图（同样直达面板）",
+      "step": "O6b 链切换器切到 Starknet（同一模板换数据面）",
       "ok": true,
       "detail": ""
     },
     {
-      "step": "O6c 首页按钮回到总览",
+      "step": "O6c 底部 tab 回到总账",
       "ok": true,
       "detail": ""
     },

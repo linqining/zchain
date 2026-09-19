@@ -23,10 +23,10 @@ ZChain provider（`window.zchain`）、开桌/买入/结算签名、devnet。
 wasm 源码级可复现重建/签名发布/SBOM；仓库内可复现构建工程面已随 0.4 交付，
 见 `scripts/extension_reproducible_build.sh`）。
 
-## Extension 0.5：EVM 兼容账户层（本轮交付）
+## Extension 0.5：EVM 兼容账户层
 
-popup 顶栏 **ZChain / EVM 钱包** 双模式切换。EVM 层与既有 ZChain note 钱包
-并存，互不影响（各自 keystore、各自会话、统一自动锁屏心跳）。
+EVM 层与既有 ZChain note 钱包并存，互不影响（各自 keystore、各自会话、统一
+自动锁屏心跳）。UI 侧不再有"模式顶栏"：见下方《方向 B「账簿」UI》。
 
 | 要求 | 实现 |
 |---|---|
@@ -34,7 +34,7 @@ popup 顶栏 **ZChain / EVM 钱包** 双模式切换。EVM 层与既有 ZChain n
 | **合约调用** | 只读：`eth_call`（ERC-20 预设免填 ABI + 自定义 ABI JSON；金额按 decimals 换算）；写：ABI 编码 → 交易预览卡（to/value/data/gas/手续费/chainId 逐字段）→ 确认 → EIP-155 签名 → `eth_sendRawTransaction` |
 | **交易记录查询** | 本地账本（pending → confirmed/failed 回执状态机）+ Etherscan 兼容 `txlist` 端点合并（hash 去重、本地回执状态优先）+ 待确认交易自动对账 |
 | **钱包管理** | 创建（随机 secp256k1 + PBKDF2-SHA256 600k + AES-256-GCM keystore）、导入私钥（同址重复导入拒绝）、锁定/解锁（错口令 fail-closed）、**私钥导出**（口令确认）、修改口令（重加密）、删除账户、多账户切换、网络/RPC/Explorer 设置 |
-| **E2E（浏览器操作）** | `tests/e2e/run_05.mjs`：36 步全 UI 操作（点击/输入/确认）真实浏览器测试 + 本地开发链（`tests/e2e/devchain.mjs`）链上核对 |
+| **E2E（浏览器操作）** | `tests/e2e/run_05.mjs`：45 步全 UI 操作（点击/输入/确认）真实浏览器测试 + 本地开发链（`tests/e2e/devchain.mjs`）链上核对 |
 
 密码学边界（如实声明）：EVM 层的 keccak256/secp256k1/RLP/EIP-155 实现于
 `common/evm/crypto.js`（自包含零依赖；**与 ZChain 路径的 wallet-core WASM
@@ -111,6 +111,16 @@ encrypted vault：chrome.storage.local 只存密文
 | `tests/e2e/run_04.mjs` | 0.4 portal STARK 验证流真实浏览器 E2E（fixture 网关 + 真实 canonical 证明；12 步） |
 | `scripts/extension_reproducible_build.sh`（仓库 `scripts/`） | 可复现构建（两阶段比对 + dist-checksums.txt，见下文"可复现构建"节） |
 
+方向 B「账簿」UI 新增模块（同一纪律：纯函数、零 DOM、node --test 直接覆盖）：
+
+| 模块 | 职责 |
+|---|---|
+| `common/ui_ledger.js` | 18 屏注册表与导航关系（`resolveScreen/backTarget/tabOf`）、金额与地址口径、凭证阶梯语义（`ladderSteps/proofLadder`）、回执与记录分桶、会话用量、错误码文案表、跨域合计边界 |
+| `common/transfer_preview.js` | 钱包侧 PLAY 转账：输入归一 → 贪心选币（note 全额消费 + 找零回本账户 + 守恒自检）→ 凭证短板聚合与网络门槛（`minProofForNetwork`）→ 产出可直接送 wallet-core 的 operation；`verifySpendProofs` 供**后台**签名前复核 |
+| `popup/popup.js`（重写） | 屏幕注册表的执行者：只做 DOM 编排与消息派发，`data-*` + 单一事件委托，跨渲染保持浮层开合与表单草稿 |
+| `tests/ui_ledger.test.js` / `tests/transfer_preview.test.js` | 账簿纯逻辑 19 例 + 转账选币 17 例 |
+| `tests/e2e/run_08.mjs` | 方向 B 专属浏览器流 30 步（链=筛选器 / 分库不轧差 / 转账全链路 / 摘要绑定 / 提现 fail-closed / 凭证阶梯 / Portal 失败面 / 双底色与金额显隐 / 能力矩阵） |
+
 provider（`content/inpage.js`，MAIN world）暴露版本化 `zchain_*` 接口；
 **不冒充 EIP-1193**：不写 `window.ethereum`、不派发 EIP-6963 announce。
 EIP-6963 发现仅用于外部 EVM 钱包（MetaMask/Rabby/Argent X/Braavos）共存；
@@ -136,6 +146,34 @@ SignClient 注入式 + 测试 stub，零 npm 进构建）、Starknet 钱包接�
   （一个口令尝试解锁全部层，任一层独立 keystore 互不影响）。
 - 覆盖测试：`tests/e2e/run_07.mjs`（13 步浏览器操作）。
 
+## UI 结构（方向 B「账簿 / Ledger」v0.2）
+
+设计稿：`design/zchain-wallet-ui-b-ledger.html`（18 屏注册表 + 设计 token）。
+实现口径：
+
+- **链 = 筛选器，不是目的地**：`acct / send / contract / history / manage` 一套
+  模板按 `rt.chain` 换数据面（账簿屏顶部的 `cs-zc / cs-evm / cs-stk` 切换器），
+  不再为 EVM 与 Starknet 各写一份仪表盘。
+- **凭证是一等组件**：`pending → soft → proven → finalized` 的阶梯（`.rail`）
+  出现在总账、转账预览、提现预览、凭证簿四处，共用 `ui_ledger.ladderSteps` 语义；
+  回执的投递状态（`signed → seen → included`）是**另一套**状态机，芯片笔触刻意
+  分开，两者不混用。
+- **纯逻辑下沉**：屏幕注册表、金额口径、阶梯语义、分桶、错误文案全部在
+  `common/ui_ledger.js`（零 DOM、零 IO），由 `tests/ui_ledger.test.js` 覆盖，
+  不依赖浏览器。
+- **GAME 域支出门槛是网络策略**：设计要求 `proven`；devnet 水龙头铸的本地 stub
+  note 在 wallet-core 里只有 `Soft`（无批次根，不能谎称 proven），故
+  `minProofForNetwork('devnet') = soft`，testnet/mainnet 维持 `proven`。门槛在
+  **后台** `popup:transferConfirm` 复核一次（`verifySpendProofs`），UI 那份
+  `canSubmit` 只是展示结论。
+- **诚实边界**：无价格源 → 合计显示 `—` 并标注「价格源未接入」；GAME/REAL 物理
+  分库 → 跨域金额永不轧差；REAL 提现 `canSubmit` 恒 false；网关水位与回执证据
+  原样展示；二维码编码器未接入 → 收款只给完整地址 + 复制，不画假码。
+- **交互实现**：MV3 CSP `script-src 'self'` → 无内联脚本/内联事件；一切点击走
+  `data-*` + 单一事件委托；浮层开合与表单草稿跨渲染保持（`rt.ovl` / `rt.form`）。
+
+覆盖测试：`tests/e2e/run_08.mjs`（30 步）。
+
 ## 安装（打包 / 加载 unpacked）
 
 **一键打包**（产出可在 Chrome 安装的扩展包 + 真实加载验证）：
@@ -147,7 +185,7 @@ bash extension/scripts/pack.sh --verify
 #   Chrome Web Store 开发者后台，或解压后加载）
 # → dist/SHA256SUMS.txt                     zip 与逐文件 SHA-256 清单
 #   --verify 会用 Chrome for Testing headless 真实加载 dist/unpacked：
-#   service worker 启动 + popup 渲染 + runtime 消息往返 + 三模式按钮
+#   service worker 启动 + popup 渲染 + runtime 消息往返 + 首屏导航契约
 #   （--out DIR 换输出目录；--skip-checks 跳过 node --check 加速）
 ```
 
@@ -256,8 +294,9 @@ bash scripts/extension_reproducible_build.sh
 ```bash
 node --test "extension/tests/*.test.js" "extension/tests/adapters/*.test.js" \
      "extension/tests/evm/*.test.js" "extension/tests/stark/*.test.js"
-                                         # 198 用例 = 0.4 的 135 + 0.5 EVM 24
-                                         #   + 0.6 STARK curve 12/钱包面 8 等
+                                         # 234 用例 = 0.4 的 135 + 0.5 EVM 24
+                                         #   + 0.6 STARK curve 12/钱包面 8
+                                         #   + 方向 B 账簿纯逻辑 19 + PLAY 转账 17
                                          # （node:test，无框架；目录形式
                                          # `node --test extension/tests/` 受本机
                                          # Node 24 通病影响，用通配形式）
@@ -271,14 +310,21 @@ node extension/tests/e2e/run_03.mjs       # 0.3/0.4 关键流真实浏览器 E2E
                                          # 提现预览；见 ACCEPTANCE）
 node extension/tests/e2e/run_04.mjs       # 0.4 portal STARK 验证流 E2E（12 步）
 node extension/tests/e2e/run_05.mjs       # 0.5 EVM 钱包关键流真实浏览器 E2E
-                                         # （36 步全 UI 操作：创建/余额/合约读写/
-                                         # 转账/记录/导出私钥/改密码；内置本地
-                                         # 开发链真实解码 raw 交易核对）
+                                         # （45 步全 UI 操作：引导/账簿面板/余额/
+                                         # 合约读写/转账/记录/导出私钥/删除账户/
+                                         # 逐层创建/改密码；内置本地开发链真实
+                                         # 解码 raw 交易核对）
 node extension/tests/e2e/run_06.mjs       # 0.6 Starknet 钱包关键流真实浏览器 E2E
-                                         # （32 步全 UI 操作：创建/余额/合约读/
-                                         # invoke 签名广播/记录/导出私钥/改密码；
-                                         # 本地 Starknet 开发链 STARK curve
+                                         # （38 步全 UI 操作：账簿面板/余额/合约读/
+                                         # invoke 签名广播/记录/导出私钥/逐层创建/
+                                         # 改密码；本地 Starknet 开发链 STARK curve
                                          # 独立验签核对）
+node extension/tests/e2e/run_07.mjs       # 0.6.1 一键 onboarding 真实浏览器 E2E
+                                         # （13 步：欢迎页/成功页/统一解锁/明细直达）
+node extension/tests/e2e/run_08.mjs       # 方向 B「账簿」UI 专属流（30 步：链=筛选器/
+                                         # 双库不轧差/价格源缺失/PLAY 转账全链路/
+                                         # 摘要绑定后台复核/提现 fail-closed/凭证阶梯/
+                                         # Portal 失败面/双底色与金额显隐/能力矩阵）
 cargo test -p poker-wallet --release      # 43 个 wallet-core 测试（不回归）
 cargo test -p poker-wallet --features wasm \
     --bin wallet_core_wasm                # 11 个 wasm.rs 纯逻辑测试

@@ -7,16 +7,16 @@
 // popup UI 操作**（点击/输入/确认），链侧用本 runner 启动的本地开发链
 // （devchain.mjs：真实 RLP/EIP-155 解码与 sender 恢复）。
 //
-// 覆盖（对照交付要求）：
-//   1. 钱包余额查询：水龙头领取 → 刷新余额 → 余额/nonce/gas/chainId 展示；
-//   2. 合约调用：ERC-20 预设只读（symbol/balanceOf，金额换算）+ 合约写
-//      （faucet 铸币 / transfer 转账）→ 交易预览确认 → 真实签名广播 →
-//      链上状态核对；
-//   3. 交易记录查询：本地账本 + 链上 explorer txlist 合并 → 状态/金额/
-//      hash 列表；
-//   4. 钱包管理：创建（口令加密 keystore）、锁定/解锁（错口令 fail-closed）、
-//      私钥导出（口令确认）、导出私钥再导入同址、修改口令（旧口令失效）；
-//   5. 本文件即 e2e（浏览器操作），结果落 JSON + 截图。
+// 覆盖（对照交付要求 · 方向 B「账簿」UI 的屏幕结构）：
+//   1. 引导与导航：欢迎页自定义口令创建三层 → 总账首页 → 链=筛选器进 EVM 账簿；
+//   2. 钱包余额查询：管理屏改 RPC → 水龙头领取 → 刷新 → 余额/nonce/gas/chainId；
+//   3. 合约调用：合约屏只读（symbol/balanceOf，金额换算）+ 写入（faucet 铸币 /
+//      transfer 转账）→ 交易预览确认 → 真实签名广播 → 链上状态核对；
+//   4. 原生转账：发送屏预览 → 确认/取消 → 余额不足 fail-closed（错误码原样展示）；
+//   5. 交易记录：记录屏本地账本 + 链上 explorer txlist 合并 + 转账/合约分桶；
+//   6. 钱包管理：锁定/解锁（错口令 fail-closed）、私钥导出、删除账户（二次确认）、
+//      导出私钥再导入同址、逐层「创建本层」、修改口令（旧口令失效）；
+//   7. 本文件即 e2e（浏览器操作），结果落 JSON + 截图。
 //
 // 用法（repo 根目录）：node extension/tests/e2e/run_05.mjs
 // 退出码：0 = 全部 PASS；1 = 存在 FAIL。
@@ -236,9 +236,9 @@ async function main() {
       }
     }
 
-    // ===== E0：扩展与模式切换 =====
-    const hasEvmBtn = await waitForExpr(`!!document.getElementById('mode-evm')`);
-    record('E0 popup 页加载 + 模式切换按钮存在', hasEvmBtn === true);
+    // ===== E0：扩展加载 + 首屏路由（方向 B：未 onboarding → 欢迎页）=====
+    const hasWelcome = await waitForExpr(`!!document.getElementById('welcome-create-btn')`);
+    record('E0 popup 页加载 + 欢迎页（一键创建入口）', hasWelcome === true);
     // popup.js 是 module（deferred）：轮询点击直到视图切换生效（无固定 sleep 竞态）
     async function clickUntil(selector, effectExpr, timeoutMs = 20_000) {
       const t0 = Date.now();
@@ -251,35 +251,49 @@ async function main() {
         await sleep(300);
       }
     }
-    const evmCreateVisible = await clickUntil('mode-evm', `!!document.getElementById('evm-create-btn')`);
-    record('E1 切换到 EVM 钱包 → 创建视图', evmCreateVisible === true);
+    /** 屏幕跳转（点击 → 等新屏结构出现）；方向 B 下账簿是"一套模板 × 链筛选器"。 */
+    const nav = (selector, effectExpr, timeoutMs = 20_000) => clickUntil(selector, effectExpr, timeoutMs);
 
-    // ===== E2：创建钱包（口令加密 keystore）=====
-    let g = await gen();
-    await fill('evm-pw', PW);
-    await fill('evm-pw2', PW);
-    await click('evm-create-btn');
-    await waitRender(g, `!!document.getElementById('evm-address')`, 30_000);
+    // ===== E1：欢迎页高级路径 → 自定义口令创建三层 =====
+    await page.eval(`(() => { const d = document.getElementById('welcome-advanced'); if (d) d.open = true; return true; })()`);
+    await fill('welcome-pw', PW);
+    await fill('welcome-pw2', PW);
+    const successShown = await nav('welcome-custom-btn', `!!document.getElementById('welcome-success')`, 30_000);
+    record('E1 自定义口令一键创建三层 → 成功页', successShown === true);
+    await clickUntil('welcome-done-gate', `!document.getElementById('welcome-done-btn')?.disabled`).catch(() => { });
+    const gated = await page.eval(`!!document.getElementById('welcome-done-btn')?.disabled`).catch(() => false);
+    record('E1b 口令确认门：勾选后「开始使用」解禁（未勾选时禁用）', gated === false);
+    const homeShown = await nav('welcome-done-btn', `!!document.getElementById('home-card')`, 20_000);
+    record('E1c 「开始使用」→ 三链总账首页', homeShown === true);
+
+    // ===== E2：进入 EVM 账簿面板（链=筛选器；地址 EIP-55 展示）=====
+    const evmDash = await nav('home-evm', `!!document.getElementById('evm-address')`, 20_000);
     const addrRaw = await waitForExpr(`document.getElementById('evm-address')?.textContent ?? null`, 10_000);
-    const addrOk = typeof addrRaw === 'string' && /^0x[0-9a-fA-F]{40}$/.test(addrRaw)
+    const addrOk = evmDash === true && typeof addrRaw === 'string' && /^0x[0-9a-fA-F]{40}$/.test(addrRaw)
       && toChecksumAddress(addrRaw) === addrRaw; // EIP-55 校验和
-    record('E2 创建钱包（口令 → 加密 keystore）→ EIP-55 地址展示', addrOk, String(addrRaw));
+    record('E2 EVM 账簿面板 → EIP-55 地址展示', addrOk, String(addrRaw));
     const state0 = await msg({ type: 'popup:evmGetState' });
     record('E2b SW 状态：hasWallet + unlocked + 账户列表',
       state0?.hasWallet === true && state0?.unlocked === true && state0.accounts?.length === 1
         && state0.networkId === 'evm-devnet',
       JSON.stringify({ hasWallet: state0?.hasWallet, unlocked: state0?.unlocked, n: state0?.accounts?.length }).slice(0, 100));
 
-    // ===== E3：RPC 指向本地开发链 =====
-    g = await gen();
+    // ===== E3：RPC 指向本地开发链（账户管理屏）=====
+    const manageShown = await nav('evm-manage', `!!document.getElementById('evm-rpc-input')`);
+    record('E3a 账户管理屏：RPC / Explorer / 危险区入口', manageShown === true);
     await fill('evm-rpc-input', chain.url);
     await click('evm-rpc-save');
-    await waitRender(g, `!!document.getElementById('evm-faucet-amount')`, 15_000);
+    const backToDash = await nav('sub-back', `!!document.getElementById('evm-faucet-amount')`, 15_000);
     const savedRpc = await msg({ type: 'popup:evmGetState' });
     const net = (savedRpc.networks ?? []).find((n) => n.id === 'evm-devnet');
-    record('E3 保存 RPC 覆盖 → 生效 URL = devchain', net?.rpcUrl === chain.url && net?.rpcOverridden === true, String(net?.rpcUrl));
+    record('E3b 保存 RPC 覆盖 → 生效 URL = devchain', backToDash === true && net?.rpcUrl === chain.url && net?.rpcOverridden === true, String(net?.rpcUrl));
 
     // ===== ① 余额查询：水龙头 → 刷新 =====
+    await click('evm-refresh-btn');
+    await waitForExpr(`(() => {
+      const t = (document.getElementById('evm-balance')?.textContent ?? '').trim();
+      return t === '0 ETH' ? t : null;
+    })()`, 20_000, 300);
     await fill('evm-faucet-amount', '100');
     await click('evm-faucet-btn');
     const balText = await waitForExpr(`(() => {
@@ -291,15 +305,18 @@ async function main() {
       const t = document.getElementById('evm-chain-info')?.textContent ?? '';
       return t.includes('0x7a69') && t.includes('gas') ? t : null;
     })()`, 10_000);
-    record('F2 链状态行：chainId/nonce/gas 展示', !!chainInfo, String(chainInfo));
+    record('F2 链状态卡：chainId/nonce/gas 展示', !!chainInfo, String(chainInfo).replace(/\n/g, ' | ').slice(0, 120));
     const refresh = await msg({ type: 'popup:evmRefresh' });
     record('F3 SW 余额面：balanceWei=100e18 + nonce=0 + gasPrice',
       refresh?.balanceWei === (100n * 10n ** 18n).toString() && refresh?.nonce === '0'
         && BigInt(refresh?.gasPriceWei ?? 0) > 0n,
       JSON.stringify(refresh).slice(0, 140));
 
-    // ===== ② 合约调用 =====
+    // ===== ② 合约调用（合约屏：一套模板 × 链筛选器）=====
+    let g = 0;
     const OTHER = toChecksumAddress('0x' + 'beef'.padEnd(40, '0'));
+    const onContract = await nav('evm-contract', `!!document.getElementById('evm-read-btn')`);
+    record('C0 合约屏进入（eth_call / 发起交易双入口）', onContract === true);
     // 只读：symbol()
     await fill('evm-contract', chain.contract);
     await fill('evm-method', 'symbol');
@@ -316,6 +333,7 @@ async function main() {
       return true;
     })()`);
     await fill('evm-abi-json', JSON.stringify([{ type: 'function', name: 'faucet', stateMutability: 'nonpayable', inputs: [], outputs: [] }]));
+    await fill('evm-contract', chain.contract);
     await fill('evm-method', 'faucet');
     await fill('evm-args', '');
     await click('evm-write-btn');
@@ -325,10 +343,9 @@ async function main() {
       previewShown === true && String(previewText).includes('faucet()') && String(previewText).includes('最大手续费')
         && String(previewText).includes('0x7a69'),
       String(previewText).replace(/\n/g, ' | ').slice(0, 160));
-    const gC1 = await gen();
     await click('evm-tx-confirm');
     const txHash1 = await waitForExpr(`window.__lastEvmBroadcast ?? null`, 30_000);
-    await waitRender(gC1, `!!document.getElementById('evm-address')`, 15_000);
+    await waitForExpr(`!!document.getElementById('evm-read-btn')`, 15_000);
     record('C3 确认 → 签名广播（真实 raw 交易上链）', /^0x[0-9a-f]{64}$/.test(String(txHash1)), String(txHash1));
     const onchain1 = txHash1 ? chain.state.txs.get(String(txHash1).toLowerCase()) : null;
     record('C4 开发链核对：sender 恢复 = 钱包地址 + status 0x1',
@@ -356,10 +373,9 @@ async function main() {
     await fill('evm-args', `${OTHER}, 250`);
     await click('evm-write-btn');
     await waitForExpr(`!!document.getElementById('evm-tx-confirm')`, 15_000);
-    const gC2 = await gen();
     await click('evm-tx-confirm');
     const txHash2 = await waitForExpr(`window.__lastEvmBroadcast !== ${JSON.stringify(txHash1)} ? window.__lastEvmBroadcast : null`, 30_000);
-    await waitRender(gC2, `!!document.getElementById('evm-address')`, 15_000);
+    await waitForExpr(`!!document.getElementById('evm-read-btn')`, 15_000);
     record('C6 合约写 transfer(OTHER,250) 广播', /^0x[0-9a-f]{64}$/.test(String(txHash2)), String(txHash2));
     await fill('evm-contract', chain.contract);
     await fill('evm-method', 'balanceOf');
@@ -372,15 +388,17 @@ async function main() {
     record('C7 链上效果核对：balanceOf(OTHER) → 250',
       String(balOther).includes('250'), String(balOther).replace(/\n/g, ' | ').slice(0, 140));
 
-    // ===== 原生转账 =====
+    // ===== 原生转账（发送屏）=====
+    await nav('sub-back', `!!document.getElementById('evm-send')`);
+    const onSend = await nav('evm-send', `!!document.getElementById('evm-tx-prepare')`);
+    record('T0 发送屏进入（金额 + 收款地址 + 预览）', onSend === true);
     await fill('evm-tx-to', OTHER);
     await fill('evm-tx-value', '1.5');
     await click('evm-tx-prepare');
     await waitForExpr(`!!document.getElementById('evm-tx-confirm')`, 15_000);
-    const gT1 = await gen();
     await click('evm-tx-confirm');
     const txHash3 = await waitForExpr(`window.__lastEvmBroadcast !== ${JSON.stringify(txHash2)} ? window.__lastEvmBroadcast : null`, 30_000);
-    await waitRender(gT1, `!!document.getElementById('evm-address')`, 15_000);
+    await waitForExpr(`!!document.getElementById('evm-tx-prepare')`, 15_000);
     record('T1 原生转账 1.5 ETH → 广播', /^0x[0-9a-f]{64}$/.test(String(txHash3)), String(txHash3));
     // 拒绝路径：预览后取消（render 重置输入框 → 重新填地址）
     await fill('evm-tx-to', OTHER);
@@ -391,7 +409,7 @@ async function main() {
     const previewGone = await waitForExpr(`!document.getElementById('evm-tx-preview')`, 10_000);
     const notBroadcast = chain.state.txs.size === 3; // faucet + transfer + 原生 1.5
     record('T2 取消预览 → 不广播', previewGone === true && notBroadcast, `txs=${chain.state.txs.size}`);
-    // 余额不足：150 ETH > 余额
+    // 余额不足：150 ETH > 余额（错误码原样展示在错误行）
     await fill('evm-tx-to', OTHER);
     await fill('evm-tx-value', '150');
     await click('evm-tx-prepare');
@@ -402,7 +420,8 @@ async function main() {
     await click('evm-tx-prepare');
     await waitForExpr(`!!document.getElementById('evm-tx-reject')`, 15_000);
     await click('evm-tx-reject');
-    // 刷新余额：100 - 1.5 - gas(≈0.000000021)
+    // 刷新余额：100 - 1.5 - gas(≈0.000000021)（回账簿面板刷新）
+    await nav('sub-back', `!!document.getElementById('evm-refresh-btn')`);
     await click('evm-refresh-btn');
     const balAfter = await waitForExpr(`(() => {
       const t = (document.getElementById('evm-balance')?.textContent ?? '').trim();
@@ -411,42 +430,50 @@ async function main() {
     })()`, 20_000);
     record('T4 转账后余额刷新（≈98.5 − gas）', !!balAfter, String(balAfter));
 
-    // ===== ③ 交易记录 =====
-    // explorer API 指向 devchain 的 Etherscan 兼容端点（真实 UI 输入）
-    g = await gen();
+    // ===== ③ 交易记录（记录屏：本地账本 + explorer 合并）=====
+    // explorer API 指向 devchain 的 Etherscan 兼容端点（真实 UI 输入 · 管理屏）
+    await nav('evm-manage', `!!document.getElementById('evm-explorer-input')`);
     await fill('evm-explorer-input', `${chain.url}/api`);
     await click('evm-explorer-save');
-    await waitRender(g, `!!document.getElementById('evm-history-btn')`, 15_000);
+    await nav('sub-back', `!!document.getElementById('evm-history')`);
+    const onHistory = await nav('evm-history', `!!document.getElementById('evm-history-btn')`);
+    record('H0 记录屏进入（合并开关 + 分桶 + 对账入口）', onHistory === true);
     await click('evm-history-btn');
     const histOk = await waitForExpr(`(() => {
       const list = document.getElementById('evm-history-list');
       if (!list) return null;
-      const boxes = list.querySelectorAll('.receipt').length;
-      const confirmed = list.innerText.includes('已确认');
+      const boxes = list.querySelectorAll('.tx').length;
+      const confirmed = list.innerText.includes('成功');
       return boxes >= 3 && confirmed ? boxes : null;
     })()`, 20_000);
-    record('H1 交易记录列表：≥3 条本地记录 + 已确认状态', !!histOk, `boxes=${histOk}`);
-    // explorer 合并（devchain 提供 Etherscan 兼容端点）
-    await page.eval(`(() => { const cb = document.getElementById('evm-history-explorer'); cb.checked = true; return true; })()`);
+    record('H1 交易记录列表：≥3 条本地记录 + 成功状态', !!histOk, `rows=${histOk} onHistory=${onHistory}`);
+    // explorer 合并（devchain 提供 Etherscan 兼容端点）：开关 → 重新对账
+    await click('evm-history-explorer');
     await click('evm-history-btn');
     const histExplorer = await waitForExpr(`(() => {
       const list = document.getElementById('evm-history-list');
       if (!list) return null;
       if (list.innerText.includes('未合并')) return 'note';
-      return list.querySelectorAll('.receipt').length >= 3 ? 'merged' : null;
+      return list.querySelectorAll('.tx').length >= 3 ? 'merged' : null;
     })()`, 20_000);
     record('H2 explorer txlist 合并（Etherscan 兼容端点）', histExplorer === 'merged', String(histExplorer));
     const histDetail = await page.eval(`(() => {
       const list = document.getElementById('evm-history-list');
-      const first = list.querySelector('.receipt');
+      const first = list.querySelector('.tx');
       return first ? first.innerText : '';
     })()`);
-    record('H3 记录明细：hash + 方向 + 金额 + 区块',
-      /0x[0-9a-f]{20}/.test(String(histDetail)) && String(histDetail).includes('区块')
-        && String(histDetail).includes('→'),
+    record('H3 记录明细：hash + 方向金额 + 来源 + 状态',
+      /0x[0-9a-f]{6}/.test(String(histDetail)) && /本地|链上/.test(String(histDetail))
+        && String(histDetail).includes('成功'),
       String(histDetail).replace(/\n/g, ' | ').slice(0, 160));
+    // 分桶（全部 / 转账 / 合约）是方向 B 的账簿口径
+    const bucketOk = await nav('h-seg-c', `document.querySelector('[data-pane="c"]')?.style.display !== 'none'`);
+    record('H4 记录分桶切换（转账 / 合约）', bucketOk === true);
 
-    // ===== ④ 钱包管理 =====
+    // ===== ④ 钱包管理（账户管理屏）=====
+    await nav('sub-back', `!!document.getElementById('evm-manage')`);
+    const onManage = await nav('evm-manage', `!!document.getElementById('evm-export-details')`);
+    record('M0 账户管理屏：安全 / 网络 / 危险区三段', onManage === true);
     // 导出私钥：先错口令 fail-closed
     await openDetails('evm-export-details');
     await fill('evm-export-pw', 'wrong password!');
@@ -458,7 +485,7 @@ async function main() {
     const exportedKey = await waitForExpr(`document.getElementById('evm-exported-key')?.textContent ?? null`, 10_000);
     const exportOk = /^0x[0-9a-f]{64}$/.test(String(exportedKey));
     record('M2 导出私钥：口令确认 → 64 hex 私钥展示', exportOk, String(exportedKey).slice(0, 12) + '…');
-    // 锁定 → 错口令 → 正确口令
+    // 锁定 → 错口令 → 正确口令（锁定后回到账簿面板的"解锁本层"入口）
     g = await gen();
     await click('evm-lock-btn');
     const unlockVisible = await waitRender(g, `!!document.getElementById('evm-unlock-btn') && !document.getElementById('evm-address')`, 10_000);
@@ -472,6 +499,7 @@ async function main() {
     const reUnlocked = await waitRender(g, `!!document.getElementById('evm-address')`, 20_000);
     record('M4 正确口令解锁恢复', reUnlocked === true);
     // SW 级守卫：锁定时准备交易 → SessionInvalid
+    await nav('evm-manage', `!!document.getElementById('evm-lock-btn')`);
     g = await gen();
     await click('evm-lock-btn');
     await waitRender(g, `!!document.getElementById('evm-unlock-btn')`, 10_000);
@@ -482,6 +510,7 @@ async function main() {
     await click('evm-unlock-btn');
     await waitRender(g, `!!document.getElementById('evm-address')`, 20_000);
     // 导出私钥再导入 → 同一地址（先删除当前账户：同私钥重复导入会被正确拒绝）
+    await nav('evm-manage', `!!document.getElementById('evm-export-details')`);
     await openDetails('evm-export-details');
     await fill('evm-export-pw', PW);
     await click('evm-export-btn');
@@ -496,11 +525,13 @@ async function main() {
     // 私钥不入 result 工件：镜像 M2 的截断（前 12 hex + 省略号）。
     record('M6a 导出私钥（锁定/解锁循环后仍可用）', !!key2,
       JSON.stringify(key2Raw ? { key: String(key2Raw.key).slice(0, 12) + '…' } : null));
-    await openDetails('evm-remove-details');
+    // 危险区：删除账户需二次确认（输入 DELETE）
+    await click('evm-remove-open');
+    await fill('evm-remove-confirm', 'DELETE');
     g = await gen();
     await click('evm-remove-btn');
     const removed = await waitRender(g, `!!document.getElementById('evm-create-btn') && !!document.getElementById('evm-import-btn')`, 15_000);
-    record('M6b 删除当前账户 → 回到创建视图', removed === true);
+    record('M6b 删除当前账户（二次确认）→ 回到创建/导入入口', removed === true);
     await fill('evm-import-key', String(key2));
     await fill('evm-import-pw', PW);
     g = await gen();
@@ -511,7 +542,21 @@ async function main() {
       importRendered === true && String(importedAddr).toLowerCase() === String(state0.accounts[0].address).toLowerCase()
         && toChecksumAddress(String(importedAddr)) === importedAddr,
       `${String(importedAddr).slice(0, 14)}… vs ${String(state0.accounts[0].address).slice(0, 14)}…`);
-    // 坏私钥拒绝（锁定后导入卡可见）
+    // 逐层创建入口（方向 B：账簿面板上的"创建本层"）：删除后新建一个账户
+    await nav('evm-manage', `!!document.getElementById('evm-remove-open')`);
+    await click('evm-remove-open');
+    await fill('evm-remove-confirm', 'DELETE');
+    g = await gen();
+    await click('evm-remove-btn');
+    await waitRender(g, `!!document.getElementById('evm-create-btn')`, 15_000);
+    await fill('evm-pw', PW);
+    await fill('evm-pw2', PW);
+    g = await gen();
+    await click('evm-create-btn');
+    const createdAgain = await waitRender(g, `!!document.getElementById('evm-address')`, 30_000);
+    record('M6c 「创建本层」入口可用（删除后重新生成新账户）', createdAgain === true);
+    // 坏私钥拒绝（锁定后导入入口可见）
+    await nav('evm-manage', `!!document.getElementById('evm-lock-btn')`);
     g = await gen();
     await click('evm-lock-btn');
     await waitRender(g, `!!document.getElementById('evm-import-btn')`, 10_000);
@@ -525,6 +570,7 @@ async function main() {
     await fill('evm-unlock-pw', PW);
     await click('evm-unlock-btn');
     await waitRender(g, `!!document.getElementById('evm-address')`, 20_000);
+    await nav('evm-manage', `!!document.getElementById('evm-cpw-details')`);
     await openDetails('evm-cpw-details');
     await fill('evm-cpw-current', PW);
     await fill('evm-cpw-next', PW2);
@@ -555,8 +601,10 @@ async function main() {
     await msg({ type: 'popup:evmSetRpc', chainIdHex: '0x7a69', rpcUrl: '' }); // 恢复
     await msg({ type: 'popup:evmSetRpc', chainIdHex: '0x7a69', rpcUrl: chain.url });
 
-    // ===== 截图（EVM 主面板最终态）=====
-    await page.eval(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent === '刷新余额'); b?.click(); return true; })()`);
+    // ===== 截图（EVM 账簿面板最终态）=====
+    await nav('tab-home', `!!document.getElementById('home-card')`);
+    await nav('home-evm', `!!document.getElementById('evm-refresh-btn')`);
+    await page.eval(`document.getElementById('evm-refresh-btn')?.click(); true`);
     await sleep(1200);
     const shot = await Promise.race([page.send('Page.captureScreenshot', { format: 'png' }), new Promise((_, rej) => setTimeout(() => rej(new Error('screenshot timeout')), 10_000))]);
     writeFileSync(OUT_PNG, Buffer.from(shot.data, 'base64'));

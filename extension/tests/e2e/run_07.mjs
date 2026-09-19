@@ -252,14 +252,16 @@ async function main() {
         && created.layers?.stk?.has && created.layers?.stk?.unlocked,
       JSON.stringify({ onboarded: created?.onboarded }).slice(0, 60));
 
-    // ===== O3：开始使用 → 统一首页 =====
+    // ===== O3：开始使用 → 统一首页（账簿方向的"总账"tab）=====
+    // 设计 B 立场：口令只显示一次 → 必须勾选确认门，"开始使用"才解锁（门控按钮）。
+    await click('welcome-done-gate');
     await click('welcome-done-btn');
     const home = await waitForExpr(`(() => {
       const card = document.getElementById('home-card');
       if (!card) return null;
-      return card.innerText.includes('多链总览') && card.innerText.includes('进入钱包') ? true : null;
+      return card.innerText.includes('ZChain 隐私层') && card.innerText.includes('进入账簿') ? true : null;
     })()`, 15_000);
-    record('O3 统一首页：三链卡片 + 进入钱包（全部已解锁）', home === true);
+    record('O3 统一首页：三链账户层卡片 + 进入账簿（全部已解锁）', home === true);
 
     // ===== O4：老用户不触发（锁定全部 → 重开 popup → 无欢迎页，有统一解锁）=====
     await msg({ type: 'popup:lock' });
@@ -287,20 +289,20 @@ async function main() {
     await click('home-unlock-btn');
     const unlockedAll = await waitForExpr(`(() => {
       const card = document.getElementById('home-card');
-      return card && card.innerText.includes('进入钱包') && !document.getElementById('home-unlock-btn') ? true : null;
+      return card && card.innerText.includes('进入账簿') && !document.getElementById('home-unlock-btn') ? true : null;
     })()`, 20_000);
     record('O5b 正确口令（一键创建自动口令）→ 全层解锁回首页', unlockedAll === true);
 
-    // ===== O6：明细页直达（首页卡片 → EVM / Starknet 钱包视图，无创建流程）=====
-    await click('home-evm-open');
+    // ===== O6：明细页直达（首页账户层行 → 该链账簿面板；链=筛选器）=====
+    await click('home-evm');
     const evmDash = await waitForExpr(`!!document.getElementById('evm-address') && !document.getElementById('evm-create-btn')`, 15_000);
-    record('O6a 首页进入 EVM 钱包视图（直接是已解锁面板）', evmDash === true);
-    await click('mode-stk');
+    record('O6a 首页进入 EVM 账簿面板（直接是已解锁数据面）', evmDash === true);
+    await click('cs-stk');
     const stkDash = await waitForExpr(`!!document.getElementById('stk-address') && !document.getElementById('stk-create-btn')`, 15_000);
-    record('O6b 切到 Starknet 视图（同样直达面板）', stkDash === true);
-    await click('mode-home');
+    record('O6b 链切换器切到 Starknet（同一模板换数据面）', stkDash === true);
+    await click('tab-home');
     const backHome = await waitForExpr(`!!document.getElementById('home-card')`, 15_000);
-    record('O6c 首页按钮回到总览', backHome === true);
+    record('O6c 底部 tab 回到总账', backHome === true);
 
     // ===== O7：API 级防护（已 onboarded 再 quickCreate → OnboardedAlready）=====
     const guard = await msg({ type: 'popup:quickCreate' });

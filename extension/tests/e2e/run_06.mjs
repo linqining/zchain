@@ -11,9 +11,10 @@
 //   2. 合约调用：只读（symbol / balance_of）+ 写（transfer invoke v1，
 //      STARK curve ECDSA 签名 → 链上验签 → u256 状态核对）；
 //   3. 交易记录：本地账本 + explorer txlist 合并 + 回执对账；
-//   4. 钱包管理：创建（口令 keystore）、锁定/解锁（错口令 fail-closed）、
-//      私钥导出、删除后重导入同址、修改口令（旧口令失效）；
-//   5. 本文件即 e2e（浏览器操作），结果落 JSON + 截图。
+//   4. 钱包管理：锁定/解锁（错口令 fail-closed）、私钥导出、删除后重导入同址、
+//      逐层「创建本层」（UDC 推导地址 + 校验和）、修改口令（旧口令失效）；
+//   5. 导航：链=筛选器（同一账簿模板换数据面），子屏经 sub-back 回账簿；
+//   6. 本文件即 e2e（浏览器操作），结果落 JSON + 截图。
 //
 // 用法（repo 根目录）：node extension/tests/e2e/run_06.mjs
 // 退出码：0 = 全部 PASS；1 = 存在 FAIL。
@@ -237,39 +238,44 @@ async function main() {
     }
     const openDetails = (selector) => page.eval(`(() => { const d = document.getElementById(${JSON.stringify(selector)}); if (!d) return false; d.open = true; return true; })()`).catch(() => false);
 
-    // ===== S0/S1：模式切换 =====
-    const hasStkBtn = await waitForExpr(`!!document.getElementById('mode-stk')`);
-    record('S0 popup 页加载 + Starknet 模式按钮存在', hasStkBtn === true);
-    const createVisible = await clickUntil('mode-stk', `!!document.getElementById('stk-create-btn')`);
-    record('S1 切换到 Starknet 钱包 → 创建视图', createVisible === true);
-
-    // ===== S2：创建钱包（STARK curve 密钥 + 口令 keystore + UDC 地址）=====
+    // ===== S0/S1：加载 + 引导（方向 B：欢迎页一次创建三层 → 链=筛选器）=====
+    const hasWelcome = await waitForExpr(`!!document.getElementById('welcome-create-btn')`);
+    record('S0 popup 页加载 + 欢迎页', hasWelcome === true);
+    const nav = (selector, effectExpr, timeoutMs = 20_000) => clickUntil(selector, effectExpr, timeoutMs);
     let g = await gen();
-    await fill('stk-pw', PW);
-    await fill('stk-pw2', PW);
-    await click('stk-create-btn');
-    await waitRender(g, `!!document.getElementById('stk-address')`, 30_000);
+    await page.eval(`(() => { const d = document.getElementById('welcome-advanced'); if (d) d.open = true; return true; })()`);
+    await fill('welcome-pw', PW);
+    await fill('welcome-pw2', PW);
+    const created = await nav('welcome-custom-btn', `!!document.getElementById('welcome-success')`, 30_000);
+    record('S1a 自定义口令一次创建三层（含 Starknet 层）', created === true);
+    await clickUntil('welcome-done-gate', `!document.getElementById('welcome-done-btn')?.disabled`).catch(() => { });
+    await clickUntil('welcome-done-btn', `!!document.getElementById('home-card')`).catch(() => { });
+
+    // ===== S2：Starknet 账簿面板（STARK curve 密钥 + UDC 推导地址）=====
+    const stkDash = await nav('home-stk', `!!document.getElementById('stk-address')`, 20_000);
     const addrRaw = await waitForExpr(`document.getElementById('stk-address')?.textContent ?? null`, 10_000);
     const pubRaw = await waitForExpr(`document.getElementById('stk-pubkey')?.textContent ?? null`, 10_000);
-    const addrOk = typeof addrRaw === 'string'
+    const addrOk = stkDash === true && typeof addrRaw === 'string'
       && /^0x[0-9a-fA-F]{1,64}$/.test(addrRaw)
       && hexToBigInt(addrRaw) < (2n ** 251n - 256n)
       && toChecksumAddress(addrRaw) === addrRaw;
-    record('S2 创建钱包 → 地址（ADDR_BOUND 内 + Starknet 校验和）+ 公钥展示',
+    record('S2 Starknet 面板 → 地址（ADDR_BOUND 内 + 校验和）+ 公钥展示',
       addrOk && /^0x[0-9a-fA-F]{1,64}$/.test(String(pubRaw)), `${addrRaw} / ${String(pubRaw).slice(0, 14)}…`);
     const state0 = await msg({ type: 'popup:stkGetState' });
     record('S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet',
       state0?.hasWallet === true && state0?.unlocked === true && state0.networkId === 'starknet-devnet',
       JSON.stringify({ hasWallet: state0?.hasWallet, unlocked: state0?.unlocked, net: state0?.networkId }).slice(0, 100));
 
-    // ===== S3：RPC 指向本地开发链 =====
+    // ===== S3：RPC 指向本地开发链（账户管理屏）=====
+    const onManage0 = await nav('stk-manage', `!!document.getElementById('stk-rpc-input')`);
+    record('S3a 账户管理屏进入（RPC / Explorer / 危险区）', onManage0 === true);
     g = await gen();
     await fill('stk-rpc-input', chain.url);
     await click('stk-rpc-save');
-    await waitRender(g, `!!document.getElementById('stk-faucet-amount')`, 15_000);
+    const backDash = await nav('sub-back', `!!document.getElementById('stk-faucet-amount')`, 15_000);
     const savedRpc = await msg({ type: 'popup:stkGetState' });
     const net = (savedRpc.networks ?? []).find((n) => n.id === 'starknet-devnet');
-    record('S3 保存 RPC 覆盖 → 生效 URL = starkdevchain', net?.rpcUrl === chain.url && net?.rpcOverridden === true, String(net?.rpcUrl));
+    record('S3b 保存 RPC 覆盖 → 生效 URL = starkdevchain', backDash === true && net?.rpcUrl === chain.url && net?.rpcOverridden === true, String(net?.rpcUrl));
 
     // ===== ① 余额查询：水龙头（注册 pubkey + 出资）→ 刷新 =====
     g = await gen();
@@ -284,15 +290,17 @@ async function main() {
       const t = document.getElementById('stk-chain-info')?.textContent ?? '';
       return t.includes('ZCDN') && t.includes('nonce') ? t : null;
     })()`, 15_000);
-    record('F2 链状态行：chainId=ZCDN + nonce 展示', !!chainInfo, String(chainInfo));
+    record('F2 链状态卡：chainId=ZCDN + nonce 展示', !!chainInfo, String(chainInfo).replace(/\n/g, ' | ').slice(0, 120));
     const refresh = await msg({ type: 'popup:stkRefresh' });
     record('F3 SW 余额面：balanceWei=100e18 + nonce=0 + chainId 无误',
       refresh?.balanceWei === (100n * 10n ** 18n).toString() && refresh?.nonce === '0'
         && refresh?.chainId === 'ZCDN' && refresh?.chainIdMismatch === false,
       JSON.stringify(refresh).slice(0, 140));
 
-    // ===== ② 合约调用 =====
+    // ===== ② 合约调用（合约屏）=====
     const OTHER = toChecksumAddress('0x' + 'beef'.padEnd(62, '0'));
+    const onContract = await nav('stk-contract', `!!document.getElementById('stk-read-btn')`);
+    record('C0 合约屏进入（starknet_call / invoke 双入口）', onContract === true);
     // 只读：symbol（代币合约）
     g = await gen();
     await fill('stk-contract', chain.token.address);
@@ -304,7 +312,7 @@ async function main() {
       return t.includes('DST') ? t : null;
     })()`, 15_000);
     record('C1 合约只读 symbol → DST（starknet_call）', !!symText, String(symText).replace(/\n/g, ' | ').slice(0, 120));
-    // 只读：balance_of（手填地址参数）
+    // 只读：balance_of（手填地址参数；表单草稿跨渲染保留）
     await fill('stk-method', 'balance_of');
     await fill('stk-args', state0.accounts[0].address);
     await click('stk-read-btn');
@@ -313,27 +321,33 @@ async function main() {
       return t.includes('100000000000000000000') ? t : null;
     })()`, 15_000);
     record('C2 合约只读 balance_of → 100e18（felt 原值）', !!balOf, String(balOf).replace(/\n/g, ' | ').slice(0, 140));
-    // 写：transfer(OTHER, 25 DST) → 预览 → 确认
+    // 写：transfer(OTHER, 25 DST) → 预览 → 确认（发送屏）
+    await nav('sub-back', `!!document.getElementById('stk-send')`);
+    const onSend = await nav('stk-send', `!!document.getElementById('stk-tx-prepare')`);
+    record('C2b 发送屏进入（invoke v1 预览入口）', onSend === true);
     g = await gen();
     await fill('stk-tx-recipient', OTHER);
     await fill('stk-tx-amount', '25');
     await click('stk-tx-prepare');
     const previewShown = await waitForExpr(`!!document.getElementById('stk-tx-preview')`, 15_000);
-    const previewText = previewShown ? await page.eval(`document.getElementById('stk-tx-preview').innerText`) : '';
+    // textContent（非 innerText）：微标签的 CSS text-transform 会改写 innerText。
+    const previewText = previewShown ? await page.eval(`document.getElementById('stk-tx-preview').textContent`) : '';
     record('C3 invoke v1 预览卡：selector + calldata + max fee + chainId',
       previewShown === true && String(previewText).includes('invoke v1') && String(previewText).includes('max fee')
         && String(previewText).includes('ZCDN'),
       String(previewText).replace(/\n/g, ' | ').slice(0, 200));
     await click('stk-tx-confirm');
     const txHash1 = await waitForExpr(`window.__lastStkBroadcast ?? null`, 30_000);
-    await waitRender(g + 1, `!!document.getElementById('stk-address')`, 15_000);
+    await waitForExpr(`!!document.getElementById('stk-tx-prepare')`, 15_000);
     record('C4 确认 → STARK curve 签名广播（[r, s] invoke v1）', /^0x[0-9a-f]{1,64}$/.test(String(txHash1)), String(txHash1));
     const onchain1 = txHash1 ? chain.state.txs.get(String(txHash1).toLowerCase()) : null;
     record('C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址',
       onchain1?.executionStatus === 'SUCCEEDED'
         && hexToBigInt(onchain1?.from) === hexToBigInt(String(state0.accounts[0]?.address)),
       JSON.stringify({ from: onchain1?.from, st: onchain1?.executionStatus }).slice(0, 120));
-    // 链上效果：balance_of(OTHER) = 25e18（render 重置输入 → 重填合约地址）
+    // 链上效果：balance_of(OTHER) = 25e18（u256）
+    await nav('sub-back', `!!document.getElementById('stk-contract')`);
+    await nav('stk-contract', `!!document.getElementById('stk-read-btn')`);
     await fill('stk-contract', chain.token.address);
     await fill('stk-method', 'balance_of');
     await fill('stk-args', OTHER);
@@ -344,7 +358,9 @@ async function main() {
     })()`, 15_000);
     record('C6 链上效果核对：balance_of(OTHER) → 25e18（u256）', !!balOther, String(balOther).replace(/\n/g, ' | ').slice(0, 140));
 
-    // 取消路径（render 重置输入 → 重新填收款地址）
+    // 取消路径（回到发送屏）
+    await nav('sub-back', `!!document.getElementById('stk-send')`);
+    await nav('stk-send', `!!document.getElementById('stk-tx-prepare')`);
     await fill('stk-tx-recipient', OTHER);
     await fill('stk-tx-amount', '2');
     await click('stk-tx-prepare');
@@ -361,30 +377,37 @@ async function main() {
     await fill('stk-tx-recipient', OTHER);
     await fill('stk-tx-amount', '0.5');
 
-    // ===== ③ 交易记录 =====
+    // ===== ③ 交易记录（记录屏：合并开关 + 对账）=====
+    await nav('sub-back', `!!document.getElementById('stk-manage')`);
+    await nav('stk-manage', `!!document.getElementById('stk-explorer-input')`);
     g = await gen();
     await fill('stk-explorer-input', `${chain.url}/api`);
     await click('stk-explorer-save');
-    await waitRender(g, `!!document.getElementById('stk-history-btn')`, 15_000);
+    await nav('sub-back', `!!document.getElementById('stk-history')`);
+    const onHistory = await nav('stk-history', `!!document.getElementById('stk-history-btn')`);
+    record('H0 记录屏进入', onHistory === true);
     await click('stk-history-btn');
     const histOk = await waitForExpr(`(() => {
       const list = document.getElementById('stk-history-list');
       if (!list) return null;
-      const boxes = list.querySelectorAll('.receipt').length;
-      return boxes >= 1 && list.innerText.includes('已确认') ? boxes : null;
+      const boxes = list.querySelectorAll('.tx').length;
+      return boxes >= 1 && list.innerText.includes('成功') ? boxes : null;
     })()`, 20_000);
-    record('H1 交易记录列表：本地记录 + 已确认状态', !!histOk, `boxes=${histOk}`);
-    await page.eval(`(() => { const cb = document.getElementById('stk-history-explorer'); cb.checked = true; return true; })()`);
+    record('H1 交易记录列表：本地记录 + 成功状态', !!histOk, `rows=${histOk}`);
+    await click('stk-history-explorer');
     await click('stk-history-btn');
     const histExplorer = await waitForExpr(`(() => {
       const list = document.getElementById('stk-history-list');
       if (!list) return null;
       if (list.innerText.includes('未合并')) return 'note';
-      return list.querySelectorAll('.receipt').length >= 1 ? 'merged' : null;
+      return list.querySelectorAll('.tx').length >= 1 ? 'merged' : null;
     })()`, 20_000);
     record('H2 explorer txlist 合并', histExplorer === 'merged', String(histExplorer));
 
-    // ===== ④ 钱包管理 =====
+    // ===== ④ 钱包管理（账户管理屏）=====
+    await nav('sub-back', `!!document.getElementById('stk-manage')`);
+    const onManage = await nav('stk-manage', `!!document.getElementById('stk-export-details')`);
+    record('M0 账户管理屏：安全 / 网络 / 危险区三段', onManage === true);
     await openDetails('stk-export-details');
     await fill('stk-export-pw', 'wrong password!');
     await click('stk-export-btn');
@@ -394,7 +417,7 @@ async function main() {
     await click('stk-export-btn');
     const exportedKey = await waitForExpr(`document.getElementById('stk-exported-key')?.textContent ?? null`, 10_000);
     record('M2 导出私钥：口令确认 → felt 私钥展示', /^0x[0-9a-f]{1,64}$/.test(String(exportedKey)), String(exportedKey).slice(0, 12) + '…');
-    // 锁定 → 错口令 → 正确口令
+    // 锁定 → 错口令 → 正确口令（锁定后回到账簿面板的"解锁本层"）
     g = await gen();
     await click('stk-lock-btn');
     const unlockVisible = await waitRender(g, `!!document.getElementById('stk-unlock-btn') && !document.getElementById('stk-address')`, 10_000);
@@ -408,6 +431,7 @@ async function main() {
     const reUnlocked = await waitRender(g, `!!document.getElementById('stk-address')`, 20_000);
     record('M4 正确口令解锁恢复', reUnlocked === true);
     // SW 级守卫：锁定时 prepareTx → SessionInvalid
+    await nav('stk-manage', `!!document.getElementById('stk-lock-btn')`);
     g = await gen();
     await click('stk-lock-btn');
     await waitRender(g, `!!document.getElementById('stk-unlock-btn')`, 10_000);
@@ -418,6 +442,7 @@ async function main() {
     await click('stk-unlock-btn');
     await waitRender(g, `!!document.getElementById('stk-address')`, 20_000);
     // 导出 → 删除 → 重导入 → 同一地址（同私钥重复导入会被正确拒绝）
+    await nav('stk-manage', `!!document.getElementById('stk-export-details')`);
     await openDetails('stk-export-details');
     await fill('stk-export-pw', PW);
     await click('stk-export-btn');
@@ -432,11 +457,12 @@ async function main() {
     // 私钥不入 result 工件：镜像 M2 的截断（前 12 hex + 省略号）。
     record('M6a 导出私钥（锁定/解锁循环后仍可用）', !!key2,
       JSON.stringify(key2Raw ? { key: String(key2Raw.key).slice(0, 12) + '…' } : null));
-    await openDetails('stk-remove-details');
+    await click('stk-remove-open');
+    await fill('stk-remove-confirm', 'DELETE');
     g = await gen();
     await click('stk-remove-btn');
     const removed = await waitRender(g, `!!document.getElementById('stk-create-btn') && !!document.getElementById('stk-import-btn')`, 15_000);
-    record('M6b 删除当前账户 → 回到创建视图', removed === true);
+    record('M6b 删除当前账户（二次确认）→ 回到创建/导入入口', removed === true);
     await fill('stk-import-key', String(key2));
     await fill('stk-import-pw', PW);
     g = await gen();
@@ -448,7 +474,26 @@ async function main() {
         && hexToBigInt(importedAddr) < (2n ** 251n - 256n)
         && toChecksumAddress(importedAddr) === importedAddr,
       String(importedAddr));
+    // 逐层「创建本层」入口（账簿面板）：删除后再生成一个账户
+    await nav('stk-manage', `!!document.getElementById('stk-remove-open')`);
+    await click('stk-remove-open');
+    await fill('stk-remove-confirm', 'DELETE');
+    g = await gen();
+    await click('stk-remove-btn');
+    await waitRender(g, `!!document.getElementById('stk-create-btn')`, 15_000);
+    await fill('stk-pw', PW);
+    await fill('stk-pw2', PW);
+    g = await gen();
+    await click('stk-create-btn');
+    const createdAgain = await waitRender(g, `!!document.getElementById('stk-address')`, 30_000);
+    const againAddr = await waitForExpr(`document.getElementById('stk-address')?.textContent ?? null`, 10_000);
+    record('M6c 「创建本层」→ STARK curve 新账户（ADDR_BOUND + 校验和）',
+      createdAgain === true && typeof againAddr === 'string'
+        && hexToBigInt(againAddr) < (2n ** 251n - 256n)
+        && toChecksumAddress(againAddr) === againAddr,
+      String(againAddr));
     // 坏私钥拒绝
+    await nav('stk-manage', `!!document.getElementById('stk-lock-btn')`);
     g = await gen();
     await click('stk-lock-btn');
     await waitRender(g, `!!document.getElementById('stk-import-btn')`, 10_000);
@@ -462,6 +507,7 @@ async function main() {
     await fill('stk-unlock-pw', PW);
     await click('stk-unlock-btn');
     await waitRender(g, `!!document.getElementById('stk-address')`, 20_000);
+    await nav('stk-manage', `!!document.getElementById('stk-cpw-details')`);
     await openDetails('stk-cpw-details');
     await fill('stk-cpw-current', PW);
     await fill('stk-cpw-next', PW2);
@@ -490,8 +536,10 @@ async function main() {
     record('N3 RPC 不可达 → RpcUnreachable（如实报错）', deadRefresh?.error?.code === 'RpcUnreachable', JSON.stringify(deadRefresh).slice(0, 100));
     await msg({ type: 'popup:stkSetRpc', networkId: 'starknet-devnet', rpcUrl: chain.url });
 
-    // ===== 截图 =====
-    await page.eval(`(() => { const b = [...document.querySelectorAll('button')].find((x) => x.textContent === '刷新余额'); b?.click(); return true; })()`);
+    // ===== 截图（Starknet 账簿面板最终态）=====
+    await nav('tab-home', `!!document.getElementById('home-card')`);
+    await nav('home-stk', `!!document.getElementById('stk-refresh-btn')`);
+    await page.eval(`document.getElementById('stk-refresh-btn')?.click(); true`);
     await sleep(1200);
     const shot = await Promise.race([page.send('Page.captureScreenshot', { format: 'png' }), new Promise((_, rej) => setTimeout(() => rej(new Error('screenshot timeout')), 10_000))]);
     writeFileSync(OUT_PNG, Buffer.from(shot.data, 'base64'));

@@ -141,13 +141,23 @@ async function main() {
   }
   console.log(`V3 PASS: SW runtime 消息可达（stkGetState：${state.networks.length} 个 Starknet 网络预设）`);
 
-  // 三模式按钮
-  const buttons = await conn.eval(`(() => {
-    const ids = ['mode-zchain', 'mode-evm', 'mode-stk'];
-    return ids.map((id) => Boolean(document.getElementById(id)));
+  // 方向 B 首屏导航契约：未 onboarding 的干净 profile 首帧必须是欢迎页，
+  // 且三层（ZChain / EVM / Starknet）在封面上各自成枚芯片——链是筛选器，
+  // 切换器在账簿屏（cs-zc / cs-evm / cs-stk），不在顶栏。
+  const nav = await conn.eval(`(() => {
+    const chips = [...document.querySelectorAll('.ch')].map((n) => n.textContent.trim());
+    return {
+      welcome: Boolean(document.getElementById('welcome-create-btn')),
+      importEntry: Boolean(document.getElementById('welcome-import-btn')),
+      zchain: chips.some((t) => t.includes('ZChain 隐私层')),
+      evm: chips.some((t) => t === 'EVM 多链'),
+      stk: chips.some((t) => t === 'Starknet'),
+    };
   })()`);
-  if (!buttons.every(Boolean)) throw new Error(`模式按钮缺失: ${JSON.stringify(buttons)}`);
-  console.log('V4 PASS: ZChain / EVM / Starknet 三个钱包模式按钮存在');
+  if (!nav.welcome || !nav.importEntry || !nav.zchain || !nav.evm || !nav.stk) {
+    throw new Error(`首屏导航契约不完整: ${JSON.stringify(nav)}`);
+  }
+  console.log('V4 PASS: 首屏欢迎页 + 三层芯片（ZChain / EVM / Starknet）存在');
 
   console.log('\nVERIFY PASS：打包产物可在 Chrome 正常加载与运行');
   process.exit(0);

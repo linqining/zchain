@@ -1,0 +1,160 @@
+{
+  "date": "2026-09-19T07:40:18.656Z",
+  "browser": "Chrome/153.0.8010.36",
+  "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
+  "total": 30,
+  "pass": 30,
+  "fail": 0,
+  "results": [
+    {
+      "step": "A0 一键创建三层 → 成功页自动口令只显一次",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A1 首页 = 三链总账（账户层卡片 + 底部三 tab）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A1b 账簿 tab = 带链切换器的账簿面板",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A2 切到 ZChain 链：账簿模板换 GAME/REAL 数据面",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A3 切到 EVM 链：同一屏结构、地址/余额面来自 EVM 层",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A4 切到 Starknet 链：模板不变、数据面换层",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A5 三链来回切换后抬头结构一致（票据头 + 齿孔线，未各写一份）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "B1 无价格源 → 合计显示占位而非编造法币数字",
+      "ok": true,
+      "detail": "—"
+    },
+    {
+      "step": "B2 首页显式标注「价格源未接入」",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "B3 GAME / REAL 分栏展示（跨域金额不轧差）",
+      "ok": true,
+      "detail": "GAME可用筹码0PLAYREAL托管映射0NATIVE"
+    },
+    {
+      "step": "C1 水龙头铸 500 PLAY → 账面即时反映",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C2 转账预览：选币 + 找零 + 守恒三行齐全（note 全额消费）",
+      "ok": true,
+      "detail": "贪心选币 · 消耗 1 张 NOTE | 找零 note | 守恒核对 | note 全额消费：不足额时自动多输出一条找零回本账户。提交后可在「账簿 → 回执」跟踪状态。"
+    },
+    {
+      "step": "C3 摘要来自 wallet-core 预览（展示与签名同源）",
+      "ok": true,
+      "detail": "17fb503085f0…38031ecd83"
+    },
+    {
+      "step": "C4 凭证阶梯作为一等组件出现在转账预览（4 级 + 短板文案）",
+      "ok": true,
+      "detail": "支出 note 短板 soft · 满足 GAME 域要求"
+    },
+    {
+      "step": "C5 达标后「确认转账」解禁（devnet 门槛=soft，见策略注释）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "C6 确认 → 签名成功并登记回执（状态位 signed）",
+      "ok": true,
+      "detail": "rows=2"
+    },
+    {
+      "step": "C7 回执分桶：全部 1 / 未上链 1（投递状态机）",
+      "ok": true,
+      "detail": "全部 1 / 未上链 1"
+    },
+    {
+      "step": "D1 摘要被换 → PreviewMismatch（不签）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"PreviewMismatch\",\"reason\":\"展示摘要与待签内容不一致，请重新生成预览\"}}"
+    },
+    {
+      "step": "D2 输入 note 不在库 → NoteNotFound（第二道闸在后台）",
+      "ok": true,
+      "detail": "{\"error\":{\"code\":\"NoteNotFound\",\"reason\":\"输入 note ffffffffffff… 不在本账户库中\"}}"
+    },
+    {
+      "step": "D3 预览本身可提交判定与门槛一致（requiredProof 随网络形态）",
+      "ok": true,
+      "detail": "{\"worstProof\":\"soft\",\"requiredProof\":\"soft\",\"reached\":true}"
+    },
+    {
+      "step": "E1 REAL 提现预览：逐条列出不可提交原因",
+      "ok": true,
+      "detail": "fail-closed：canSubmit 由 wallet-core 展示门与 finality 合取决定，UI 只消费。虚线笔触即「不可用」的专用表达。"
+    },
+    {
+      "step": "E2 提交按钮恒禁用 + 后台 canSubmit 恒 false（双层同结论）",
+      "ok": true,
+      "detail": "disabled=true canSubmitFalse=true"
+    },
+    {
+      "step": "F1 凭证簿：阶梯组件 + note 级凭证计数（解锁后可见）",
+      "ok": true,
+      "detail": "最近 0 次本地复验 · 1 张 note 带凭证 | 阶梯锚定在 note 上：pending → soft → proven → finalized | 已达 finalized | 短板停在 | 阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen →"
+    },
+    {
+      "step": "F2 两套状态机并列说明（投递 vs 凭证，笔触不混用）",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "G1 网关不可达 → 第 1 步标红 + 错误码原样呈现（不伪造结论）",
+      "ok": true,
+      "detail": "GatewayUnreachable：网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。 | GatewayUnreachable"
+    },
+    {
+      "step": "G2 结论印章为「未通过」（fail-closed：任一阶段失败即非 verified）",
+      "ok": true,
+      "detail": "未通过|seal seal-bad"
+    },
+    {
+      "step": "H1 双底色切换生效且持久化（纸白 ↔ 夜场）",
+      "ok": true,
+      "detail": "paper→night stored=night"
+    },
+    {
+      "step": "H2 金额显隐只影响展示且持久化（余额数据本身不变）",
+      "ok": true,
+      "detail": "hidden=true stored=1"
+    },
+    {
+      "step": "I1 能力矩阵如实列出各层红线",
+      "ok": true,
+      "detail": "ZCHAIN | GAME 域可签可转；REAL 仅隔离展示，提现预览 canSubmit 恒 false | EVM | 转账与合约写入可签名广播（EIP-155 + chainId 校验）；不签 note spend | STARKNET | invoke v1 + devnet 水龙头；SNIP-12 授权面已备，链上 admission 未开放 | "
+    },
+    {
+      "step": "I2 不出现审计徽章：未审计这件事写在界面上",
+      "ok": true,
+      "detail": ""
+    }
+  ]
+}

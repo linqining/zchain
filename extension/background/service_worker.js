@@ -97,6 +97,7 @@ import {
 } from '../common/sessions.js';
 import { buildAuthorizeTypedData } from '../adapters/starknet.js';
 import { buildWithdrawPreview } from '../common/withdraw_preview.js';
+import { buildTransferPreview, minProofForNetwork, verifySpendProofs } from '../common/transfer_preview.js';
 import { buildCapabilityMatrix, detectExternalWallets } from '../common/capability_matrix.js';
 import { initAdapters } from '../adapters/index.js';
 // ---------------------------------------------------------------------------
@@ -151,6 +152,12 @@ const AUTO_LOCK_MS = 15 * 60 * 1000;
 const PAGE_TIMEOUT_MS = 45_000;
 export const PROVIDER_VERSION = '0.4.0-alpha';
 
+/** 钱包侧自发起签名的 nonce：Date.now() 口径 + 内存高水位（严格单调，防 nonce
+ *  回退被 wallet-core 拒；跨 SW 生命周期由 wallet-core 账本自己守住）。 */
+function nextTransferNonce() {
+  return Math.max(Date.now(), (mem.transferNonce ?? 0) + 1);
+}
+
 const mem = {
   session: null,             // {id, accountId, expiresAt, locked:false} | null（null = 锁定）
   pending: {},               // requestId -> {state, payload, openedAt, expiresAt}
@@ -166,6 +173,7 @@ const mem = {
     session: null,           // {accountId, privateKey: bigint, address, pubKey}
     draft: null,             // 待确认 invoke（prepare → confirm 两步）
   },
+  transferNonce: 0,          // 钱包侧自发起签名的 nonce 高水位（严格单调）
 };
 
 const storage = {
@@ -1897,6 +1905,8 @@ async function handlePopupMessage(m, { page = false } = {}) {
     const stkHas = Object.keys(stkV.accounts).length > 0;
     return {
       onboarded: zHas || evmHas || stkHas,
+      autoLockMs: AUTO_LOCK_MS,
+      providerVersion: PROVIDER_VERSION,
       layers: {
         zchain: {
           has: zHas, unlocked: isUnlocked(),
@@ -1952,15 +1962,18 @@ async function handlePopupMessage(m, { page = false } = {}) {
     const net = resolveStarknetNetwork(DEFAULT_STARKNET_NETWORK_ID);
     const stkCreated = await createStarkAccount(password, net.accountClassHash);
     const stkId = crypto.randomUUID();
+    // 与 popup:stkCreate 同一口径：落盘/会话都存 Starknet 校验和地址（同一层
+    // 不因创建路径不同而出现两种地址形态）。
+    const stkDisplay = starkChecksum(stkCreated.address);
     stkV0.accounts[stkId] = {
-      id: stkId, label: 'Starknet 主账户', address: stkCreated.address, pubKey: stkCreated.pubKey,
+      id: stkId, label: 'Starknet 主账户', address: stkDisplay, pubKey: stkCreated.pubKey,
       keystore: stkCreated.keystore, createdAt: Date.now(),
     };
     stkV0.activeAccountId = stkId;
     await setStkVault(stkV0);
     mem.stk.session = {
       accountId: stkId, privateKey: hexToBigInt(stkCreated.privateKey),
-      address: stkCreated.address, pubKey: stkCreated.pubKey,
+      address: stkDisplay, pubKey: stkCreated.pubKey,
     };
     logSafe('quick_created');
     return {
@@ -1969,7 +1982,7 @@ async function handlePopupMessage(m, { page = false } = {}) {
       layers: {
         zchain: { publicKey: zRes.public_key },
         evm: { address: evmCreated.address },
-        stk: { address: stkCreated.address },
+        stk: { address: stkDisplay },
       },
     };
   }
@@ -2067,6 +2080,8 @@ async function handlePopupMessage(m, { page = false } = {}) {
           .map((r) => ({ ...r, view: inclusionView(r, Date.now()) }))
           .sort((a, b) => (b.signedAtMs ?? 0) - (a.signedAtMs ?? 0)),
         gatewayUrl: effectiveGatewayUrl(net.chainId, await getNetworkSettings()),
+        autoLockMs: AUTO_LOCK_MS,
+        providerVersion: PROVIDER_VERSION,
       };
     }
     case 'popup:create': {
@@ -2381,6 +2396,87 @@ async function handlePopupMessage(m, { page = false } = {}) {
       });
       if (!wp.ok) return { error: { code: wp.code, reason: wp.reason } };
       return { preview: wp.preview };
+    }
+    // -----------------------------------------------------------------------
+    // 方向 B「转账 · 贪心选币」：钱包侧自发起 PLAY 转账（预览 → 摘要绑定 → 签名）
+    //
+    // 与页面（dapp）签名管线同源：同一 validateRequest 入口、同一 wallet-core
+    // `wallet_preview`/`wallet_sign`、同一摘要绑定红线（展示摘要 ≠ 待签摘要即
+    // PreviewMismatch，绝不签）、同一回执登记。差别只在触发者：钱包自发起没有
+    // origin/信封，因此也就没有会话密钥限额（owner 路径）。
+    // -----------------------------------------------------------------------
+    case 'popup:transferPreview': {
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const account = await getActiveAccount();
+      const net = currentNetwork(account);
+      const all = await callCore('wallet_get_all_notes');
+      const res = buildTransferPreview({
+        amount: m.amount,
+        owner: m.owner,
+        selfOwner: await publicKeyHex(),
+        playNotes: sanitizeNotesForPage(all.play),
+        chainId: net.chainId,
+        nowSec: Math.floor(Date.now() / 1000),
+        nonce: nextTransferNonce(),
+        // 门槛按网络形态取（devnet 的本地 stub note 只有 soft，见模块注释）。
+        minProof: minProofForNetwork(net.kind),
+      });
+      if (!res.ok) return { error: { code: res.code, reason: res.reason } };
+      // wallet-core 预览：摘要与签名同源（展示-签名一致性红线的第二处落点）。
+      // 本地选币只是"打算怎么做"，core 的 preview/digest 才是"将要签什么"；
+      // core 拒绝（余额/守恒/note 不存在）一律并入 cannotSubmitReasons。
+      const preview = res.preview;
+      try {
+        const cp = await corePreview(toCoreRequest(preview.operation));
+        const digest = String(cp?.preview?.digest ?? '');
+        preview.digest = digest;
+        preview.corePreview = cp?.preview ?? null;
+        if (!/^[0-9a-f]{64}$/i.test(digest)) {
+          preview.canSubmit = false;
+          preview.cannotSubmitReasons.push('wallet-core 预览未返回摘要');
+        }
+      } catch (e) {
+        preview.canSubmit = false;
+        preview.cannotSubmitReasons.push(`wallet-core 预览拒绝：${e.code ?? 'WalletCoreError'} ${e.detail ?? ''}`.trim());
+      }
+      logSafe('transfer_previewed');
+      return { preview };
+    }
+    case 'popup:transferConfirm': {
+      if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
+      const account = await getActiveAccount();
+      const net = currentNetwork(account);
+      const op = m.operation;
+      // (1) 结构/网络/ABI/资产类校验：与页面请求同一函数（不开第二套校验面）。
+      const v = validateRequest('zchain_signOperation', { operation: op, previewHash: m.digest ?? '' }, { network: net });
+      if (!v.ok) return { error: { code: v.code, reason: v.reason } };
+      // (1b) 凭证门槛在**后台**复核：UI 那份 canSubmit 只是展示结论，签名前
+      // 按当前库状态重算（绕过 UI 直发 RPC / 预览后状态变化都拒）。
+      const gate = verifySpendProofs({
+        playNotes: sanitizeNotesForPage((await callCore('wallet_get_all_notes')).play),
+        inputs: op?.inputs ?? [],
+        minProof: minProofForNetwork(net.kind),
+      });
+      if (!gate.ok) return { error: { code: gate.code, reason: gate.reason } };
+      // (2) 展示-签名一致性：重算预览摘要，与 UI 展示那份比对（不一致拒签）。
+      const previewRes = await corePreview(toCoreRequest(op));
+      const claimed = String(m.digest ?? '').trim().toLowerCase();
+      if (claimed === '' || claimed !== String(previewRes.preview?.digest ?? '').toLowerCase()) {
+        logSafe('transfer_preview_mismatch');
+        return { error: { code: 'PreviewMismatch', reason: '展示摘要与待签内容不一致，请重新生成预览' } };
+      }
+      // (3) 签名（wallet-core 全拒绝面：nonce/expiry/note 存在性与守恒）。
+      const signed = await callCore('wallet_sign', toCoreRequest(op), String(Math.floor(Date.now() / 1000)));
+      try {
+        await persistActiveKeystore();
+      } catch (e) {
+        logSafe('persist_failed', { code: e.code ?? 'Unknown' });
+      }
+      // (4) 回执登记（signed 状态位；链上提交通道未开放——仅展示协议状态）。
+      await recordReceipt(signed.digest, 'transfer', net.chainId);
+      mem.transferNonce = Math.max(mem.transferNonce ?? 0, Number(op.nonce) ?? 0);
+      logSafe('transfer_signed');
+      return { digest: signed.digest, preview: signed.preview };
     }
     case 'popup:capabilityMatrix': {
       // 0.4 能力矩阵（外部钱包探测 + adapters capability∩白名单逻辑复用）。

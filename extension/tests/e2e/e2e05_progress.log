@@ -1,37 +1,46 @@
-[2026-09-15T19:25:37.986Z] devchain: http://127.0.0.1:50337 (contract 0xc0DE000000000000000000000000000000000000)
-[2026-09-15T19:25:40.475Z] PASS: E0 popup 页加载 + 模式切换按钮存在
-[2026-09-15T19:25:41.082Z] PASS: E1 切换到 EVM 钱包 → 创建视图
-[2026-09-15T19:25:41.299Z] PASS: E2 创建钱包（口令 → 加密 keystore）→ EIP-55 地址展示 — 0x1514093519A92bC94e7F0B264F2AEa9A091aF061
-[2026-09-15T19:25:41.300Z] PASS: E2b SW 状态：hasWallet + unlocked + 账户列表 — {"hasWallet":true,"unlocked":true,"n":1}
-[2026-09-15T19:25:41.506Z] PASS: E3 保存 RPC 覆盖 → 生效 URL = devchain — http://127.0.0.1:50337
-[2026-09-15T19:25:41.809Z] PASS: F1 余额查询：水龙头 100 ETH → 余额展示 — 100 ETH
-[2026-09-15T19:25:41.810Z] PASS: F2 链状态行：chainId/nonce/gas 展示 — chainId 0x7a69 · nonce 0 · gas 1 gwei
-[2026-09-15T19:25:41.812Z] PASS: F3 SW 余额面：balanceWei=100e18 + nonce=0 + gasPrice — {"chainIdHex":"0x7a69","chainIdMismatch":false,"balanceWei":"100000000000000000000","balanceHuman":"100","nonce":"0","gasPriceWei":"10000000
-[2026-09-15T19:25:42.090Z] PASS: C1 合约只读（ERC-20 预设 symbol）→ DVT — symbol() → | string | DVT
-[2026-09-15T19:25:42.362Z] PASS: C2 合约写预览卡：faucet() + 最大手续费 + chainId — 交易预览（合约调用） | from | 0x1514093519A92bC94e7F0B264F2AEa9A091aF061 | to | 0xc0DE000000000000000000000000000000000000 | 方法 | faucet() | value | 0 ETH（0 wei） | data |
-[2026-09-15T19:25:42.618Z] PASS: C3 确认 → 签名广播（真实 raw 交易上链） — 0x24eda44a3362fc34e971043bcd6495c697de5f1b66028d97e422c55a1bad5401
-[2026-09-15T19:25:42.618Z] PASS: C4 开发链核对：sender 恢复 = 钱包地址 + status 0x1 — {"from":"0x1514093519A92bC94e7F0B264F2AEa9A091aF061","status":"0x1"}
-[2026-09-15T19:25:42.872Z] PASS: C5 合约只读 balanceOf → 1000（人类可读换算） — balanceOf(address) → | uint256 | 1000（raw 1000000000000000000000）
-[2026-09-15T19:25:43.379Z] PASS: C6 合约写 transfer(OTHER,250) 广播 — 0x253292110f08db758f92cc73550016b1865061f239218164e8da5aa26c6898f2
-[2026-09-15T19:25:43.634Z] PASS: C7 链上效果核对：balanceOf(OTHER) → 250 — balanceOf(address) → | uint256 | 250（raw 250000000000000000000）
-[2026-09-15T19:25:44.141Z] PASS: T1 原生转账 1.5 ETH → 广播 — 0xb904f8fb5ae5848f936b70a0b691111ede36b0d9f00c353fff2b2c2633624567
-[2026-09-15T19:25:44.649Z] PASS: T2 取消预览 → 不广播 — txs=3
-[2026-09-15T19:25:44.901Z] PASS: T3 余额不足 → InsufficientFunds（预览前拒绝）
-[2026-09-15T19:25:45.410Z] PASS: T4 转账后余额刷新（≈98.5 − gas） — 98.499935848 ETH
-[2026-09-15T19:25:45.868Z] PASS: H1 交易记录列表：≥3 条本地记录 + 已确认状态 — boxes=3
-[2026-09-15T19:25:46.121Z] PASS: H2 explorer txlist 合并（Etherscan 兼容端点） — merged
-[2026-09-15T19:25:46.122Z] PASS: H3 记录明细：hash + 方向 + 金额 + 区块 — 已确认 · 转账 · 本地 | hash | 0xb904f8fb5ae5848f936b…33624567 | 方向 | 0x151409…1aF061 → 0xbeeF00…000000 | 金额 | 1.5 ETH | 区块 | 3 | gas used | 21000 | 时间 | 2026/9/16 03:2
-[2026-09-15T19:25:46.378Z] PASS: M1 导出私钥：错口令 fail-closed（BadPassword）
-[2026-09-15T19:25:46.633Z] PASS: M2 导出私钥：口令确认 → 64 hex 私钥展示 — 0x00dda75bb2…
-[2026-09-15T19:25:47.091Z] PASS: M3 锁定 → 错口令解锁拒绝（fail-closed）
-[2026-09-15T19:25:47.297Z] PASS: M4 正确口令解锁恢复
-[2026-09-15T19:25:47.502Z] PASS: M5 锁定时 prepareTx → SessionInvalid（SW 守卫） — {"error":{"code":"SessionInvalid","reason":"先解锁"}}
-[2026-09-15T19:25:47.959Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0xREDACTED-test-key"}
-[2026-09-15T19:25:48.166Z] PASS: M6b 删除当前账户 → 回到创建视图
-[2026-09-15T19:25:48.371Z] PASS: M6 私钥再导入 → 同一 EIP-55 地址 — 0x1514093519A9… vs 0x1514093519A9…
-[2026-09-15T19:25:48.830Z] PASS: M7 非法私钥导入拒绝（InvalidArgument）
-[2026-09-15T19:25:49.316Z] PASS: M8 修改口令（keystore 重加密）
-[2026-09-15T19:25:49.978Z] PASS: M9 旧口令失效 + 新口令解锁成功
-[2026-09-15T19:25:49.980Z] PASS: N1 未知网络拒绝（NetworkUnsupported） — {"error":{"code":"NetworkUnsupported","reason":"0xdead"}}
-[2026-09-15T19:25:49.981Z] PASS: N2 非法 RPC URL 拒绝（InvalidArgument） — {"error":{"code":"InvalidArgument","reason":"RPC URL 必须是 http(s)"}}
-[2026-09-15T19:25:49.983Z] PASS: N3 RPC 不可达 → RpcUnreachable（如实报错） — {"error":{"code":"RpcUnreachable","reason":"RPC 不可达：http://127.0.0.1:1 [TypeError: Failed to fetch]"
+[2026-09-19T07:45:06.845Z] devchain: http://127.0.0.1:50309 (contract 0xc0DE000000000000000000000000000000000000)
+[2026-09-19T07:45:09.692Z] PASS: E0 popup 页加载 + 欢迎页（一键创建入口）
+[2026-09-19T07:45:10.001Z] PASS: E1 自定义口令一键创建三层 → 成功页
+[2026-09-19T07:45:10.004Z] PASS: E1b 口令确认门：勾选后「开始使用」解禁（未勾选时禁用）
+[2026-09-19T07:45:10.306Z] PASS: E1c 「开始使用」→ 三链总账首页
+[2026-09-19T07:45:10.610Z] PASS: E2 EVM 账簿面板 → EIP-55 地址展示 — 0xe4461b9d7B85c2f25b94F8871F49936C2cbcc8BB
+[2026-09-19T07:45:10.611Z] PASS: E2b SW 状态：hasWallet + unlocked + 账户列表 — {"hasWallet":true,"unlocked":true,"n":1}
+[2026-09-19T07:45:10.915Z] PASS: E3a 账户管理屏：RPC / Explorer / 危险区入口
+[2026-09-19T07:45:11.221Z] PASS: E3b 保存 RPC 覆盖 → 生效 URL = devchain — http://127.0.0.1:50309
+[2026-09-19T07:45:11.829Z] PASS: F1 余额查询：水龙头 100 ETH → 余额展示 — 100 ETH
+[2026-09-19T07:45:11.829Z] PASS: F2 链状态卡：chainId/nonce/gas 展示 — chainId0x7a69 · 校验通过gas1 gweinonce0RPChttp://127.0.0.1:50309
+[2026-09-19T07:45:11.832Z] PASS: F3 SW 余额面：balanceWei=100e18 + nonce=0 + gasPrice — {"chainIdHex":"0x7a69","chainIdMismatch":false,"balanceWei":"100000000000000000000","balanceHuman":"100","nonce":"0","gasPriceWei":"10000000
+[2026-09-19T07:45:12.137Z] PASS: C0 合约屏进入（eth_call / 发起交易双入口）
+[2026-09-19T07:45:12.393Z] PASS: C1 合约只读（ERC-20 预设 symbol）→ DVT — SYMBOL() | string | DVT
+[2026-09-19T07:45:12.650Z] PASS: C2 合约写预览卡：faucet() + 最大手续费 + chainId — 合约调用 | -0 | ETH · EIP-155 签名后广播 | 交易预览 | from | 0xe4461b9d…2cbcc8BB | to | 0xc0DE0000…00000000 | 方法 | faucet() | value | 0 ETH（0 wei） | gas limit | 21,064 | gas
+[2026-09-19T07:45:12.905Z] PASS: C3 确认 → 签名广播（真实 raw 交易上链） — 0x86757a46fa57c2cfd04c9b6b6545ce92af9de6d1c17bf3189015d394c24d992d
+[2026-09-19T07:45:12.906Z] PASS: C4 开发链核对：sender 恢复 = 钱包地址 + status 0x1 — {"from":"0xe4461b9d7B85c2f25b94F8871F49936C2cbcc8BB","status":"0x1"}
+[2026-09-19T07:45:13.161Z] PASS: C5 合约只读 balanceOf → 1000（人类可读换算） — BALANCEOF(ADDRESS) | uint256 | 1000（raw 1000000000000000000000）
+[2026-09-19T07:45:13.669Z] PASS: C6 合约写 transfer(OTHER,250) 广播 — 0x41dd9799edade66befb89a359864c5270f0f8c16c05da6385ea9b28ec14a353c
+[2026-09-19T07:45:13.925Z] PASS: C7 链上效果核对：balanceOf(OTHER) → 250 — BALANCEOF(ADDRESS) | uint256 | 250（raw 250000000000000000000）
+[2026-09-19T07:45:14.532Z] PASS: T0 发送屏进入（金额 + 收款地址 + 预览）
+[2026-09-19T07:45:15.041Z] PASS: T1 原生转账 1.5 ETH → 广播 — 0x83c300514a22324eb49f9ae630034bc22e1ee2f749256645f75a125a20e72edd
+[2026-09-19T07:45:15.547Z] PASS: T2 取消预览 → 不广播 — txs=3
+[2026-09-19T07:45:15.803Z] PASS: T3 余额不足 → InsufficientFunds（预览前拒绝）
+[2026-09-19T07:45:16.616Z] PASS: T4 转账后余额刷新（≈98.5 − gas） — 98.499935848 ETH
+[2026-09-19T07:45:17.529Z] PASS: H0 记录屏进入（合并开关 + 分桶 + 对账入口）
+[2026-09-19T07:45:17.782Z] PASS: H1 交易记录列表：≥3 条本地记录 + 成功状态 — rows=3 onHistory=true
+[2026-09-19T07:45:17.785Z] PASS: H2 explorer txlist 合并（Etherscan 兼容端点） — merged
+[2026-09-19T07:45:17.786Z] PASS: H3 记录明细：hash + 方向金额 + 来源 + 状态 — 发送 · 1.5 | 0x83c30051…20e72edd · 刚刚 · 本地 | -1.5 | 成功
+[2026-09-19T07:45:17.787Z] PASS: H4 记录分桶切换（转账 / 合约）
+[2026-09-19T07:45:18.393Z] PASS: M0 账户管理屏：安全 / 网络 / 危险区三段
+[2026-09-19T07:45:18.650Z] PASS: M1 导出私钥：错口令 fail-closed（BadPassword）
+[2026-09-19T07:45:18.905Z] PASS: M2 导出私钥：口令确认 → 64 hex 私钥展示 — 0x49596e3ccb…
+[2026-09-19T07:45:19.366Z] PASS: M3 锁定 → 错口令解锁拒绝（fail-closed）
+[2026-09-19T07:45:19.571Z] PASS: M4 正确口令解锁恢复
+[2026-09-19T07:45:20.082Z] PASS: M5 锁定时 prepareTx → SessionInvalid（SW 守卫） — {"error":{"code":"SessionInvalid","reason":"先解锁"}}
+[2026-09-19T07:45:20.845Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0x49596e3ccb…"}
+[2026-09-19T07:45:21.052Z] PASS: M6b 删除当前账户（二次确认）→ 回到创建/导入入口
+[2026-09-19T07:45:21.258Z] PASS: M6 私钥再导入 → 同一 EIP-55 地址 — 0xe4461b9d7B85… vs 0xe4461b9d7B85…
+[2026-09-19T07:45:21.974Z] PASS: M6c 「创建本层」入口可用（删除后重新生成新账户）
+[2026-09-19T07:45:22.737Z] PASS: M7 非法私钥导入拒绝（InvalidArgument）
+[2026-09-19T07:45:23.500Z] PASS: M8 修改口令（keystore 重加密）
+[2026-09-19T07:45:24.160Z] PASS: M9 旧口令失效 + 新口令解锁成功
+[2026-09-19T07:45:24.161Z] PASS: N1 未知网络拒绝（NetworkUnsupported） — {"error":{"code":"NetworkUnsupported","reason":"0xdead"}}
+[2026-09-19T07:45:24.162Z] PASS: N2 非法 RPC URL 拒绝（InvalidArgument） — {"error":{"code":"InvalidArgument","reason":"RPC URL 必须是 http(s)"}}
+[2026-09-19T07:45:24.165Z] PASS: N3 RPC 不可达 → RpcUnreachable（如实报错） — {"error":{"code":"RpcUnreachable","reason":"RPC 不可达：http://127.0.0.1:1 [TypeError: Failed to fetch]"

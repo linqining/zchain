@@ -1,40 +1,40 @@
-[2026-09-15T19:25:22.708Z] step: open popup page target
-[2026-09-15T19:25:22.783Z] PASS: A0 SW 预热（bridge:getSession 应答）
-[2026-09-15T19:25:22.784Z] step A1: create account 1
-[2026-09-15T19:25:22.835Z] PASS: A1 创建账户1 — {"accountId":"41923164-4a6f-433a-bf98-62ed34057132","publicKey":"02b405c457cd0cfe15be727694229382f44c7b94530ca18ba68ecb3
-[2026-09-15T19:25:22.843Z] PASS: A2 devnet 水龙头 500 PLAY — {"commitment":"00d221bff8786d6bb55f0744a072e24e2b79ffaf98792b2b3d7944fdbf47b0a8","faucet":"local-devnet-stub","play_free
-[2026-09-15T19:25:22.844Z] PASS: A3 REAL/PLAY 分库视图（PLAY 有 note / REAL 空 / 余额分栏） — {"notes":[{"commitment":"00d221bff8786d6bb55f0744a072e24e2b79ffaf98792b2b3d7944fdbf47b0a8","amount":"500","tableId":null,"proof":"soft","spendable":true}],"real
-[2026-09-15T19:25:22.844Z] PASS: A4 分库视图脱敏（无 spend_secret/nullifier）
-[2026-09-15T19:25:22.846Z] PASS: A5 REAL 展示门：claim 隐藏 + 托管风险提示（不暗示可提现） — {"play":{"faucet_available":true,"play_balance":500},"real":{"balance":0,"claim_disabled_reason":"vault_offline","custody_risk_notice":"real_is_custodial_v1_off
-[2026-09-15T19:25:22.909Z] PASS: A6 备份导出（ZCBK，自包含备份口令） — {"backupHex":"5a43424b010079ac653e30df70e2f3f056411e8c41b0004c000002000000010000003f024ae702c70c417e
-[2026-09-15T19:25:22.931Z] PASS: A7 错误口令导入 → BadPassword（fail-closed） — {"error":{"code":"BadPassword","reason":"keystore authentication failed (wrong passphrase or corrupted envelope)"}}
-[2026-09-15T19:25:22.952Z] PASS: A8 篡改文件导入 → 拒绝（fail-closed） — {"error":{"code":"BadPassword","reason":"keystore authentication failed (wrong passphrase or corrupted envelope)"}}
-[2026-09-15T19:25:23.013Z] PASS: A9 正确口令导入 → 新增锁定账户（公钥一致） — {"accountId":"bd2642e2-6135-453d-8a51-de606744a9a2","publicKey":"02b405c457cd0cfe15be727694229382f44c7b94530ca18ba68ecb37971220069e","create
-[2026-09-15T19:25:23.052Z] PASS: A10 创建账户2（会话切到账户2）
-[2026-09-15T19:25:23.054Z] PASS: A11 账本含 3 账户（1 原始 + 1 恢复 + 1 新建） — count=3
-[2026-09-15T19:25:23.060Z] PASS: A12 切换回账户1：会话锁定（fail-closed），账户1 数据完好
-[2026-09-15T19:25:23.101Z] PASS: A13 账户1 重新解锁：note 库完整（隔离） — {"notes":[{"commitment":"00d221bff8786d6bb55f0744a072e24e2b79ffaf98792b2b3d7944fdbf47b0a8","amount":"500","tableId":null,"proof":"soft","spe
-[2026-09-15T19:25:23.121Z] PASS: A14 错误账户口令 → BadPassword（fail-closed）
-[2026-09-15T19:25:23.162Z] PASS: B1 popup 换网 testnet（账户元数据持久化）
-[2026-09-15T19:25:23.162Z] PASS: B2 testnet 网关未配置如实 null（不回落 devnet） — gatewayUrl=null
-[2026-09-15T19:25:23.163Z] PASS: B3 mainnet 红线 → NetworkUnsupported — {"error":{"code":"NetworkUnsupported","reason":"zchain-mainnet-1"}}
-[2026-09-15T19:25:23.164Z] step C: demo page flows
-[2026-09-15T19:25:24.241Z] PASS: C1 页面连接（origin 授权 → 当前账户） — {"accounts":["02b405c457cd0cfe15be727694229382f44c7b94530ca18ba68ecb37971220069e"],"chainId":"zchain-devnet-1","granted":true}
-[2026-09-15T19:25:24.448Z] PASS: C2 结构化签名预览请求打开（含 REAL/PLAY 徽章字段） — {"abi_version":1,"amount_in":"500","amount_out":"500","asset_class":"PLAY","chain_id":"zchain-devnet
-[2026-09-15T19:25:24.452Z] PASS: C3 真实签名成功（wallet-core digest） — {"digest":"68bff9fcbddb927ace42eb070370cb39fbee49a96dc8a719cb012641c6bd88b2","kind":"transfer"}
-[2026-09-15T19:25:24.454Z] PASS: C4 签名回执登记：signed 状态位 + deadline=10000ms（协议默认） — {"status":"signed","pastDeadline":false,"deadlineMs":10000,"evidence":{"included":"local_manual_entry","seen":"not_provided"},"hint":"等待链上见证
-[2026-09-15T19:25:24.454Z] PASS: C5 超期判定与提示文案（仅展示，不实现提交路径）
-[2026-09-15T19:25:24.454Z] PASS: C6 SeenReceipt 形状校验拒绝
-[2026-09-15T19:25:24.455Z] PASS: C7 合法形状 SeenReceipt → seen（evidence 如实标注未验签）
-[2026-09-15T19:25:24.456Z] PASS: C8 included 人工登记（evidence=local_manual_entry）
-[2026-09-15T19:25:24.660Z] PASS: C9 页面换网请求打开确认卡（devnet → testnet，from/to 展示） — {"fromChainId":"zchain-devnet-1","fromKind":"devnet","toChainId":"zchain-testnet-1","toKind":"testnet"}
-[2026-09-15T19:25:24.665Z] PASS: C10 换网批准生效（changed=true；getNetwork=testnet） — {"swRes":{"chainId":"zchain-testnet-1","kind":"testnet","label":"Testnet","abiVersion":1,"defaultGatewayUrl":null,"explorerBase":null,"previousChainId":"zchain-
-[2026-09-15T19:25:24.875Z] PASS: E1 坏 previewHash → PreviewMismatch（不回退） — ERR:PreviewMismatch
-[2026-09-15T19:25:25.064Z] PASS: E2 锁定后签名 → SessionInvalid（不回退） — ERR:SessionInvalid
-[2026-09-15T19:25:25.072Z] step D: portal flows
-[2026-09-15T19:25:26.190Z] PASS: D0 扩展 portal 页加载（输入/按钮/网关行渲染）
-[2026-09-15T19:25:26.239Z] PASS: D1 portal 正例：结算关系复验 verified（payout_root 复算一致） — {"steps":{"binding":"ok","settlement":{"hand_binding":"0000000000000001000000000000000000000000000000000000000000000000","pot":2000,"payout_root":"f3ae5464a5791e98c43d6b2517cbbc2ec556689c25be3c8885081d49fdddfad5","level":"proven","rake_tota
-[2026-09-15T19:25:26.240Z] PASS: D2 展示 verifier 名称/版本/耗时 — {"verifier":{"abi_version":1,"name":"wallet-core/verifier","version":"0.1.0"},"elapsedMs":9}
-[2026-09-15T19:25:26.240Z] PASS: D3 proof 归档元数据展示（engine + 字节数；不宣称 STARK 已验证） — {"engine":"host-validate-v2","engineSource":"body","payloadLen":64}
-[2026-09-15T19:25:26.241Z] PASS: D4 未知 binding → SettlementNotFound（不伪造结果） — {"code":"SettlementNotFound"}
-[2026-09-15T19:25:26.243Z] PASS: D5 网关不可达 → GatewayUnreachable（明确报错） — 网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。
+[2026-09-19T07:39:08.564Z] step: open popup page target
+[2026-09-19T07:39:08.674Z] PASS: A0 SW 预热（bridge:getSession 应答）
+[2026-09-19T07:39:08.675Z] step A1: create account 1
+[2026-09-19T07:39:08.732Z] PASS: A1 创建账户1 — {"accountId":"85695fd0-1f17-438d-8057-e10d2dea1ca6","publicKey":"03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b
+[2026-09-19T07:39:08.737Z] PASS: A2 devnet 水龙头 500 PLAY — {"commitment":"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02","faucet":"local-devnet-stub","play_free
+[2026-09-19T07:39:08.739Z] PASS: A3 REAL/PLAY 分库视图（PLAY 有 note / REAL 空 / 余额分栏） — {"notes":[{"commitment":"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02","amount":"500","tableId":null,"proof":"soft","spendable":true}],"real
+[2026-09-19T07:39:08.739Z] PASS: A4 分库视图脱敏（无 spend_secret/nullifier）
+[2026-09-19T07:39:08.740Z] PASS: A5 REAL 展示门：claim 隐藏 + 托管风险提示（不暗示可提现） — {"play":{"faucet_available":true,"play_balance":500},"real":{"balance":0,"claim_disabled_reason":"vault_offline","custody_risk_notice":"real_is_custodial_v1_off
+[2026-09-19T07:39:08.795Z] PASS: A6 备份导出（ZCBK，自包含备份口令） — {"backupHex":"5a43424b0100e9fd6428568c53b23cfd960be45c71ae004c0000020000000100000001e18a1521a66f16f0
+[2026-09-19T07:39:08.816Z] PASS: A7 错误口令导入 → BadPassword（fail-closed） — {"error":{"code":"BadPassword","reason":"keystore authentication failed (wrong passphrase or corrupted envelope)"}}
+[2026-09-19T07:39:08.839Z] PASS: A8 篡改文件导入 → 拒绝（fail-closed） — {"error":{"code":"BadPassword","reason":"keystore authentication failed (wrong passphrase or corrupted envelope)"}}
+[2026-09-19T07:39:08.899Z] PASS: A9 正确口令导入 → 新增锁定账户（公钥一致） — {"accountId":"c7fdaeca-6e65-45ea-9788-27691d7a736e","publicKey":"03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b88a0bc6fb1a","create
+[2026-09-19T07:39:08.939Z] PASS: A10 创建账户2（会话切到账户2）
+[2026-09-19T07:39:08.941Z] PASS: A11 账本含 3 账户（1 原始 + 1 恢复 + 1 新建） — count=3
+[2026-09-19T07:39:08.945Z] PASS: A12 切换回账户1：会话锁定（fail-closed），账户1 数据完好
+[2026-09-19T07:39:08.984Z] PASS: A13 账户1 重新解锁：note 库完整（隔离） — {"notes":[{"commitment":"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02","amount":"500","tableId":null,"proof":"soft","spe
+[2026-09-19T07:39:09.003Z] PASS: A14 错误账户口令 → BadPassword（fail-closed）
+[2026-09-19T07:39:09.042Z] PASS: B1 popup 换网 testnet（账户元数据持久化）
+[2026-09-19T07:39:09.042Z] PASS: B2 testnet 网关未配置如实 null（不回落 devnet） — gatewayUrl=null
+[2026-09-19T07:39:09.043Z] PASS: B3 mainnet 红线 → NetworkUnsupported — {"error":{"code":"NetworkUnsupported","reason":"zchain-mainnet-1"}}
+[2026-09-19T07:39:09.044Z] step C: demo page flows
+[2026-09-19T07:39:10.101Z] PASS: C1 页面连接（origin 授权 → 当前账户） — {"accounts":["03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b88a0bc6fb1a"],"chainId":"zchain-devnet-1","granted":true}
+[2026-09-19T07:39:10.307Z] PASS: C2 结构化签名预览请求打开（含 REAL/PLAY 徽章字段） — {"abi_version":1,"amount_in":"500","amount_out":"500","asset_class":"PLAY","chain_id":"zchain-devnet
+[2026-09-19T07:39:10.311Z] PASS: C3 真实签名成功（wallet-core digest） — {"digest":"0c8d0e910a43ed167e577b014313ab9cb5c6dca6d9951a19a3df4a34b625f4c9","kind":"transfer"}
+[2026-09-19T07:39:10.313Z] PASS: C4 签名回执登记：signed 状态位 + deadline=10000ms（协议默认） — {"status":"signed","pastDeadline":false,"deadlineMs":10000,"evidence":{"included":"local_manual_entry","seen":"not_provided"},"hint":"等待链上见证
+[2026-09-19T07:39:10.313Z] PASS: C5 超期判定与提示文案（仅展示，不实现提交路径）
+[2026-09-19T07:39:10.314Z] PASS: C6 SeenReceipt 形状校验拒绝
+[2026-09-19T07:39:10.315Z] PASS: C7 合法形状 SeenReceipt → seen（evidence 如实标注未验签）
+[2026-09-19T07:39:10.316Z] PASS: C8 included 人工登记（evidence=local_manual_entry）
+[2026-09-19T07:39:10.518Z] PASS: C9 页面换网请求打开确认卡（devnet → testnet，from/to 展示） — {"fromChainId":"zchain-devnet-1","fromKind":"devnet","toChainId":"zchain-testnet-1","toKind":"testnet"}
+[2026-09-19T07:39:10.522Z] PASS: C10 换网批准生效（changed=true；getNetwork=testnet） — {"swRes":{"chainId":"zchain-testnet-1","kind":"testnet","label":"Testnet","abiVersion":1,"defaultGatewayUrl":null,"explorerBase":null,"previousChainId":"zchain-
+[2026-09-19T07:39:10.735Z] PASS: E1 坏 previewHash → PreviewMismatch（不回退） — ERR:PreviewMismatch
+[2026-09-19T07:39:10.740Z] PASS: E2 锁定后签名 → SessionInvalid（不回退） — ERR:SessionInvalid
+[2026-09-19T07:39:10.740Z] step D: portal flows
+[2026-09-19T07:39:11.836Z] PASS: D0 扩展 portal 页加载（输入/按钮/网关行渲染）
+[2026-09-19T07:39:11.872Z] PASS: D1 portal 正例：结算关系复验 verified（payout_root 复算一致） — {"steps":{"binding":"ok","settlement":{"hand_binding":"0000000000000001000000000000000000000000000000000000000000000000","pot":2000,"payout_root":"f3ae5464a5791e98c43d6b2517cbbc2ec556689c25be3c8885081d49fdddfad5","level":"proven","rake_tota
+[2026-09-19T07:39:11.872Z] PASS: D2 展示 verifier 名称/版本/耗时 — {"verifier":{"abi_version":1,"name":"wallet-core/verifier","version":"0.1.0"},"elapsedMs":24}
+[2026-09-19T07:39:11.872Z] PASS: D3 proof 归档元数据展示（engine + 字节数；不宣称 STARK 已验证） — {"engine":"host-validate-v2","engineSource":"body","payloadLen":64}
+[2026-09-19T07:39:11.875Z] PASS: D4 未知 binding → SettlementNotFound（不伪造结果） — {"code":"SettlementNotFound"}
+[2026-09-19T07:39:11.880Z] PASS: D5 网关不可达 → GatewayUnreachable（明确报错） — 网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。

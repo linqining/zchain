@@ -1,33 +1,39 @@
-[2026-09-15T19:25:51.284Z] starkdevchain: http://127.0.0.1:50418 (token 0xc0de0000000000000000000000000000000070b19e6b9)
-[2026-09-15T19:25:53.816Z] PASS: S0 popup 页加载 + Starknet 模式按钮存在
-[2026-09-15T19:25:54.437Z] PASS: S1 切换到 Starknet 钱包 → 创建视图
-[2026-09-15T19:25:54.644Z] PASS: S2 创建钱包 → 地址（ADDR_BOUND 内 + Starknet 校验和）+ 公钥展示 — 0x05048c86431a6CE34390bD7033f2DFF09aF3d7e6B3492687bC97838637B835eE / 0x14e83e802c82…
-[2026-09-15T19:25:54.645Z] PASS: S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet — {"hasWallet":true,"unlocked":true,"net":"starknet-devnet"}
-[2026-09-15T19:25:54.849Z] PASS: S3 保存 RPC 覆盖 → 生效 URL = starkdevchain — http://127.0.0.1:50418
-[2026-09-15T19:25:55.152Z] PASS: F1 余额查询：注册 pubkey + 水龙头 100 DST → 余额展示 — 100 DST
-[2026-09-15T19:25:55.153Z] PASS: F2 链状态行：chainId=ZCDN + nonce 展示 — chainId ZCDN · nonce 0
-[2026-09-15T19:25:55.155Z] PASS: F3 SW 余额面：balanceWei=100e18 + nonce=0 + chainId 无误 — {"chainId":"ZCDN","chainIdMismatch":false,"nonce":"0","balanceWei":"100000000000000000000","balanceHuman":"100","tokenSymbol":"DST","rpcUrl"
-[2026-09-15T19:25:55.409Z] PASS: C1 合约只读 symbol → DST（starknet_call） — selector 0x216b05c387bab9ac… → | 返回 | DST
-[2026-09-15T19:25:55.664Z] PASS: C2 合约只读 balance_of → 100e18（felt 原值） — selector 0x35a73cd311a05d46… → | 返回 | 0x56bc75e2d63100000（100000000000000000000） | 返回
-[2026-09-15T19:25:55.918Z] PASS: C3 invoke v1 预览卡：selector + calldata + max fee + chainId — invoke v1 交易预览 | from | 0x05048c86431a6CE34390bD7033f2DFF09aF3d7e6B3492687bC97838637B835eE | to | 0xc0de0000000000000000000000000000000070b19e6b9 | 方法 | transfer(recipient, amount_u256) | selector | 0
-[2026-09-15T19:26:11.335Z] PASS: C4 确认 → STARK curve 签名广播（[r, s] invoke v1） — 0x4af35ddddfe2de21750d0e4868944186f941fcfea403891a13ae20c988df778
-[2026-09-15T19:26:11.335Z] PASS: C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址 — {"from":"0x5048c86431a6ce34390bd7033f2dff09af3d7e6b3492687bc97838637b835ee","st":"SUCCEEDED"}
-[2026-09-15T19:26:11.590Z] PASS: C6 链上效果核对：balance_of(OTHER) → 25e18（u256） — selector 0x35a73cd311a05d46… → | 返回 | 0x15af1d78b58c40000（25000000000000000000） | 返回
-[2026-09-15T19:26:12.094Z] PASS: T1 取消预览 → 不广播 — txs=1
-[2026-09-15T19:26:12.352Z] PASS: T2 余额不足 → 预览前拒绝
-[2026-09-15T19:26:12.811Z] PASS: H1 交易记录列表：本地记录 + 已确认状态 — boxes=1
-[2026-09-15T19:26:13.065Z] PASS: H2 explorer txlist 合并 — merged
-[2026-09-15T19:26:13.320Z] PASS: M1 导出私钥：错口令 fail-closed（BadPassword）
-[2026-09-15T19:26:13.574Z] PASS: M2 导出私钥：口令确认 → felt 私钥展示 — 0x1f1c059996…
-[2026-09-15T19:26:14.030Z] PASS: M3 锁定 → 错口令解锁拒绝（fail-closed）
-[2026-09-15T19:26:14.234Z] PASS: M4 正确口令解锁恢复
-[2026-09-15T19:26:14.439Z] PASS: M5 锁定时 prepareTx → SessionInvalid（SW 守卫） — {"error":{"code":"SessionInvalid","reason":"先解锁"}}
-[2026-09-15T19:26:14.899Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0x1f1c0599960bef1a6e1ef49b97471284"}
-[2026-09-15T19:26:15.103Z] PASS: M6b 删除当前账户 → 回到创建视图
-[2026-09-15T19:26:15.307Z] PASS: M6 私钥再导入 → 同一地址（新随机盐 → 新地址但同私钥；校验和一致） — 0x052a8904b07d2A54332748DD1F8c231bAC41e0F5De97C3944A9C317eaeeCDD06
-[2026-09-15T19:26:15.766Z] PASS: M7 非法私钥导入拒绝（InvalidArgument）
-[2026-09-15T19:26:16.226Z] PASS: M8 修改口令（keystore 重加密）
-[2026-09-15T19:26:16.887Z] PASS: M9 旧口令失效 + 新口令解锁成功
-[2026-09-15T19:26:16.888Z] PASS: N1 未知网络拒绝（NetworkUnsupported） — {"error":{"code":"NetworkUnsupported","reason":"nope"}}
-[2026-09-15T19:26:16.889Z] PASS: N2 非法 RPC URL 拒绝（InvalidArgument） — {"error":{"code":"InvalidArgument","reason":"RPC URL 必须是 http(s)"}}
-[2026-09-15T19:26:16.891Z] PASS: N3 RPC 不可达 → RpcUnreachable（如实报错） — {"error":{"code":"RpcUnreachable","reason":"RPC 不可达：http://127.0.0.1:1"}}
+[2026-09-19T07:39:43.005Z] starkdevchain: http://127.0.0.1:64033 (token 0xc0de0000000000000000000000000000000070b19e6b9)
+[2026-09-19T07:39:45.905Z] PASS: S0 popup 页加载 + 欢迎页
+[2026-09-19T07:39:46.211Z] PASS: S1a 自定义口令一次创建三层（含 Starknet 层）
+[2026-09-19T07:39:46.822Z] PASS: S2 Starknet 面板 → 地址（ADDR_BOUND 内 + 校验和）+ 公钥展示 — 0x037E375f6e6e965F4780A9D406f60b85c7C58796130BeC83339CA6B67d7668b9 / 0x1c5511b5f3dd…
+[2026-09-19T07:39:46.825Z] PASS: S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet — {"hasWallet":true,"unlocked":true,"net":"starknet-devnet"}
+[2026-09-19T07:39:47.129Z] PASS: S3a 账户管理屏进入（RPC / Explorer / 危险区）
+[2026-09-19T07:39:47.436Z] PASS: S3b 保存 RPC 覆盖 → 生效 URL = starkdevchain — http://127.0.0.1:64033
+[2026-09-19T07:39:47.740Z] PASS: F1 余额查询：注册 pubkey + 水龙头 100 DST → 余额展示 — 100 DST
+[2026-09-19T07:39:47.741Z] PASS: F2 链状态卡：chainId=ZCDN + nonce 展示 — chainIdZCDN · 校验通过nonce0账户地址0x037E375f…7d7668b9公钥0x1c5511b5f3ddc9b907644db2dd1ab1943c3fa59d1319bad555a7c8c27fb84bc
+[2026-09-19T07:39:47.743Z] PASS: F3 SW 余额面：balanceWei=100e18 + nonce=0 + chainId 无误 — {"chainId":"ZCDN","chainIdMismatch":false,"nonce":"0","balanceWei":"100000000000000000000","balanceHuman":"100","tokenSymbol":"DST","rpcUrl"
+[2026-09-19T07:39:48.048Z] PASS: C0 合约屏进入（starknet_call / invoke 双入口）
+[2026-09-19T07:39:48.303Z] PASS: C1 合约只读 symbol → DST（starknet_call） — 0X216B05C387BAB9AC31918A3E61672F4618601F3C598A2F3F2710F37053E1EA4 | 返回 | DST
+[2026-09-19T07:39:48.559Z] PASS: C2 合约只读 balance_of → 100e18（felt 原值） — 0X35A73CD311A05D46DEDA634C5EE045DB92F811B4E74BCA4437FCB5302B7AF33 | 返回 | 0x56bc75e2d63100000（100000000000000000000） | 返回
+[2026-09-19T07:39:49.167Z] PASS: C2b 发送屏进入（invoke v1 预览入口）
+[2026-09-19T07:39:49.425Z] PASS: C3 invoke v1 预览卡：selector + calldata + max fee + chainId — invoke v1-0STARK curve ECDSA 签名后广播交易预览from0x037E375f…7d7668b9to0xc0de0000…0b19e6b9方法transfer(recipient, amount_u256)calldata0xbeef0000000000000000000000000000000000000000000000000000000000, 0x15af1d78
+[2026-09-19T07:39:49.678Z] PASS: C4 确认 → STARK curve 签名广播（[r, s] invoke v1） — 0x175384d275ebe4b56fdd6c96b3787bce4699b1c0a7424399724d560fcd5badd
+[2026-09-19T07:39:49.678Z] PASS: C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址 — {"from":"0x37e375f6e6e965f4780a9d406f60b85c7c58796130bec83339ca6b67d7668b9","st":"SUCCEEDED"}
+[2026-09-19T07:39:50.542Z] PASS: C6 链上效果核对：balance_of(OTHER) → 25e18（u256） — 0X35A73CD311A05D46DEDA634C5EE045DB92F811B4E74BCA4437FCB5302B7AF33 | 返回 | 0x15af1d78b58c40000（25000000000000000000） | 返回
+[2026-09-19T07:39:51.659Z] PASS: T1 取消预览 → 不广播 — txs=1
+[2026-09-19T07:39:51.915Z] PASS: T2 余额不足 → 预览前拒绝
+[2026-09-19T07:39:53.133Z] PASS: H0 记录屏进入
+[2026-09-19T07:39:53.387Z] PASS: H1 交易记录列表：本地记录 + 成功状态 — rows=1
+[2026-09-19T07:39:53.390Z] PASS: H2 explorer txlist 合并 — merged
+[2026-09-19T07:39:53.995Z] PASS: M0 账户管理屏：安全 / 网络 / 危险区三段
+[2026-09-19T07:39:54.253Z] PASS: M1 导出私钥：错口令 fail-closed（BadPassword）
+[2026-09-19T07:39:54.507Z] PASS: M2 导出私钥：口令确认 → felt 私钥展示 — 0x5c808faa8c…
+[2026-09-19T07:39:54.966Z] PASS: M3 锁定 → 错口令解锁拒绝（fail-closed）
+[2026-09-19T07:39:55.171Z] PASS: M4 正确口令解锁恢复
+[2026-09-19T07:39:55.679Z] PASS: M5 锁定时 prepareTx → SessionInvalid（SW 守卫） — {"error":{"code":"SessionInvalid","reason":"先解锁"}}
+[2026-09-19T07:39:56.442Z] PASS: M6a 导出私钥（锁定/解锁循环后仍可用） — {"key":"0x5c808faa8c…"}
+[2026-09-19T07:39:56.649Z] PASS: M6b 删除当前账户（二次确认）→ 回到创建/导入入口
+[2026-09-19T07:39:56.853Z] PASS: M6 私钥再导入 → 同一地址（新随机盐 → 新地址但同私钥；校验和一致） — 0x036Bd87018cfc8188BE09B176Bd59003487384b4b981C558C21E84a9e9d424d6
+[2026-09-19T07:39:57.567Z] PASS: M6c 「创建本层」→ STARK curve 新账户（ADDR_BOUND + 校验和） — 0x00dB1fcd96f74513fA480E67C4B67063923AA36fbB84cc8E499e44dd4Fe41c3b
+[2026-09-19T07:39:58.327Z] PASS: M7 非法私钥导入拒绝（InvalidArgument）
+[2026-09-19T07:39:59.089Z] PASS: M8 修改口令（keystore 重加密）
+[2026-09-19T07:39:59.749Z] PASS: M9 旧口令失效 + 新口令解锁成功
+[2026-09-19T07:39:59.751Z] PASS: N1 未知网络拒绝（NetworkUnsupported） — {"error":{"code":"NetworkUnsupported","reason":"nope"}}
+[2026-09-19T07:39:59.751Z] PASS: N2 非法 RPC URL 拒绝（InvalidArgument） — {"error":{"code":"InvalidArgument","reason":"RPC URL 必须是 http(s)"}}
+[2026-09-19T07:39:59.753Z] PASS: N3 RPC 不可达 → RpcUnreachable（如实报错） — {"error":{"code":"RpcUnreachable","reason":"RPC 不可达：http://127.0.0.1:1"}}
