@@ -267,7 +267,9 @@ cat >"$CLIENT_DIR/.env.development.local" <<EOF
 VITE_SERVER_PORT=$GAME_PORT
 EOF
 log "启动前端（vite :$CLIENT_PORT → 服务器 :${GAME_PORT}）…"
-(cd "$CLIENT_DIR" && GAME_SERVER_URL="http://127.0.0.1:$GAME_PORT" exec ./node_modules/.bin/vite --port "$CLIENT_PORT" --strictPort) \
+# --host 127.0.0.1：默认 host 'localhost' 需要一次 getaddrinfo，构建高负载时
+# 观察到瞬时 ENOTFOUND 直接拖死前端；显式绑回环地址彻底去掉该依赖。
+(cd "$CLIENT_DIR" && GAME_SERVER_URL="http://127.0.0.1:$GAME_PORT" exec ./node_modules/.bin/vite --host 127.0.0.1 --port "$CLIENT_PORT" --strictPort) \
   >"$RUN_DIR/vite.log" 2>&1 &
 VITE_PID=$!
 PIDS+=($!)
@@ -324,7 +326,7 @@ if [[ "$NO_BROWSER" != 1 ]]; then
   rm -f "$RUN_DIR/browser.done" "$RUN_DIR/browser.failed"
   nohup env POKER_AIR_RUN_DIR="$RUN_DIR" TARGET_HANDS="$TARGET_HANDS" \
     TIMEOUT_SECS="$BROWSER_TIMEOUT_SECS" STRATEGY="$STRATEGY" \
-    GAME_API="http://127.0.0.1:$GAME_PORT" POKER_URL="http://localhost:$CLIENT_PORT" \
+    GAME_API="http://127.0.0.1:$GAME_PORT" POKER_URL="http://127.0.0.1:$CLIENT_PORT" \
     EXT_PATH="$ROOT/extension" \
     bash "$ROOT/scripts/poker_air_browser_supervisor.sh" "$RUN_DIR" "$TARGET_HANDS" 10 \
     >"$RUN_DIR/browser-supervisor.log" 2>&1 &

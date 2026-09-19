@@ -112,10 +112,15 @@ export function assetBadge(asset, registeredGameTokens = []) {
  * REAL/NATIVE：v1 REAL 余额**只**出现在 NATIVE 列；USDT/USDC 列
  * `connected:false`（0.4 未接入 v2 入金通道，恒为空——如实占位，不是 0）。
  *
- * @param {{real_free?:number, real_locked?:number, play_free?:number, play_locked?:number}} balances
+ * @param {{real_free?:number|string, real_locked?:number|string, play_free?:number|string, play_locked?:number|string}} balances
  */
 export function groupBalances(balances = {}) {
-  const num = (v) => (Number.isSafeInteger(v) && v >= 0 ? v : 0);
+  // wallet-core 的 u64 余额以十进制字符串出账（publicWalletState 同口径）；
+  // 只认 Number.isSafeInteger 会把 "600" 判 0 → MAX 按钮恒 0、封面余额恒 0。
+  const num = (v) => {
+    const n = Number(v);
+    return Number.isSafeInteger(n) && n >= 0 ? n : 0;
+  };
   return {
     real: {
       domainName: 'REAL',

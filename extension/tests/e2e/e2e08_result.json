@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-19T07:40:18.656Z",
+  "date": "2026-09-19T10:06:44.720Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
   "total": 30,
@@ -69,7 +69,7 @@
     {
       "step": "C3 摘要来自 wallet-core 预览（展示与签名同源）",
       "ok": true,
-      "detail": "17fb503085f0…38031ecd83"
+      "detail": "f2d004f0c967…1cb49eea28"
     },
     {
       "step": "C4 凭证阶梯作为一等组件出现在转账预览（4 级 + 短板文案）",
@@ -119,7 +119,7 @@
     {
       "step": "F1 凭证簿：阶梯组件 + note 级凭证计数（解锁后可见）",
       "ok": true,
-      "detail": "最近 0 次本地复验 · 1 张 note 带凭证 | 阶梯锚定在 note 上：pending → soft → proven → finalized | 已达 finalized | 短板停在 | 阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen →"
+      "detail": "最近 0 次本地复验 · 2 张 note 带凭证 | 阶梯锚定在 note 上：pending → soft → proven → finalized | 已达 finalized | 短板停在 | 阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen →"
     },
     {
       "step": "F2 两套状态机并列说明（投递 vs 凭证，笔触不混用）",

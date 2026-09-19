@@ -294,6 +294,13 @@ async function main() {
     record('C7 回执分桶：全部 1 / 未上链 1（投递状态机）', !!rcBuckets, String(rcBuckets));
 
     // ===== D. 展示-签名一致性在后台复核（绕过 UI 直发 RPC 也拒）=====
+    // 在途支出软锁（pendingSpendMap）：C2 确认的 200 转账已占用其输入 note
+    // （inclusion 前不可再花）——先补水一张，后台双闸验证才有可签的 operation。
+    await msg({ type: 'popup:faucet', amount: '100' });
+    await waitForExpr(`(async () => { try {
+      const r = await chrome.runtime.sendMessage({ type: 'popup:getNotes' });
+      return (r?.notes ?? []).filter((n) => n.spendable !== false).length >= 1 ? 'ok' : null;
+    } catch { return null; } })()`, 25_000);
     const pv = await msg({ type: 'popup:transferPreview', amount: '100', owner: OWNER });
     const badDigest = await msg({ type: 'popup:transferConfirm', operation: pv?.preview?.operation, digest: '00'.repeat(32) });
     record('D1 摘要被换 → PreviewMismatch（不签）', badDigest?.error?.code === 'PreviewMismatch', JSON.stringify(badDigest).slice(0, 120));

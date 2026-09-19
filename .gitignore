@@ -24,3 +24,4 @@ cairo-bridge-poc/logs/
 extension/dist/
 cairo-bridge-poc/logs/*
 .zcode/
+extension/tests/e2e*

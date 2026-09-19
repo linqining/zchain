@@ -109,6 +109,11 @@ export function buildTransferPreview(input = {}) {
     return { ok: false, code: 'OwnerInvalid', reason: '收款 owner 必须是 66 位 hex（33B 压缩公钥，不带 0x）' };
   }
   const owner = String(input.owner).toLowerCase();
+  // 全零 owner = 无效曲线点（收款即烧毁）：fail-closed 拒绝，不给 wallet-core
+  // 留"签出一笔注定不可用资产"的口子。
+  if (/^0+$/.test(owner)) {
+    return { ok: false, code: 'OwnerInvalid', reason: '收款 owner 不能为全零（无效公钥）' };
+  }
   const selfRaw = typeof input.selfOwner === 'string' ? input.selfOwner.trim() : '';
   const selfOk = selfRaw.length > 0 && validateHex(selfRaw, 33, { maxLen: 132 }).ok;
   const selfOwner = selfOk ? selfRaw.toLowerCase() : null;

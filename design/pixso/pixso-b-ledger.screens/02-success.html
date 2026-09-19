@@ -1,6 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-ground="paper"><head><meta charset="UTF-8"><title>创建成功</title>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="UTF-8">
+<title>02 · 创建成功 · 解锁口令</title>
 <style>
+
 /* ============================================================================
    ZChain Wallet —— 方向 B「账簿 / Ledger」v0.2
    ----------------------------------------------------------------------------
@@ -421,10 +425,13 @@ details[open] summary::before{content:"▾ "}
 #shot-mount.doc{width:1240px!important;height:auto!important;padding:26px 28px}
 .mode-shot #shot-mount.doc .ds-sec{margin-bottom:0}
 
-html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--bg,var(--pg))}
-.shell-bar,#proto-wrap{display:none !important}
-.screen,.scr{position:relative !important;display:flex !important;width:380px;height:600px}
-</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+/* ====== 导出画板:单屏静态可见,供 Pixso code_to_design 导入 ====== */
+html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--pg)}
+.shell-bar,#proto-wrap,#gallery,template{display:none !important}
+#shot-mount{box-shadow:none;margin:0 !important}
+</style>
+</head>
+<body class="mode-shot"><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
 <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
@@ -463,22 +470,25 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
 <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-6h4v6"/></symbol>
 <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
-</defs></svg><section class="scr" aria-label="创建成功">
+</defs></svg>
+<div id="shot-mount"><section class="scr" aria-label="创建成功">
   <div class="body pb">
     <div class="center" style="padding:22px 0 16px">
       <span class="seal seal-ok" style="font-size:10px">已创建</span>
       <h1 style="font-size:19px;margin:14px 0 4px">钱包已创建</h1>
       <p style="color:var(--ink-2);font-size:12px">三层账户已就绪,先保存好解锁口令。</p>
     </div>
-    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"/></svg><div><b>解锁口令只显示这一次</b><p>钱包不存储口令;丢失后仅能通过加密备份恢复。</p></div></div>
-    <div class="pass"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib" data-toast="口令已复制到剪贴板"><svg class="ic ic-s"><use href="#i-copy"/></svg></button></div>
+    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"></use></svg><div><b>解锁口令只显示这一次</b><p>钱包不存储口令;丢失后仅能通过加密备份恢复。</p></div></div>
+    <div class="pass"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib" data-toast="口令已复制到剪贴板"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button></div>
     <div class="cd" style="margin-top:12px">
       <div class="cd-h">三层地址</div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--felt)"><use href="#i-spade"/></svg> ZChain</span><span class="lr-v">zc1qpoker…f7x2 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-ether"/></svg> EVM</span><span class="lr-v">0x5919…7527 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-layers"/></svg> Starknet</span><span class="lr-v">0x058f…853f <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--felt)"><use href="#i-spade"></use></svg> ZChain</span><span class="lr-v">zc1qpoker…f7x2 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-ether"></use></svg> EVM</span><span class="lr-v">0x5919…7527 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-layers"></use></svg> Starknet</span><span class="lr-v">0x058f…853f <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
     </div>
-    <label class="chk" data-check="[data-gated=start]" style="margin:2px 0 14px"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>我已将口令保存在安全的地方(密码管理器 / 纸质备份)</label>
-    <button class="btn btn-p btn-lg" data-gated="start" disabled data-nav="home">我已保存,开始使用</button>
+    <label class="chk" data-check="[data-gated=start]" style="margin:2px 0 14px"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>我已将口令保存在安全的地方(密码管理器 / 纸质备份)</label>
+    <button class="btn btn-p btn-lg" data-gated="start" disabled="" data-nav="home">我已保存,开始使用</button>
   </div>
-</section></body></html>
+</section></div>
+</body>
+</html>

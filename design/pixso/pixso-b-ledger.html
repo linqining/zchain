@@ -427,9 +427,9 @@ details[open] summary::before{content:"▾ "}
 .mode-shot #shot-mount.doc .ds-sec{margin-bottom:0}
 
 
-/* ====== Pixso import layout (chrome stripped; every screen visible) ====== */
+/* ====== Pixso import layout(chrome stripped; every screen visible) ====== */
 body{background:var(--pg)}
-.shell-bar,#proto-wrap,.mode-gallery #proto-wrap{display:none !important}
+.shell-bar,#proto-wrap,#gallery,template{display:none !important}
 .px-canvas{max-width:1660px;margin:0 auto;padding:36px 32px 96px}
 .px-head{display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;margin:0 0 8px}
 .px-head h1{font-size:22px;letter-spacing:.01em}
@@ -438,14 +438,15 @@ body{background:var(--pg)}
 .px-sec{font-size:13px;color:var(--dim);font-family:var(--font-mono);letter-spacing:.14em;text-transform:uppercase;margin:44px 0 18px;padding-top:18px;border-top:1px solid var(--border-soft,var(--rl))}
 .px-frames{display:flex;flex-wrap:wrap;gap:34px 30px;align-items:flex-start}
 .px-cell{display:flex;flex-direction:column;gap:10px;width:384px}
-.px-cell .frame{width:380px;height:600px}
-.px-cell .frame-inner .screen,.px-cell .frame-inner .scr{position:absolute;inset:0;display:flex}
+.px-cell .frame{width:380px;height:600px;padding:0;border:none;border-radius:0;background:var(--pg);box-shadow:0 0 0 1px var(--rl-2)}
+.px-cell .frame-in{position:relative;overflow:hidden;border-radius:0}
+.px-cell .frame-in .scr{position:absolute;inset:0;display:flex}
 .px-cap{display:flex;align-items:baseline;gap:8px;padding:0 2px}
 .px-cap .px-no{font-family:var(--font-mono);font-size:10.5px;color:var(--dim)}
 .px-cap b{font-size:13px}
-.px-cap small{margin-left:auto;font-family:var(--font-mono);font-size:10.5px;color:var(--dim)}
+.px-cap small{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--dim)}
 .px-ds{margin:0 0 40px}
-.px-ds .ds-section,.px-ds .ds-sec{margin-bottom:0}
+.px-ds .ds-sec{margin-bottom:0}
 </style>
 </head>
 <body>
@@ -490,15 +491,15 @@ body{background:var(--pg)}
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
 </defs></svg>
 <div class="px-canvas">
-  <div class="px-head"><h1>ZChain Wallet · 方向 B 账簿 Ledger (Paper)</h1><span class="px-sub">380×600 · 17 屏 + 设计系统 · 供 Pixso 导入</span></div>
-  <p class="px-note">本文件由 design/pixso/build-pixso-import.js 从设计稿自动抽取生成：已剥离总览/交互外壳与切换脚本，使每一屏都以固定画板形式静态可见，便于 Pixso <span class="mono">code_to_design</span> 逐屏或整板导入。品牌 token 同源 website/media-kit/v0.1。</p>
-  <div class="px-sec">Screens · 17</div>
+  <div class="px-head"><h1>ZChain Wallet · 方向 B 账簿 Ledger (Paper)</h1><span class="px-sub">380×600 · 19 屏 + 14 设计系统板 · 供 Pixso 导入</span></div>
+  <p class="px-note">由 design/pixso/build-pixso-shot-export.mjs 驱动原型 shot 模式导出:每块画板都是页面运行时渲染结果(t-acct 已按链跑过 applyChain,三链各一块板),已剥离总览/交互外壳。品牌 token 同源 website/media-kit/v0.1。</p>
+  <div class="px-sec">Screens · 19</div>
   <div class="px-frames">
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="欢迎">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="欢迎">
   <div class="cover">
     <span class="ch ch-solid" style="position:absolute;right:0;top:2px">DevNet</span>
-    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ZChain 单色 logo" style="color:var(--ink)"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"/><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"/></svg>
+    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ZChain 单色 logo" style="color:var(--ink)"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"></rect><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"></rect></svg>
     <div class="cv-n">ZChain Wallet</div>
     <div class="cv-t">桌上飞快,结算可证</div>
     <div class="cv-e">Fast at the table. Verifiable at settlement.</div>
@@ -508,59 +509,59 @@ body{background:var(--pg)}
       <div><b>STARK</b><span>可复验</span></div>
     </div>
     <div class="row" style="gap:6px;margin-top:14px;flex-wrap:wrap">
-      <span class="ch ch-felt"><svg class="ic ic-xs"><use href="#i-spade"/></svg>ZChain 隐私层</span>
-      <span class="ch"><svg class="ic ic-xs"><use href="#i-ether"/></svg>EVM 多链</span>
-      <span class="ch"><svg class="ic ic-xs"><use href="#i-layers"/></svg>Starknet</span>
+      <span class="ch ch-felt"><svg class="ic ic-xs"><use href="#i-spade"></use></svg>ZChain 隐私层</span>
+      <span class="ch"><svg class="ic ic-xs"><use href="#i-ether"></use></svg>EVM 多链</span>
+      <span class="ch"><svg class="ic ic-xs"><use href="#i-layers"></use></svg>Starknet</span>
     </div>
     <div class="cv-acts">
-      <button class="btn btn-p btn-lg" data-nav="success"><svg class="ic ic-s"><use href="#i-plus"/></svg>一键创建钱包</button>
+      <button class="btn btn-p btn-lg" data-nav="success"><svg class="ic ic-s"><use href="#i-plus"></use></svg>一键创建钱包</button>
       <button class="btn btn-s" data-nav="import">导入或恢复钱包</button>
       <div class="hint-s">一次创建三层账户:ZChain 隐私层 + EVM 多链 + Starknet</div>
     </div>
   </div>
   <div class="cv-foot">设计稿 v0.2 · 对齐 Extension 0.6.1 · MV3 · 继续即代表知悉测试网风险<br>Play / DevNet / v1.3</div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">01</span><b>欢迎</b><small>welcome</small></div>
+      <div class="px-cap"><span class="px-no">01</span><b>欢迎 · 一次创建三层</b><small>welcome</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="创建成功">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="创建成功">
   <div class="body pb">
     <div class="center" style="padding:22px 0 16px">
       <span class="seal seal-ok" style="font-size:10px">已创建</span>
       <h1 style="font-size:19px;margin:14px 0 4px">钱包已创建</h1>
       <p style="color:var(--ink-2);font-size:12px">三层账户已就绪,先保存好解锁口令。</p>
     </div>
-    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"/></svg><div><b>解锁口令只显示这一次</b><p>钱包不存储口令;丢失后仅能通过加密备份恢复。</p></div></div>
-    <div class="pass"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib" data-toast="口令已复制到剪贴板"><svg class="ic ic-s"><use href="#i-copy"/></svg></button></div>
+    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"></use></svg><div><b>解锁口令只显示这一次</b><p>钱包不存储口令;丢失后仅能通过加密备份恢复。</p></div></div>
+    <div class="pass"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib" data-toast="口令已复制到剪贴板"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button></div>
     <div class="cd" style="margin-top:12px">
       <div class="cd-h">三层地址</div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--felt)"><use href="#i-spade"/></svg> ZChain</span><span class="lr-v">zc1qpoker…f7x2 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-ether"/></svg> EVM</span><span class="lr-v">0x5919…7527 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
-      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-layers"/></svg> Starknet</span><span class="lr-v">0x058f…853f <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--felt)"><use href="#i-spade"></use></svg> ZChain</span><span class="lr-v">zc1qpoker…f7x2 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-ether"></use></svg> EVM</span><span class="lr-v">0x5919…7527 <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
+      <div class="lr"><span class="lr-k"><svg class="ic ic-xs" style="display:inline;vertical-align:-1px;color:var(--ink-3)"><use href="#i-layers"></use></svg> Starknet</span><span class="lr-v">0x058f…853f <button class="ib bare" data-toast="地址已复制"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
     </div>
-    <label class="chk" data-check="[data-gated=start]" style="margin:2px 0 14px"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>我已将口令保存在安全的地方(密码管理器 / 纸质备份)</label>
-    <button class="btn btn-p btn-lg" data-gated="start" disabled data-nav="home">我已保存,开始使用</button>
+    <label class="chk" data-check="[data-gated=start]" style="margin:2px 0 14px"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>我已将口令保存在安全的地方(密码管理器 / 纸质备份)</label>
+    <button class="btn btn-p btn-lg" data-gated="start" disabled="" data-nav="home">我已保存,开始使用</button>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">02</span><b>创建成功</b><small>success</small></div>
+      <div class="px-cap"><span class="px-no">02</span><b>创建成功 · 解锁口令</b><small>success</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="导入恢复">
-  <header class="sub"><button class="ib bare" data-nav="welcome"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">导入 / 恢复</div><div class="sub-s"></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="导入恢复">
+  <header class="sub"><button class="ib bare" data-nav="welcome"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">导入 / 恢复</div><div class="sub-s"></div></header>
   <div class="body">
     <div class="seg"><button class="on" data-seg="backup">备份恢复</button><button data-seg="key">私钥导入</button><button data-seg="pass">自定义口令</button></div>
     <div data-pane="backup">
       <button class="empty" style="width:100%;padding:24px 14px;cursor:pointer" data-toast="示意:文件选择器">
-        <svg class="ic" style="width:24px;height:24px;margin:0 auto 7px;color:var(--felt)"><use href="#i-ul"/></svg>
+        <svg class="ic" style="width:24px;height:24px;margin:0 auto 7px;color:var(--felt)"><use href="#i-ul"></use></svg>
         <b style="display:block;font-size:13px;color:var(--ink);margin-bottom:3px">选择 .zcbk 备份文件</b>
         <span class="mono" style="font-size:10.5px">由「设置 → 备份导出」生成 · 仅 ZChain 层 note 库</span>
       </button>
       <div class="fld" style="margin-top:13px"><div class="fl">备份口令</div><input type="password" placeholder="≥ 8 位,与钱包解锁口令相互独立"></div>
       <button class="btn btn-p" data-toast="示意:Argon2id 本地解密中">恢复钱包</button>
-      <div class="bn bn-info" style="margin-top:12px"><svg class="ic"><use href="#i-info"/></svg><div><b>只覆盖 ZChain 层</b><p>ZCBK v1 含 REAL/PLAY 双库与 keystore 信封,不含 EVM / Starknet 账户——那两层请在各自管理页导出私钥。解密全程本地完成,备份口令不离开设备。</p></div></div>
+      <div class="bn bn-info" style="margin-top:12px"><svg class="ic"><use href="#i-info"></use></svg><div><b>只覆盖 ZChain 层</b><p>ZCBK v1 含 REAL/PLAY 双库与 keystore 信封,不含 EVM / Starknet 账户——那两层请在各自管理页导出私钥。解密全程本地完成,备份口令不离开设备。</p></div></div>
     </div>
     <div data-pane="key" style="display:none">
-      <div class="fld"><div class="fl">目标层</div><div class="iw"><input readonly value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"/></svg></span></div></div>
+      <div class="fld"><div class="fl">目标层</div><div class="iw"><input readonly="" value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"></use></svg></span></div></div>
       <div class="fld"><div class="fl">私钥(hex)</div><input class="mono" style="font-size:11.5px" placeholder="0x…"></div>
       <div class="fld"><div class="fl">加密口令</div><input type="password" placeholder="用于本地 keystore 加密"></div>
       <button class="btn btn-p">导入到所选层</button>
@@ -575,42 +576,42 @@ body{background:var(--pg)}
     </div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">03</span><b>导入恢复</b><small>import</small></div>
+      <div class="px-cap"><span class="px-no">03</span><b>导入 / 恢复</b><small>import</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="解锁">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="解锁">
   <div class="cover" style="justify-content:center;align-items:center;text-align:center">
     <span class="av" style="width:52px;height:52px;font-size:19px">A</span>
     <div style="font-size:16px;font-weight:700;margin-top:12px">牌手一号</div>
     <div class="mono" style="font-size:11px;color:var(--ink-3);margin-top:2px">zc1qpoker…f7x2</div>
-    <div class="row" style="gap:6px;margin-top:12px;justify-content:center"><span class="ch ch-amb"><svg class="ic ic-xs"><use href="#i-lock"/></svg>已锁定</span><span class="ch">15 分钟无操作 / 后台被回收</span></div>
+    <div class="row" style="gap:6px;margin-top:12px;justify-content:center"><span class="ch ch-amb"><svg class="ic ic-xs"><use href="#i-lock"></use></svg>已锁定</span><span class="ch">15 分钟无操作 / 后台被回收</span></div>
     <div style="width:100%;max-width:282px;margin-top:22px">
-      <div class="iw"><input type="password" placeholder="解锁口令"><span class="in-ic"><button class="ib bare" data-toast="示意:明文切换"><svg class="ic ic-xs"><use href="#i-eye"/></svg></button></span></div>
+      <div class="iw"><input type="password" placeholder="解锁口令"><span class="in-ic"><button class="ib bare" data-toast="示意:明文切换"><svg class="ic ic-xs"><use href="#i-eye"></use></svg></button></span></div>
       <button class="btn btn-p" style="margin-top:10px" data-nav="zc-dash">解锁三层</button>
       <button class="btn btn-g" style="margin-top:4px" data-nav="import">忘记口令?使用备份恢复</button>
     </div>
   </div>
   <div class="cv-foot">统一解锁三层 · ZChain 层 Argon2id + ChaCha20-Poly1305,EVM / Starknet 层 PBKDF2-SHA256(600k)+ AES-256-GCM</div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">04</span><b>解锁</b><small>lock</small></div>
+      <div class="px-cap"><span class="px-no">04</span><b>锁定 · 统一解锁</b><small>lock</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="三链总账">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="三链总账">
   <header class="dh">
-    <div class="dh-top"><span class="dh-kind">General Ledger</span><span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"/></svg></button></span></div>
-    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"/></svg></div><div class="acct-a">三层统一账户 · 已解锁 2 / 3</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg></button></span></div>
+    <div class="dh-top"><span class="dh-kind">General Ledger</span><span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a">三层统一账户 · 已解锁 2 / 3</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
   </header>
   <div class="body">
     <div class="tot">
-      <div class="tot-l">三链总资产 <button class="ib bare" data-toast="示意:隐藏金额"><svg class="ic ic-xs"><use href="#i-eye"/></svg></button></div>
+      <div class="tot-l">三链总资产 <button class="ib bare" data-toast="示意:隐藏金额"><svg class="ic ic-xs"><use href="#i-eye"></use></svg></button></div>
       <div class="tot-a"><span class="eq">≈</span>$22,288.63</div>
       <div class="tot-s"><span class="ch ch-real">REAL 托管 $10,120.00</span><span>PLAY 为测试筹码,不计价</span></div>
     </div>
     <div class="sec-t">账户层</div>
     <div class="cd tight" style="padding:2px 14px">
-      <button class="ar" data-nav="zc-dash"><span class="tk tk-felt"><svg class="ic ic-s"><use href="#i-spade"/></svg></span><div class="ar-m"><div class="ar-n">ZChain 隐私层 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">PLAY 12,400.00 · NATIVE 10,000.00</div></div><div class="ar-r"><div class="ar-amt">$10,120.00</div><div class="ar-s mono" style="text-align:right">zc1qpoker…f7x2</div></div></button>
-      <button class="ar" data-nav="evm-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-ether"/></svg></span><div class="ar-m"><div class="ar-n">EVM 多链 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">ETH 2.4183 · Ethereum</div></div><div class="ar-r"><div class="ar-amt">$8,124.69</div><div class="ar-s mono" style="text-align:right">0x5919…7527</div></div></button>
-      <button class="ar" data-nav="stk-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-layers"/></svg></span><div class="ar-m"><div class="ar-n">Starknet <span class="ch ch-amb ch-xs">已锁定</span></div><div class="ar-s">ETH 1.2034 · SN DevNet</div></div><div class="ar-r"><div class="ar-amt">$4,043.42</div><div class="ar-s mono" style="text-align:right">0x058f…853f</div></div></button>
+      <button class="ar" data-nav="zc-dash"><span class="tk tk-felt"><svg class="ic ic-s"><use href="#i-spade"></use></svg></span><div class="ar-m"><div class="ar-n">ZChain 隐私层 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">PLAY 12,400.00 · NATIVE 10,000.00</div></div><div class="ar-r"><div class="ar-amt">$10,120.00</div><div class="ar-s mono" style="text-align:right">zc1qpoker…f7x2</div></div></button>
+      <button class="ar" data-nav="evm-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-ether"></use></svg></span><div class="ar-m"><div class="ar-n">EVM 多链 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">ETH 2.4183 · Ethereum</div></div><div class="ar-r"><div class="ar-amt">$8,124.69</div><div class="ar-s mono" style="text-align:right">0x5919…7527</div></div></button>
+      <button class="ar" data-nav="stk-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-layers"></use></svg></span><div class="ar-m"><div class="ar-n">Starknet <span class="ch ch-amb ch-xs">已锁定</span></div><div class="ar-s">ETH 1.2034 · SN DevNet</div></div><div class="ar-r"><div class="ar-amt">$4,043.42</div><div class="ar-s mono" style="text-align:right">0x058f…853f</div></div></button>
     </div>
     <div class="cd">
       <div class="cd-h">最弱凭证</div>
@@ -624,24 +625,24 @@ body{background:var(--pg)}
     </div>
     <div class="cd">
       <div class="cd-h">待办 <span class="more" data-nav="zc-confirm">1 项</span></div>
-      <button class="mi"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-pen"/></svg></span><span class="grow"><b>开桌签名请求 · 8♠ 桌</b><span>poker.zchain.devnet · 92s 后过期</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-pen"></use></svg></span><span class="grow"><b>开桌签名请求 · 8♠ 桌</b><span>poker.zchain.devnet · 92s 后过期</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
-    <button class="btn btn-s btn-sm" style="width:100%;height:38px" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg>全部锁定</button>
+    <button class="btn btn-s btn-sm" style="width:100%;height:38px" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg>全部锁定</button>
     <div class="foot">ZChain Wallet · 设计稿 v0.2 / Extension 0.6.1 · DevNet<br>Play / DevNet / v1.3</div>
   </div>
   <nav class="tabs">
-    <button class="tb on" data-nav="home"><svg class="ic"><use href="#i-home"/></svg>总账</button>
-    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"/></svg>账簿</button>
-    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"/></svg>证明</button>
+    <button class="tb on" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
   </nav>
 </section></div></div>
       <div class="px-cap"><span class="px-no">05</span><b>三链总账</b><small>home</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="账簿">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="账簿">
   <header class="dh">
-    <div class="dh-top"><span class="dh-kind" data-kind>Ledger · Zchain</span><span class="net" data-net><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"/></svg></button></span></div>
-    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"/></svg></div><div class="acct-a" data-addr>zc1qpoker…f7x2</div></div><span class="dh-r"><button class="ib" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"/></svg></button><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg></button></span></div>
+    <div class="dh-top"><span class="dh-kind" data-kind="">Ledger · Zchain</span><span class="net" data-net=""><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a" data-addr="">zc1qpoker…f7x2</div></div><span class="dh-r"><button class="ib" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
   </header>
   <div class="body">
     <div class="csw">
@@ -656,26 +657,26 @@ body{background:var(--pg)}
         <div class="col"><div class="tot-l"><span class="ch ch-play ch-xs">GAME</span>可用筹码</div><div class="tot-a">12,400.00<span class="u">PLAY</span></div></div>
         <div class="col"><div class="tot-l"><span class="ch ch-real ch-xs">REAL</span>托管映射</div><div class="tot-a" style="color:var(--real)">10,000.00<span class="u">NATIVE</span></div></div>
       </div>
-      <div class="bn bn-real" style="padding:9px 11px"><svg class="ic"><use href="#i-warn"/></svg><div><b>托管映射资产</b><p>REAL 域提现通道未开放;GAME 域筹码不上主网。</p></div></div>
+      <div class="bn bn-real" style="padding:9px 11px"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管映射资产</b><p>REAL 域提现通道未开放;GAME 域筹码不上主网。</p></div></div>
       <div class="acts">
-        <button class="play" data-open="ovl-zc-recv"><svg class="ic"><use href="#i-qr"/></svg>收款</button>
-        <button data-nav="zc-send"><svg class="ic"><use href="#i-send"/></svg>转账</button>
-        <button class="real" data-nav="zc-withdraw"><svg class="ic"><use href="#i-out"/></svg>提现</button>
-        <button data-nav="zc-portal"><svg class="ic"><use href="#i-shield"/></svg>Portal</button>
+        <button class="play" data-open="n20_ovl-zc-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="zc-send"><svg class="ic"><use href="#i-send"></use></svg>转账</button>
+        <button class="real" data-nav="zc-withdraw"><svg class="ic"><use href="#i-out"></use></svg>提现</button>
+        <button data-nav="zc-portal"><svg class="ic"><use href="#i-shield"></use></svg>Portal</button>
       </div>
       <div class="cd">
-        <div class="cd-h">资产 <span class="more" data-nav="zc-receipts">回执<svg class="ic ic-xs"><use href="#i-chev-r"/></svg></span></div>
+        <div class="cd-h">资产 <span class="more" data-nav="zc-receipts">回执<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
         <div class="ar"><span class="tk tk-play">P</span><div class="ar-m"><div class="ar-n">PLAY <span class="ch ch-play ch-xs">GAME</span></div><div class="ar-s">可用 12,400.00 · 桌上锁定 0.00</div></div><div class="ar-r"><div class="ar-amt">12,400.00</div></div></div>
         <div class="ar"><span class="tk tk-real">N</span><div class="ar-m"><div class="ar-n">NATIVE <span class="ch ch-real ch-xs">REAL</span></div><div class="ar-s">托管映射 · 提现未开放</div></div><div class="ar-r"><div class="ar-amt">10,000.00</div></div></div>
         <div class="ar" style="opacity:.5"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDT / USDC</div><div class="ar-s">未接入</div></div><div class="ar-r"><div class="ar-amt dim">—</div></div></div>
       </div>
       <div class="cd">
-        <div class="cd-h">最新动态 <span class="more" data-nav="zc-receipts">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"/></svg></span></div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"/></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
+        <div class="cd-h">最新动态 <span class="more" data-nav="zc-receipts">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
       </div>
       <div class="cd">
-        <div class="cd-h">会话密钥 · SNIP-12 <span class="more" data-nav="zc-sessions">管理<svg class="ic ic-xs"><use href="#i-chev-r"/></svg></span></div>
+        <div class="cd-h">会话密钥 · SNIP-12 <span class="more" data-nav="zc-sessions">管理<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
         <div class="lr"><span class="lr-k">poker.zchain.devnet</span><span class="lr-v" style="color:var(--felt)">活跃</span></div>
         <div class="lr"><span class="lr-k">单笔 / 日累计</span><span class="lr-v">≤1,000 · 2,150/5,000</span></div>
         <div class="meter" style="margin-top:8px"><i style="width:43%"></i></div>
@@ -687,16 +688,16 @@ body{background:var(--pg)}
       <div class="tot">
         <div class="tot-l">总余额 · ETH</div>
         <div class="tot-a">2.4183<span class="u">ETH</span></div>
-        <div class="tot-s"><span class="mono">≈ $8,124.69</span><button class="ib bare" data-open="ovl-evm-recv"><svg class="ic ic-xs"><use href="#i-qr"/></svg></button><button class="ib bare" data-toast="示意:浏览器打开"><svg class="ic ic-xs"><use href="#i-ext"/></svg></button></div>
+        <div class="tot-s"><span class="mono">≈ $8,124.69</span><button class="ib bare" data-open="n20_ovl-evm-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:浏览器打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
       </div>
       <div class="acts">
-        <button data-nav="evm-send"><svg class="ic"><use href="#i-send"/></svg>发送</button>
-        <button data-open="ovl-evm-recv"><svg class="ic"><use href="#i-qr"/></svg>收款</button>
-        <button data-nav="evm-history"><svg class="ic"><use href="#i-receipt"/></svg>历史</button>
-        <button data-toast="示意:合约读写面板"><svg class="ic"><use href="#i-file"/></svg>合约</button>
+        <button data-nav="evm-send"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-evm-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="evm-history"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
+        <button data-toast="示意:合约读写面板"><svg class="ic"><use href="#i-file"></use></svg>合约</button>
       </div>
       <div class="cd">
-        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"/></svg></span></div>
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
         <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">1 <span class="ch ch-felt ch-xs">校验通过</span></span></div>
         <div class="lr"><span class="lr-k">gas</span><span class="lr-v">12 gwei <span class="ch ch-xs">偏低</span></span></div>
         <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">42</span></div>
@@ -707,12 +708,12 @@ body{background:var(--pg)}
         <div class="ar"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDC <span class="ch ch-xs">只读</span></div><div class="ar-s">erc-20 · eth_call 读取</div></div><div class="ar-r"><div class="ar-amt">320.00</div></div></div>
       </div>
       <div class="cd">
-        <div class="cd-h">最新动态 <span class="more" data-nav="evm-history">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"/></svg></span></div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"/></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"/></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="cd-h">最新动态 <span class="more" data-nav="evm-history">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"></use></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
       </div>
       <div class="cd">
-        <div class="cd-h">账户管理 <span class="more" data-nav="evm-manage">进入<svg class="ic ic-xs"><use href="#i-chev-r"/></svg></span></div>
+        <div class="cd-h">账户管理 <span class="more" data-nav="evm-manage">进入<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
         <div class="lr"><span class="lr-k">私钥 · 口令 · RPC</span><span class="lr-v dim">危险区需二次确认</span></div>
       </div>
     </div>
@@ -722,17 +723,17 @@ body{background:var(--pg)}
       <div class="tot">
         <div class="tot-l">总余额 · ETH</div>
         <div class="tot-a">1.2034<span class="u">ETH</span></div>
-        <div class="tot-s"><span class="mono">≈ $4,043.42</span><button class="ib bare" data-open="ovl-stk-recv"><svg class="ic ic-xs"><use href="#i-qr"/></svg></button><button class="ib bare" data-toast="示意:starkscan 打开"><svg class="ic ic-xs"><use href="#i-ext"/></svg></button></div>
+        <div class="tot-s"><span class="mono">≈ $4,043.42</span><button class="ib bare" data-open="n20_ovl-stk-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:starkscan 打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
       </div>
-      <div class="bn bn-amb"><svg class="ic"><use href="#i-lock"/></svg><div><b>本层已锁定</b><p>解锁后才能发起 invoke;当前余额为链上只读数据。</p></div></div>
+      <div class="bn bn-amb"><svg class="ic"><use href="#i-lock"></use></svg><div><b>本层已锁定</b><p>解锁后才能发起 invoke;当前余额为链上只读数据。</p></div></div>
       <div class="acts">
-        <button data-toast="示意:解锁后发送(同账簿模板)"><svg class="ic"><use href="#i-send"/></svg>发送</button>
-        <button data-open="ovl-stk-recv"><svg class="ic"><use href="#i-qr"/></svg>收款</button>
-        <button data-toast="示意:水龙头领取 10 ETH"><svg class="ic"><use href="#i-flask"/></svg>水龙头</button>
-        <button data-toast="示意:历史(同账簿模板)"><svg class="ic"><use href="#i-receipt"/></svg>历史</button>
+        <button data-toast="示意:解锁后发送(同账簿模板)"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-stk-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-toast="示意:水龙头领取 10 ETH"><svg class="ic"><use href="#i-flask"></use></svg>水龙头</button>
+        <button data-toast="示意:历史(同账簿模板)"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
       </div>
       <div class="cd">
-        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"/></svg></span></div>
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
         <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">ZCDN <span class="ch ch-felt ch-xs">校验通过</span></span></div>
         <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">7</span></div>
         <div class="lr"><span class="lr-k">UDC 地址</span><span class="lr-v">0x41a7…8e02(公式推导)</span></div>
@@ -743,59 +744,357 @@ body{background:var(--pg)}
       </div>
       <div class="cd">
         <div class="cd-h">最新动态</div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"/></svg></span><div class="ar-m"><div class="ar-n">invoke · transfer</div><div class="ar-s">0x33c1…67 · maxFee 0.00042</div></div><div class="ar-r"><div class="ar-amt neg">-0.5000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-flask"/></svg></span><div class="ar-m"><div class="ar-n">水龙头 · dev_faucet</div><div class="ar-s">0xe8b0…19 · 1 小时前</div></div><div class="ar-r"><div class="ar-amt pos">+10.0000</div><div class="ar-st"><span class="ch ch-play ch-xs">dev</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">invoke · transfer</div><div class="ar-s">0x33c1…67 · maxFee 0.00042</div></div><div class="ar-r"><div class="ar-amt neg">-0.5000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-flask"></use></svg></span><div class="ar-m"><div class="ar-n">水龙头 · dev_faucet</div><div class="ar-s">0xe8b0…19 · 1 小时前</div></div><div class="ar-r"><div class="ar-amt pos">+10.0000</div><div class="ar-st"><span class="ch ch-play ch-xs">dev</span></div></div></div>
       </div>
     </div>
   </div>
-  <div class="ovl" id="ovl-zc-recv">
-    <div class="ovl-bg" data-close></div>
+  <div class="ovl" id="n20_ovl-zc-recv">
+    <div class="ovl-bg" data-close=""></div>
     <div class="sheet"><div class="grab"></div>
-      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · ZChain 层</div><button class="ib bare" data-close><svg class="ic ic-s"><use href="#i-x"/></svg></button></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · ZChain 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
       <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">zc1qpoker9xf7x2wwn2h3a5v8…</div>
       <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">完整地址 · 点按下方按钮复制</div>
-      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"/></svg></div>
-      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"/></svg>复制地址</button>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
     </div>
   </div>
-  <div class="ovl" id="ovl-evm-recv">
-    <div class="ovl-bg" data-close></div>
+  <div class="ovl" id="n20_ovl-evm-recv">
+    <div class="ovl-bg" data-close=""></div>
     <div class="sheet"><div class="grab"></div>
-      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · EVM 层</div><button class="ib bare" data-close><svg class="ic ic-s"><use href="#i-x"/></svg></button></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · EVM 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
       <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x59195049a3…29f97527</div>
       <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">Ethereum · chainId 1</div>
-      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"/></svg></div>
-      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"/></svg>复制地址</button>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
     </div>
   </div>
-  <div class="ovl" id="ovl-stk-recv">
-    <div class="ovl-bg" data-close></div>
+  <div class="ovl" id="n20_ovl-stk-recv">
+    <div class="ovl-bg" data-close=""></div>
     <div class="sheet"><div class="grab"></div>
-      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · Starknet 层</div><button class="ib bare" data-close><svg class="ic ic-s"><use href="#i-x"/></svg></button></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · Starknet 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
       <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x058ff920c8…8b29853f</div>
       <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">SN DevNet · ZCDN</div>
-      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"/></svg></div>
-      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"/></svg>复制地址</button>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
     </div>
   </div>
   <nav class="tabs">
-    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"/></svg>总账</button>
-    <button class="tb on" data-nav="acct"><svg class="ic"><use href="#i-book"/></svg>账簿</button>
-    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"/></svg>证明</button>
+    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb on" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
   </nav>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">06</span><b>账簿</b><small>acct</small></div>
+      <div class="px-cap"><span class="px-no">06</span><b>账簿 · ZChain 层</b><small>zc-dash · zc</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="ZChain 转账">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">转账</div><div class="sub-s"><span class="ch ch-play ch-xs">GAME</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="账簿">
+  <header class="dh">
+    <div class="dh-top"><span class="dh-kind" data-kind="">Ledger · Evm</span><span class="net" data-net=""><span class="dot"></span>Ethereum · chainId 1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a" data-addr="">0x5919…7527</div></div><span class="dh-r"><button class="ib" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
+  </header>
+  <div class="body">
+    <div class="csw">
+      <button class="" data-cs="zc">ZChain<span class="cnt">2</span></button>
+      <button data-cs="evm" class="on">EVM<span class="cnt">1</span></button>
+      <button data-cs="stk">Starknet<span class="cnt">1</span></button>
+    </div>
+
+    <!-- pane: ZChain -->
+    <div data-csp="zc" style="display: none;">
+      <div class="split">
+        <div class="col"><div class="tot-l"><span class="ch ch-play ch-xs">GAME</span>可用筹码</div><div class="tot-a">12,400.00<span class="u">PLAY</span></div></div>
+        <div class="col"><div class="tot-l"><span class="ch ch-real ch-xs">REAL</span>托管映射</div><div class="tot-a" style="color:var(--real)">10,000.00<span class="u">NATIVE</span></div></div>
+      </div>
+      <div class="bn bn-real" style="padding:9px 11px"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管映射资产</b><p>REAL 域提现通道未开放;GAME 域筹码不上主网。</p></div></div>
+      <div class="acts">
+        <button class="play" data-open="n20_ovl-zc-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="zc-send"><svg class="ic"><use href="#i-send"></use></svg>转账</button>
+        <button class="real" data-nav="zc-withdraw"><svg class="ic"><use href="#i-out"></use></svg>提现</button>
+        <button data-nav="zc-portal"><svg class="ic"><use href="#i-shield"></use></svg>Portal</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产 <span class="more" data-nav="zc-receipts">回执<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="ar"><span class="tk tk-play">P</span><div class="ar-m"><div class="ar-n">PLAY <span class="ch ch-play ch-xs">GAME</span></div><div class="ar-s">可用 12,400.00 · 桌上锁定 0.00</div></div><div class="ar-r"><div class="ar-amt">12,400.00</div></div></div>
+        <div class="ar"><span class="tk tk-real">N</span><div class="ar-m"><div class="ar-n">NATIVE <span class="ch ch-real ch-xs">REAL</span></div><div class="ar-s">托管映射 · 提现未开放</div></div><div class="ar-r"><div class="ar-amt">10,000.00</div></div></div>
+        <div class="ar" style="opacity:.5"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDT / USDC</div><div class="ar-s">未接入</div></div><div class="ar-r"><div class="ar-amt dim">—</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态 <span class="more" data-nav="zc-receipts">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">会话密钥 · SNIP-12 <span class="more" data-nav="zc-sessions">管理<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">poker.zchain.devnet</span><span class="lr-v" style="color:var(--felt)">活跃</span></div>
+        <div class="lr"><span class="lr-k">单笔 / 日累计</span><span class="lr-v">≤1,000 · 2,150/5,000</span></div>
+        <div class="meter" style="margin-top:8px"><i style="width:43%"></i></div>
+      </div>
+    </div>
+
+    <!-- pane: EVM -->
+    <div data-csp="evm" style="">
+      <div class="tot">
+        <div class="tot-l">总余额 · ETH</div>
+        <div class="tot-a">2.4183<span class="u">ETH</span></div>
+        <div class="tot-s"><span class="mono">≈ $8,124.69</span><button class="ib bare" data-open="n20_ovl-evm-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:浏览器打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
+      </div>
+      <div class="acts">
+        <button data-nav="evm-send"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-evm-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="evm-history"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
+        <button data-toast="示意:合约读写面板"><svg class="ic"><use href="#i-file"></use></svg>合约</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">1 <span class="ch ch-felt ch-xs">校验通过</span></span></div>
+        <div class="lr"><span class="lr-k">gas</span><span class="lr-v">12 gwei <span class="ch ch-xs">偏低</span></span></div>
+        <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">42</span></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产</div>
+        <div class="ar"><span class="tk">Ξ</span><div class="ar-m"><div class="ar-n">ETH</div><div class="ar-s">原生币</div></div><div class="ar-r"><div class="ar-amt">2.4183</div></div></div>
+        <div class="ar"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDC <span class="ch ch-xs">只读</span></div><div class="ar-s">erc-20 · eth_call 读取</div></div><div class="ar-r"><div class="ar-amt">320.00</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态 <span class="more" data-nav="evm-history">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"></use></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">账户管理 <span class="more" data-nav="evm-manage">进入<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">私钥 · 口令 · RPC</span><span class="lr-v dim">危险区需二次确认</span></div>
+      </div>
+    </div>
+
+    <!-- pane: Starknet -->
+    <div data-csp="stk" style="display:none">
+      <div class="tot">
+        <div class="tot-l">总余额 · ETH</div>
+        <div class="tot-a">1.2034<span class="u">ETH</span></div>
+        <div class="tot-s"><span class="mono">≈ $4,043.42</span><button class="ib bare" data-open="n20_ovl-stk-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:starkscan 打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
+      </div>
+      <div class="bn bn-amb"><svg class="ic"><use href="#i-lock"></use></svg><div><b>本层已锁定</b><p>解锁后才能发起 invoke;当前余额为链上只读数据。</p></div></div>
+      <div class="acts">
+        <button data-toast="示意:解锁后发送(同账簿模板)"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-stk-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-toast="示意:水龙头领取 10 ETH"><svg class="ic"><use href="#i-flask"></use></svg>水龙头</button>
+        <button data-toast="示意:历史(同账簿模板)"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">ZCDN <span class="ch ch-felt ch-xs">校验通过</span></span></div>
+        <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">7</span></div>
+        <div class="lr"><span class="lr-k">UDC 地址</span><span class="lr-v">0x41a7…8e02(公式推导)</span></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产</div>
+        <div class="ar"><span class="tk">Ξ</span><div class="ar-m"><div class="ar-n">ETH</div><div class="ar-s">ERC-20 · u256 形状</div></div><div class="ar-r"><div class="ar-amt">1.2034</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态</div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">invoke · transfer</div><div class="ar-s">0x33c1…67 · maxFee 0.00042</div></div><div class="ar-r"><div class="ar-amt neg">-0.5000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-flask"></use></svg></span><div class="ar-m"><div class="ar-n">水龙头 · dev_faucet</div><div class="ar-s">0xe8b0…19 · 1 小时前</div></div><div class="ar-r"><div class="ar-amt pos">+10.0000</div><div class="ar-st"><span class="ch ch-play ch-xs">dev</span></div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-zc-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · ZChain 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">zc1qpoker9xf7x2wwn2h3a5v8…</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">完整地址 · 点按下方按钮复制</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-evm-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · EVM 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x59195049a3…29f97527</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">Ethereum · chainId 1</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-stk-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · Starknet 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x058ff920c8…8b29853f</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">SN DevNet · ZCDN</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb on" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
+  </nav>
+</section></div></div>
+      <div class="px-cap"><span class="px-no">07</span><b>账簿 · EVM 层</b><small>evm-dash · evm</small></div>
+    </div>
+    <div class="px-cell">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="账簿">
+  <header class="dh">
+    <div class="dh-top"><span class="dh-kind" data-kind="">Ledger · Starknet</span><span class="net" data-net=""><span class="dot"></span>SN DevNet · ZCDN</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a" data-addr="">0x058f…853f</div></div><span class="dh-r"><button class="ib" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
+  </header>
+  <div class="body">
+    <div class="csw">
+      <button class="" data-cs="zc">ZChain<span class="cnt">2</span></button>
+      <button data-cs="evm">EVM<span class="cnt">1</span></button>
+      <button data-cs="stk" class="on">Starknet<span class="cnt">1</span></button>
+    </div>
+
+    <!-- pane: ZChain -->
+    <div data-csp="zc" style="display: none;">
+      <div class="split">
+        <div class="col"><div class="tot-l"><span class="ch ch-play ch-xs">GAME</span>可用筹码</div><div class="tot-a">12,400.00<span class="u">PLAY</span></div></div>
+        <div class="col"><div class="tot-l"><span class="ch ch-real ch-xs">REAL</span>托管映射</div><div class="tot-a" style="color:var(--real)">10,000.00<span class="u">NATIVE</span></div></div>
+      </div>
+      <div class="bn bn-real" style="padding:9px 11px"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管映射资产</b><p>REAL 域提现通道未开放;GAME 域筹码不上主网。</p></div></div>
+      <div class="acts">
+        <button class="play" data-open="n20_ovl-zc-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="zc-send"><svg class="ic"><use href="#i-send"></use></svg>转账</button>
+        <button class="real" data-nav="zc-withdraw"><svg class="ic"><use href="#i-out"></use></svg>提现</button>
+        <button data-nav="zc-portal"><svg class="ic"><use href="#i-shield"></use></svg>Portal</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产 <span class="more" data-nav="zc-receipts">回执<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="ar"><span class="tk tk-play">P</span><div class="ar-m"><div class="ar-n">PLAY <span class="ch ch-play ch-xs">GAME</span></div><div class="ar-s">可用 12,400.00 · 桌上锁定 0.00</div></div><div class="ar-r"><div class="ar-amt">12,400.00</div></div></div>
+        <div class="ar"><span class="tk tk-real">N</span><div class="ar-m"><div class="ar-n">NATIVE <span class="ch ch-real ch-xs">REAL</span></div><div class="ar-s">托管映射 · 提现未开放</div></div><div class="ar-r"><div class="ar-amt">10,000.00</div></div></div>
+        <div class="ar" style="opacity:.5"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDT / USDC</div><div class="ar-s">未接入</div></div><div class="ar-r"><div class="ar-amt dim">—</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态 <span class="more" data-nav="zc-receipts">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">会话密钥 · SNIP-12 <span class="more" data-nav="zc-sessions">管理<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">poker.zchain.devnet</span><span class="lr-v" style="color:var(--felt)">活跃</span></div>
+        <div class="lr"><span class="lr-k">单笔 / 日累计</span><span class="lr-v">≤1,000 · 2,150/5,000</span></div>
+        <div class="meter" style="margin-top:8px"><i style="width:43%"></i></div>
+      </div>
+    </div>
+
+    <!-- pane: EVM -->
+    <div data-csp="evm" style="display:none">
+      <div class="tot">
+        <div class="tot-l">总余额 · ETH</div>
+        <div class="tot-a">2.4183<span class="u">ETH</span></div>
+        <div class="tot-s"><span class="mono">≈ $8,124.69</span><button class="ib bare" data-open="n20_ovl-evm-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:浏览器打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
+      </div>
+      <div class="acts">
+        <button data-nav="evm-send"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-evm-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-nav="evm-history"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
+        <button data-toast="示意:合约读写面板"><svg class="ic"><use href="#i-file"></use></svg>合约</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">1 <span class="ch ch-felt ch-xs">校验通过</span></span></div>
+        <div class="lr"><span class="lr-k">gas</span><span class="lr-v">12 gwei <span class="ch ch-xs">偏低</span></span></div>
+        <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">42</span></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产</div>
+        <div class="ar"><span class="tk">Ξ</span><div class="ar-m"><div class="ar-n">ETH</div><div class="ar-s">原生币</div></div><div class="ar-r"><div class="ar-amt">2.4183</div></div></div>
+        <div class="ar"><span class="tk">U</span><div class="ar-m"><div class="ar-n">USDC <span class="ch ch-xs">只读</span></div><div class="ar-s">erc-20 · eth_call 读取</div></div><div class="ar-r"><div class="ar-amt">320.00</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态 <span class="more" data-nav="evm-history">查看全部<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"></use></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">账户管理 <span class="more" data-nav="evm-manage">进入<svg class="ic ic-xs"><use href="#i-chev-r"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">私钥 · 口令 · RPC</span><span class="lr-v dim">危险区需二次确认</span></div>
+      </div>
+    </div>
+
+    <!-- pane: Starknet -->
+    <div data-csp="stk" style="">
+      <div class="tot">
+        <div class="tot-l">总余额 · ETH</div>
+        <div class="tot-a">1.2034<span class="u">ETH</span></div>
+        <div class="tot-s"><span class="mono">≈ $4,043.42</span><button class="ib bare" data-open="n20_ovl-stk-recv"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button><button class="ib bare" data-toast="示意:starkscan 打开"><svg class="ic ic-xs"><use href="#i-ext"></use></svg></button></div>
+      </div>
+      <div class="bn bn-amb"><svg class="ic"><use href="#i-lock"></use></svg><div><b>本层已锁定</b><p>解锁后才能发起 invoke;当前余额为链上只读数据。</p></div></div>
+      <div class="acts">
+        <button data-toast="示意:解锁后发送(同账簿模板)"><svg class="ic"><use href="#i-send"></use></svg>发送</button>
+        <button data-open="n20_ovl-stk-recv"><svg class="ic"><use href="#i-qr"></use></svg>收款</button>
+        <button data-toast="示意:水龙头领取 10 ETH"><svg class="ic"><use href="#i-flask"></use></svg>水龙头</button>
+        <button data-toast="示意:历史(同账簿模板)"><svg class="ic"><use href="#i-receipt"></use></svg>历史</button>
+      </div>
+      <div class="cd">
+        <div class="cd-h">网络 <span class="more" data-toast="示意:切换网络下拉">切换<svg class="ic ic-xs"><use href="#i-swap"></use></svg></span></div>
+        <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">ZCDN <span class="ch ch-felt ch-xs">校验通过</span></span></div>
+        <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">7</span></div>
+        <div class="lr"><span class="lr-k">UDC 地址</span><span class="lr-v">0x41a7…8e02(公式推导)</span></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">资产</div>
+        <div class="ar"><span class="tk">Ξ</span><div class="ar-m"><div class="ar-n">ETH</div><div class="ar-s">ERC-20 · u256 形状</div></div><div class="ar-r"><div class="ar-amt">1.2034</div></div></div>
+      </div>
+      <div class="cd">
+        <div class="cd-h">最新动态</div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">invoke · transfer</div><div class="ar-s">0x33c1…67 · maxFee 0.00042</div></div><div class="ar-r"><div class="ar-amt neg">-0.5000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-flask"></use></svg></span><div class="ar-m"><div class="ar-n">水龙头 · dev_faucet</div><div class="ar-s">0xe8b0…19 · 1 小时前</div></div><div class="ar-r"><div class="ar-amt pos">+10.0000</div><div class="ar-st"><span class="ch ch-play ch-xs">dev</span></div></div></div>
+      </div>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-zc-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · ZChain 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">zc1qpoker9xf7x2wwn2h3a5v8…</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">完整地址 · 点按下方按钮复制</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-evm-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · EVM 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x59195049a3…29f97527</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">Ethereum · chainId 1</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <div class="ovl" id="n20_ovl-stk-recv">
+    <div class="ovl-bg" data-close=""></div>
+    <div class="sheet"><div class="grab"></div>
+      <div class="row"><div style="font-weight:600;font-size:13px;flex:1">收款 · Starknet 层</div><button class="ib bare" data-close=""><svg class="ic ic-s"><use href="#i-x"></use></svg></button></div>
+      <div class="mono c" style="font-size:9.5px;color:var(--ink-3);margin:6px 0 0;word-break:break-all">0x058ff920c8…8b29853f</div>
+      <div class="c" style="font-size:10px;color:var(--ink-3);margin-bottom:12px">SN DevNet · ZCDN</div>
+      <div class="qr"><svg viewBox="0 0 29 29"><use href="#qr-art"></use></svg></div>
+      <button class="btn btn-s btn-sm" style="margin-top:14px;width:100%" data-close="" data-toast="地址已复制"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
+    </div>
+  </div>
+  <nav class="tabs">
+    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb on" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
+  </nav>
+</section></div></div>
+      <div class="px-cap"><span class="px-no">08</span><b>账簿 · Starknet 层</b><small>stk-dash · stk</small></div>
+    </div>
+    <div class="px-cell">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="ZChain 转账">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">转账</div><div class="sub-s"><span class="ch ch-play ch-xs">GAME</span></div></header>
   <div class="body">
     <div class="fld"><div class="fl">金额 <span class="aux">可用 12,400.00 · <button data-toast="已填入最大可用">MAX</button></span></div>
-      <div class="iw"><input class="inp-amt" value="500.00"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY<svg class="ic ic-xs"><use href="#i-chev-d"/></svg></span></div>
+      <div class="iw"><input class="inp-amt" value="500.00"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY<svg class="ic ic-xs"><use href="#i-chev-d"></use></svg></span></div>
       <div class="fiat">测试筹码 · 不计价</div>
     </div>
     <div class="fld"><div class="fl">收款 owner</div>
-      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x… / zc1q…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button><button class="ib" data-toast="示意:扫码"><svg class="ic ic-xs"><use href="#i-qr"/></svg></button></span></div>
+      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x… / zc1q…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button><button class="ib" data-toast="示意:扫码"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button></span></div>
     </div>
     <div class="cd">
       <div class="cd-h">贪心选币 · 消耗 2 张 note</div>
@@ -820,18 +1119,18 @@ body{background:var(--pg)}
     <p class="hint-s" style="margin-top:10px">提交后可在「证明 → 回执」跟踪 inclusion 状态</p>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">07</span><b>ZChain 转账</b><small>zc-send</small></div>
+      <div class="px-cap"><span class="px-no">09</span><b>转账 · 贪心选币</b><small>zc-send</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="REAL 提现预览">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">提现(预览)</div><div class="sub-s"><span class="ch ch-real ch-xs">REAL</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="REAL 提现预览">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">提现(预览)</div><div class="sub-s"><span class="ch ch-real ch-xs">REAL</span></div></header>
   <div class="body">
-    <div class="bn bn-real"><svg class="ic"><use href="#i-warn"/></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。以下为<b>模拟预览</b>,不会提交任何链上交易。</p></div></div>
+    <div class="bn bn-real"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。以下为<b>模拟预览</b>,不会提交任何链上交易。</p></div></div>
     <div class="fld"><div class="fl">提现金额 <span class="aux mono">REAL 可用 10,000.00</span></div>
-      <div class="iw"><input class="inp-amt" value="5,000.00"><span class="tsel"><span class="tk tk-real" style="width:18px;height:18px;font-size:9px">N</span>NATIVE<svg class="ic ic-xs"><use href="#i-chev-d"/></svg></span></div>
+      <div class="iw"><input class="inp-amt" value="5,000.00"><span class="tsel"><span class="tk tk-real" style="width:18px;height:18px;font-size:9px">N</span>NATIVE<svg class="ic ic-xs"><use href="#i-chev-d"></use></svg></span></div>
     </div>
     <div class="fld"><div class="fl">收款 owner(L1 地址)</div>
-      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div>
+      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div>
     </div>
     <div class="cd">
       <div class="cd-h">贪心选币 · 3 张 note</div>
@@ -853,21 +1152,21 @@ body{background:var(--pg)}
     </div>
     <div class="cd">
       <div class="cd-h">暂不可提交 · 原因</div>
-      <div class="rsn"><svg class="ic ic-s"><use href="#i-x"/></svg>提现通道未开放(v1 托管模式)</div>
-      <div class="rsn"><svg class="ic ic-s"><use href="#i-x"/></svg>1 张 note 的证明未达 finalized</div>
-      <div class="rsn real"><svg class="ic ic-s"><use href="#i-x"/></svg>托管方签名服务待接入</div>
+      <div class="rsn"><svg class="ic ic-s"><use href="#i-x"></use></svg>提现通道未开放(v1 托管模式)</div>
+      <div class="rsn"><svg class="ic ic-s"><use href="#i-x"></use></svg>1 张 note 的证明未达 finalized</div>
+      <div class="rsn real"><svg class="ic ic-s"><use href="#i-x"></use></svg>托管方签名服务待接入</div>
     </div>
-    <button class="btn btn-p btn-lg" disabled>提交提现</button>
+    <button class="btn btn-p btn-lg" disabled="">提交提现</button>
     <p class="hint-s" style="margin-top:10px">fail-closed:原因消除前,提交入口保持禁用(虚线即「不可用」的专用笔触)</p>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">08</span><b>REAL 提现预览</b><small>zc-withdraw</small></div>
+      <div class="px-cap"><span class="px-no">10</span><b>REAL 提现预览 · fail-closed</b><small>zc-withdraw</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="签名确认">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-x"/></svg></button><div class="sub-t">签名请求</div><div class="sub-s"><span class="ch ch-amb ch-xs mono">1:52</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="签名确认">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-x"></use></svg></button><div class="sub-t">签名请求</div><div class="sub-s"><span class="ch ch-amb ch-xs mono">1:52</span></div></header>
   <div class="body">
-    <div class="dapp"><span class="dapp-fav"><svg class="ic ic-s"><use href="#i-spade"/></svg></span><div class="grow" style="min-width:0"><b>poker.zchain.devnet</b><span>请求签名 · 会话密钥路径</span></div><span class="ch ch-felt ch-xs">已授权 origin</span></div>
+    <div class="dapp"><span class="dapp-fav"><svg class="ic ic-s"><use href="#i-spade"></use></svg></span><div class="grow" style="min-width:0"><b>poker.zchain.devnet</b><span>请求签名 · 会话密钥路径</span></div><span class="ch ch-felt ch-xs">已授权 origin</span></div>
     <div class="cfm">
       <div class="l">开桌买入</div>
       <div class="v neg">-500.00</div>
@@ -888,7 +1187,7 @@ body{background:var(--pg)}
       <div class="lr"><span class="lr-k">request_id</span><span class="lr-v">3f9e77d0…aa31</span></div>
       <div class="lr"><span class="lr-k">证明</span><span class="lr-v dim">结算后可在 Portal 完整验证</span></div>
     </div>
-    <div class="bn bn-ok"><svg class="ic"><use href="#i-key"/></svg><div><b>将使用会话密钥签名</b><p>在单笔限额(≤ 1,000 PLAY)内,无需输入口令。</p></div></div>
+    <div class="bn bn-ok"><svg class="ic"><use href="#i-key"></use></svg><div><b>将使用会话密钥签名</b><p>在单笔限额(≤ 1,000 PLAY)内,无需输入口令。</p></div></div>
     <div class="btn-row">
       <button class="btn btn-d" data-nav="zc-dash">拒绝</button>
       <button class="btn btn-p" data-toast="已用会话密钥签名 · 回执 0xc41d…9b">批准签名</button>
@@ -896,11 +1195,11 @@ body{background:var(--pg)}
     <details style="margin-top:12px"><summary style="font-size:11px;color:var(--ink-3);cursor:pointer;font-family:var(--mono)">原始摘要(SNIP-12)</summary><div class="raw">0x1a2b3c4d5e6f70819a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f7a8b9c0d</div></details>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">09</span><b>签名确认</b><small>zc-confirm</small></div>
+      <div class="px-cap"><span class="px-no">11</span><b>dapp 签名请求</b><small>zc-confirm</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="会话密钥">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">会话密钥</div><div class="sub-s"><span class="ch ch-xs mono">SNIP-12</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="会话密钥">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">会话密钥</div><div class="sub-s"><span class="ch ch-xs mono">SNIP-12</span></div></header>
   <div class="body">
     <div class="seg">
       <button class="on" data-seg="list">现有会话</button>
@@ -909,7 +1208,7 @@ body{background:var(--pg)}
     <div data-pane="list">
       <div class="cd" style="border-color:var(--ink);border-width:1.5px">
         <div class="row" style="gap:9px;margin-bottom:9px">
-          <span class="tic ok" style="width:26px;height:26px"><svg class="ic ic-s"><use href="#i-key"/></svg></span>
+          <span class="tic ok" style="width:26px;height:26px"><svg class="ic ic-s"><use href="#i-key"></use></svg></span>
           <div class="grow" style="min-width:0"><div class="ar-n" style="font-size:12.5px">poker.zchain.devnet</div><div class="ar-s">delegated 0x7ad9…c1e4</div></div>
           <span class="ch ch-felt ch-xs">活跃</span>
         </div>
@@ -924,7 +1223,7 @@ body{background:var(--pg)}
       </div>
       <div class="cd" style="opacity:.6">
         <div class="row" style="gap:9px;margin-bottom:8px">
-          <span class="tic warn" style="width:26px;height:26px"><svg class="ic ic-s"><use href="#i-key"/></svg></span>
+          <span class="tic warn" style="width:26px;height:26px"><svg class="ic ic-s"><use href="#i-key"></use></svg></span>
           <div class="grow" style="min-width:0"><div class="ar-n" style="font-size:12.5px">demo.local</div><div class="ar-s">delegated 0x1e40…88a2</div></div>
           <span class="ch ch-amb ch-xs">已耗尽</span>
         </div>
@@ -936,42 +1235,42 @@ body{background:var(--pg)}
     <div data-pane="new" style="display:none">
       <div class="cd">
         <div class="cd-h">scope 授权</div>
-        <label class="chk" style="margin-bottom:9px" data-check="[data-gated=scope]"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>开桌(OpenTable)</label>
-        <label class="chk" style="margin-bottom:9px" data-check="[data-gated=scope]"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>买入(BuyIn)</label>
-        <label class="chk" data-check="[data-gated=scope]"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>结算(Settlement)</label>
+        <label class="chk" style="margin-bottom:9px" data-check="[data-gated=scope]"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>开桌(OpenTable)</label>
+        <label class="chk" style="margin-bottom:9px" data-check="[data-gated=scope]"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>买入(BuyIn)</label>
+        <label class="chk" data-check="[data-gated=scope]"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>结算(Settlement)</label>
       </div>
       <div class="fld"><div class="fl">单笔限额</div>
         <div class="iw"><input class="mono" value="1,000" style="font-size:15px"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY</span></div></div>
       <div class="fld"><div class="fl">日累计限额</div>
         <div class="iw"><input class="mono" value="5,000" style="font-size:15px"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY</span></div></div>
       <div class="fld"><div class="fl">桌白名单 <span class="aux">不填 = 不限桌(不推荐)</span></div>
-        <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="table_id,逗号分隔"><span class="in-ic"><button class="ib" data-toast="示意:添加桌号"><svg class="ic ic-xs"><use href="#i-plus"/></svg></button></span></div></div>
+        <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="table_id,逗号分隔"><span class="in-ic"><button class="ib" data-toast="示意:添加桌号"><svg class="ic ic-xs"><use href="#i-plus"></use></svg></button></span></div></div>
       <div class="fld"><div class="fl">有效期</div>
-        <button class="selrow" data-toast="示意:有效期下拉"><span>7 天</span><svg class="ic ic-s"><use href="#i-chev-d"/></svg></button></div>
+        <button class="selrow" data-toast="示意:有效期下拉"><span>7 天</span><svg class="ic ic-s"><use href="#i-chev-d"></use></svg></button></div>
       <button class="btn btn-p" data-gated="scope" data-toast="示意:生成摘要并确认登记">生成摘要并确认</button>
       <p class="hint-s" style="text-align:left;margin-top:10px">登记前会展示 SNIP-12 摘要供核对;签名路径不再需要口令,但受上述限额约束。scope 全部取消勾选时,登记入口自动禁用。</p>
     </div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">10</span><b>会话密钥</b><small>zc-sessions</small></div>
+      <div class="px-cap"><span class="px-no">12</span><b>会话密钥 · SNIP-12</b><small>zc-sessions</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="Proof Portal">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">Proof Portal</div><div class="sub-s"><span class="ch ch-felt ch-xs">STARK</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="Proof Portal">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">Proof Portal</div><div class="sub-s"><span class="ch ch-felt ch-xs">STARK</span></div></header>
   <div class="body">
     <div class="fld"><div class="fl">hand binding</div>
-      <div class="iw"><input class="mono" style="font-size:11.5px" value="0xc41d8f22e9a04b79b"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button></span></div></div>
-    <button class="btn btn-p" data-toast="示意:开始验证流程"><svg class="ic ic-s"><use href="#i-shield"/></svg>验证这一手牌</button>
+      <div class="iw"><input class="mono" style="font-size:11.5px" value="0xc41d8f22e9a04b79b"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button></span></div></div>
+    <button class="btn btn-p" data-toast="示意:开始验证流程"><svg class="ic ic-s"><use href="#i-shield"></use></svg>验证这一手牌</button>
     <div class="cd" style="margin-top:14px">
       <div class="cd-h">验证步骤 <span class="more mono">3/4</span></div>
       <div class="steps">
-        <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"/></svg></i><div><b>拉取结算明细</b><span>网关 127.0.0.1:18900 · 200 OK</span></div></div>
-        <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"/></svg></i><div><b>下载 STARK 证明</b><span>payload 84.2 KB · engine stwo</span></div></div>
-        <div class="stp run"><i><svg class="ic ic-xs"><use href="#i-refresh"/></svg></i><div><b>浏览器内完整验证</b><span>stwo wasm 运行中…</span></div></div>
+        <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"></use></svg></i><div><b>拉取结算明细</b><span>网关 127.0.0.1:18900 · 200 OK</span></div></div>
+        <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"></use></svg></i><div><b>下载 STARK 证明</b><span>payload 84.2 KB · engine stwo</span></div></div>
+        <div class="stp run"><i><svg class="ic ic-xs"><use href="#i-refresh"></use></svg></i><div><b>浏览器内完整验证</b><span>stwo wasm 运行中…</span></div></div>
         <div class="stp"><i>4</i><div><b>wallet-core 本地复验</b><span>结算关系与 payout_root 比对</span></div></div>
       </div>
     </div>
-    <div class="bn bn-info"><svg class="ic"><use href="#i-info"/></svg><div><b>性能如实标注</b><p>浏览器内完整验证约 1.7s,超出 500ms 交互预算——进度如实展示,不伪装即时。</p></div></div>
+    <div class="bn bn-info"><svg class="ic"><use href="#i-info"></use></svg><div><b>性能如实标注</b><p>浏览器内完整验证约 1.7s,超出 500ms 交互预算——进度如实展示,不伪装即时。</p></div></div>
     <div class="cd">
       <div class="cd-h">结算摘要</div>
       <div class="lr"><span class="lr-k">底池</span><span class="lr-v">1,240.00 PLAY</span></div>
@@ -980,14 +1279,14 @@ body{background:var(--pg)}
       <div class="lr"><span class="lr-k">payout_root</span><span class="lr-v">0x8c3f…d210</span></div>
     </div>
     <div class="seal seal-ok">已验证</div>
-    <div class="bn bn-ok"><svg class="ic"><use href="#i-shield"/></svg><div><b>验证通过</b><p>该手牌结算与链上 STARK 证明一致。</p></div></div>
+    <div class="bn bn-ok"><svg class="ic"><use href="#i-shield"></use></svg><div><b>验证通过</b><p>该手牌结算与链上 STARK 证明一致。</p></div></div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">11</span><b>Proof Portal</b><small>zc-portal</small></div>
+      <div class="px-cap"><span class="px-no">13</span><b>Proof Portal</b><small>zc-portal</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="交易回执">
-  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">交易回执</div><div class="sub-s"><span class="ch ch-xs mono">signed→seen→included</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="交易回执">
+  <header class="sub"><button class="ib bare" data-nav="zc-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">交易回执</div><div class="sub-s"><span class="ch ch-xs mono">signed→seen→included</span></div></header>
   <div class="body">
     <div class="seg">
       <button class="on" data-seg="all">全部</button>
@@ -996,39 +1295,39 @@ body{background:var(--pg)}
     </div>
     <div data-pane="all">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"/></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"/></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-play ch-xs">seen</span></div></div></div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">转账 · 收款人 0x8f…d7</div><div class="ar-s">0x9a02…ef · 1 小时前</div></div><div class="ar-r"><div class="ar-amt neg">-200.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
-        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-warn"/></svg></span><div class="ar-m"><div class="ar-n">结算 · 9♣ 桌 #96</div><div class="ar-s">0x51b7…c8 · 超出 deadline</div></div><div class="ar-r"><div class="ar-amt pos">+88.00</div><div class="ar-st"><button class="btn btn-g btn-sm" disabled title="0.4 仅展示协议状态,ForceInclude 提交路径未实现">ForceInclude 未开放</button></div></div></div>
+        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"></use></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-play ch-xs">seen</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">转账 · 收款人 0x8f…d7</div><div class="ar-s">0x9a02…ef · 1 小时前</div></div><div class="ar-r"><div class="ar-amt neg">-200.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-warn"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 9♣ 桌 #96</div><div class="ar-s">0x51b7…c8 · 超出 deadline</div></div><div class="ar-r"><div class="ar-amt pos">+88.00</div><div class="ar-st"><button class="btn btn-g btn-sm" disabled="" title="0.4 仅展示协议状态,ForceInclude 提交路径未实现">ForceInclude 未开放</button></div></div></div>
       </div>
       <p class="hint-s" style="text-align:left;margin-top:2px">回执状态机 signed → seen → included 单向推进,与凭证阶梯 pending → proven → finalized 是两套独立状态,不得混用同一种笔触。超出 deadline(10s)时提示存在 ForceInclude 协议路径,但当前版本<b style="color:var(--bad)">只展示状态、不实现提交</b>——按钮保持禁用;evidence 按网关返回如实展示,未验签就写未验签。</p>
     </div>
     <div data-pane="pend" style="display:none">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"/></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
+        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"></use></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
       </div>
     </div>
     <div data-pane="done" style="display:none">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">转账 · 收款人 0x8f…d7</div><div class="ar-s">0x9a02…ef · 1 小时前</div></div><div class="ar-r"><div class="ar-amt neg">-200.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">转账 · 收款人 0x8f…d7</div><div class="ar-s">0x9a02…ef · 1 小时前</div></div><div class="ar-r"><div class="ar-amt neg">-200.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
       </div>
     </div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">12</span><b>交易回执</b><small>zc-receipts</small></div>
+      <div class="px-cap"><span class="px-no">14</span><b>回执状态机</b><small>zc-receipts</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="EVM 发送">
-  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">发送</div><div class="sub-s"><span class="ch ch-xs">Ethereum</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="EVM 发送">
+  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">发送</div><div class="sub-s"><span class="ch ch-xs">Ethereum</span></div></header>
   <div class="body">
     <div class="fld"><div class="fl">金额 <span class="aux mono">可用 2.4183 · <button data-toast="已填入最大可用(预留 gas)">MAX</button></span></div>
-      <div class="iw"><input class="inp-amt" value="0.25"><span class="tsel"><span class="tk" style="width:18px;height:18px;font-size:10px">Ξ</span>ETH<svg class="ic ic-xs"><use href="#i-chev-d"/></svg></span></div>
+      <div class="iw"><input class="inp-amt" value="0.25"><span class="tsel"><span class="tk" style="width:18px;height:18px;font-size:10px">Ξ</span>ETH<svg class="ic ic-xs"><use href="#i-chev-d"></use></svg></span></div>
       <div class="fiat">≈ $840.12 · gas price 12 gwei</div>
     </div>
     <div class="fld"><div class="fl">收款地址</div>
-      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button><button class="ib" data-toast="示意:扫码"><svg class="ic ic-xs"><use href="#i-qr"/></svg></button></span></div>
+      <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x…"><span class="in-ic"><button class="ib" data-toast="已粘贴"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button><button class="ib" data-toast="示意:扫码"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button></span></div>
     </div>
     <div class="cd">
       <div class="cd-h">交易预览 <span class="more mono">eth_sendTransaction</span></div>
@@ -1039,15 +1338,15 @@ body{background:var(--pg)}
       <div class="lr"><span class="lr-k">预估手续费</span><span class="lr-v">0.000252 ETH ≈ $0.85</span></div>
       <div class="lr"><span class="lr-k">chainId</span><span class="lr-v">1 <span class="ch ch-felt ch-xs">校验通过</span></span></div>
     </div>
-    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"/></svg><div><b>发送后不可撤销</b><p>请核对地址与金额;chainId 不符时交易将被拒绝签名。</p></div></div>
+    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"></use></svg><div><b>发送后不可撤销</b><p>请核对地址与金额;chainId 不符时交易将被拒绝签名。</p></div></div>
     <button class="btn btn-p btn-lg" data-toast="已签名并广播 · 0x8f3a…c2">确认签名并发送</button>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">13</span><b>EVM 发送</b><small>evm-send</small></div>
+      <div class="px-cap"><span class="px-no">15</span><b>发送 · 交易预览</b><small>evm-send</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="EVM 交易记录">
-  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">交易记录</div><div class="sub-s"><span class="ch ch-xs">Ethereum</span></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="EVM 交易记录">
+  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">交易记录</div><div class="sub-s"><span class="ch ch-xs">Ethereum</span></div></header>
   <div class="body">
     <div class="row" style="margin-bottom:12px">
       <div class="grow"><b style="font-size:12px;font-weight:600">合并 Explorer 数据</b><div class="ar-s">本地账本 + Etherscan 兼容 txlist</div></div>
@@ -1060,111 +1359,69 @@ body{background:var(--pg)}
     </div>
     <div data-pane="all">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"/></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前 · fee $0.85</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"/></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.10 ETH</div><div class="ar-s">0x22af…71 · 30 秒前</div></div><div class="ar-r"><div class="ar-amt neg">-0.1000</div><div class="ar-st"><span class="ch ch-amb ch-xs">pending</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"/></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-file"/></svg></span><div class="ar-m"><div class="ar-n">approve · USDC</div><div class="ar-s">0xd901…34 · 3 天前</div></div><div class="ar-r"><div class="ar-amt dim" style="font-size:11px">合约</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-file"/></svg></span><div class="ar-m"><div class="ar-n">swap · 1inch</div><div class="ar-s">0x9a02…ef · 5 天前</div></div><div class="ar-r"><div class="ar-amt" style="color:var(--bad)">Failed</div><div class="ar-st"><span class="ch ch-bad ch-xs">失败</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前 · fee $0.85</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.10 ETH</div><div class="ar-s">0x22af…71 · 30 秒前</div></div><div class="ar-r"><div class="ar-amt neg">-0.1000</div><div class="ar-st"><span class="ch ch-amb ch-xs">pending</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"></use></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-file"></use></svg></span><div class="ar-m"><div class="ar-n">approve · USDC</div><div class="ar-s">0xd901…34 · 3 天前</div></div><div class="ar-r"><div class="ar-amt dim" style="font-size:11px">合约</div><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-file"></use></svg></span><div class="ar-m"><div class="ar-n">swap · 1inch</div><div class="ar-s">0x9a02…ef · 5 天前</div></div><div class="ar-r"><div class="ar-amt" style="color:var(--bad)">Failed</div><div class="ar-st"><span class="ch ch-bad ch-xs">失败</span></div></div></div>
       </div>
       <p class="hint-s" style="text-align:left;margin-top:2px">来源用 chip 区分(本地 / explorer);两者冲突时以链上回执为准,并把差异原样列在详情里,不做静默合并。</p>
     </div>
     <div data-pane="tx" style="display:none">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"/></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"/></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-send"></use></svg></span><div class="ar-m"><div class="ar-n">发送 · 0.25 ETH</div><div class="ar-s">0x8f3a…c2 · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-0.2500</div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-recv"></use></svg></span><div class="ar-m"><div class="ar-n">接收 · 1.20 ETH</div><div class="ar-s">0x51b7…c8 · 昨天</div></div><div class="ar-r"><div class="ar-amt pos">+1.2000</div></div></div>
       </div>
     </div>
     <div data-pane="c" style="display:none">
       <div class="cd" style="padding:2px 14px">
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-file"/></svg></span><div class="ar-m"><div class="ar-n">approve · USDC</div><div class="ar-s">0xd901…34 · 3 天前</div></div><div class="ar-r"><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
-        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-file"/></svg></span><div class="ar-m"><div class="ar-n">swap · 1inch</div><div class="ar-s">0x9a02…ef · 5 天前</div></div><div class="ar-r"><div class="ar-st"><span class="ch ch-bad ch-xs">失败</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-file"></use></svg></span><div class="ar-m"><div class="ar-n">approve · USDC</div><div class="ar-s">0xd901…34 · 3 天前</div></div><div class="ar-r"><div class="ar-st"><span class="ch ch-felt ch-xs">成功</span></div></div></div>
+        <div class="tx"><span class="tic bad"><svg class="ic ic-s"><use href="#i-file"></use></svg></span><div class="ar-m"><div class="ar-n">swap · 1inch</div><div class="ar-s">0x9a02…ef · 5 天前</div></div><div class="ar-r"><div class="ar-st"><span class="ch ch-bad ch-xs">失败</span></div></div></div>
       </div>
     </div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">14</span><b>EVM 交易记录</b><small>evm-history</small></div>
+      <div class="px-cap"><span class="px-no">16</span><b>交易记录 · 双边对账</b><small>evm-history</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="EVM 账户管理">
-  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">账户管理</div><div class="sub-s"></div></header>
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="EVM 账户管理">
+  <header class="sub"><button class="ib bare" data-nav="evm-dash"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">账户管理</div><div class="sub-s"></div></header>
   <div class="body">
     <div class="cd">
-      <div class="row" style="gap:12px"><span class="av" style="width:38px;height:38px;font-size:15px">B</span><div class="grow" style="min-width:0"><div class="ar-n" style="font-size:13px">账户 2 <button class="ib bare" style="width:18px;height:18px" data-toast="示意:重命名"><svg class="ic ic-xs"><use href="#i-pen"/></svg></button></div><div class="ar-s">0x59195049a3…29f97527</div></div><span class="ch ch-felt ch-xs">已解锁</span></div>
+      <div class="row" style="gap:12px"><span class="av" style="width:38px;height:38px;font-size:15px">B</span><div class="grow" style="min-width:0"><div class="ar-n" style="font-size:13px">账户 2 <button class="ib bare" style="width:18px;height:18px" data-toast="示意:重命名"><svg class="ic ic-xs"><use href="#i-pen"></use></svg></button></div><div class="ar-s">0x59195049a3…29f97527</div></div><span class="ch ch-felt ch-xs">已解锁</span></div>
     </div>
     <div class="sec-t">安全</div>
     <div class="cd" style="padding:2px 14px">
-      <button class="mi"><span class="mi-ic" style="color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)"><svg class="ic ic-s"><use href="#i-eye"/></svg></span><span class="grow"><b>导出私钥</b><span>口令确认后展开 · 设计稿:30 秒自动收起</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"/></svg></span><span class="grow"><b>修改口令</b><span>三层 keystore 各自重派生(两套 KDF)</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi" data-nav="lock"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-lock"/></svg></span><span class="grow"><b>锁定</b><span>立即清除内存中的会话</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi"><span class="mi-ic" style="color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)"><svg class="ic ic-s"><use href="#i-eye"></use></svg></span><span class="grow"><b>导出私钥</b><span>口令确认后展开 · 设计稿:30 秒自动收起</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"></use></svg></span><span class="grow"><b>修改口令</b><span>三层 keystore 各自重派生(两套 KDF)</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi" data-nav="lock"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-lock"></use></svg></span><span class="grow"><b>锁定</b><span>立即清除内存中的会话</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
     <div class="sec-t">网络</div>
     <div class="cd" style="padding:2px 14px">
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-swap"/></svg></span><span class="grow"><b>RPC 覆盖</b><span>Ethereum · 自定义 https://…</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ext"/></svg></span><span class="grow"><b>Explorer API 覆盖</b><span>Etherscan 兼容 · 已配置</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-swap"></use></svg></span><span class="grow"><b>RPC 覆盖</b><span>Ethereum · 自定义 https://…</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ext"></use></svg></span><span class="grow"><b>Explorer API 覆盖</b><span>Etherscan 兼容 · 已配置</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
     <div class="sec-t danger">危险区</div>
     <div class="cd" style="padding:2px 14px;border-color:var(--bad-rl)">
-      <button class="mi danger" data-open="mdl-del"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-trash"/></svg></span><span class="grow"><b>删除账户</b><span>需输入口令确认;导出私钥前请先备份</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi danger" data-open="n20_mdl-del"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-trash"></use></svg></span><span class="grow"><b>删除账户</b><span>需输入口令确认;导出私钥前请先备份</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
     <div class="foot">本机 keystore(本层):PBKDF2-SHA256 600k + AES-256-GCM · 私钥只在后台内存会话,落盘仅密文 · 无云端副本</div>
   </div>
-  <div class="mdl-bg" id="mdl-del">
+  <div class="mdl-bg" id="n20_mdl-del">
     <div class="mdl">
       <h3>删除账户 2?</h3>
       <p>该账户的私钥将从本机 keystore 永久移除。若没有备份,资产无法找回。此操作与其他两层无关。</p>
-      <div class="btn-row"><button class="btn btn-g" data-close>取消</button><button class="btn btn-d" data-close data-toast="示意:需口令校验后执行">确认删除</button></div>
+      <div class="btn-row"><button class="btn btn-g" data-close="">取消</button><button class="btn btn-d" data-close="" data-toast="示意:需口令校验后执行">确认删除</button></div>
     </div>
   </div>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">15</span><b>EVM 账户管理</b><small>evm-manage</small></div>
+      <div class="px-cap"><span class="px-no">17</span><b>账户管理 · 危险区</b><small>evm-manage</small></div>
     </div>
     <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="设置">
-  <header class="sub"><button class="ib bare" data-nav="home"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">设置</div><div class="sub-s"></div></header>
-  <div class="body">
-    <div class="sec-t">通用</div>
-    <div class="cd" style="padding:2px 14px">
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-clock"/></svg></span><span class="grow"><b>自动锁定</b><span>无操作 15 分钟,或后台页面被浏览器回收(即 fail-closed)</span></span><span class="ch ch-xs mono">15 min</span></button>
-      <div class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-eye"/></svg></span><span class="grow"><b>显示测试网</b><span>关闭后隐藏 devnet 资产</span></span><span class="sw2 on" role="switch" aria-checked="true"></span></div>
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-wallet"/></svg></span><span class="grow"><b>货币计价</b><span>USD(仅展示,非托管承诺)</span></span><span class="ch ch-xs mono">USD</span></button>
-      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-book"/></svg></span><span class="grow"><b>外观底面</b><span>纸白账簿 / 夜场账簿</span></span><span class="ch ch-xs mono">纸白</span></button>
-    </div>
-    <div class="sec-t">安全与备份</div>
-    <div class="cd" style="padding:2px 14px">
-      <button class="mi" data-toast="示意:加密导出 .zcbk"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-dl"/></svg></span><span class="grow"><b>备份导出(.zcbk)</b><span>仅 ZChain 层 REAL/PLAY 双库 · 备份口令独立</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi" data-nav="import"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ul"/></svg></span><span class="grow"><b>从备份恢复</b><span>Argon2id 本地解密</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi" data-nav="zc-sessions"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"/></svg></span><span class="grow"><b>授权簿 / 会话密钥</b><span>按 origin 撤销 dapp 授权</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi" data-open="mdl-cap"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-file"/></svg></span><span class="grow"><b>能力矩阵</b><span>各层能力与红线的如实说明</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-    </div>
-    <div class="sec-t">关于</div>
-    <div class="cd" style="padding:2px 14px">
-      <div class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-info"/></svg></span><span class="grow"><b>版本</b><span>MV3 · DevNet 形态 · 本设计稿 v0.2 对齐此版本</span></span><span class="ch ch-xs mono">0.6.1</span></div>
-      <button class="mi" data-toast="示意:打开文档站"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ext"/></svg></span><span class="grow"><b>文档与源码</b><span>docs / website</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-    </div>
-    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"/></svg><div><b>未通过第三方审计</b><p>「可验证」指密码学与结算证明可被独立复核,不等于已审计;本界面不出现任何审计徽章。</p></div></div>
-    <div class="foot">ZChain Wallet · 桌上飞快,结算可证<br>Fast at the table. Verifiable at settlement.<br>Play / DevNet / v1.3</div>
-  </div>
-  <div class="mdl-bg" id="mdl-cap">
-    <div class="mdl">
-      <h3>能力矩阵</h3>
-      <p style="margin-bottom:6px">逐层能力与红线,按 extension 的交付面如实列举;不为好看放宽。</p>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-spade"/></svg><div><b class="mono">ZChain</b> · GAME 域可签可转;REAL 仅展示,提现预览 canSubmit 恒 false</div></div>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-ether"/></svg><div><b class="mono">EVM</b> · 转账与合约写入可签名广播(EIP-155 + chainId 校验);不签 note spend</div></div>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-layers"/></svg><div><b class="mono">Starknet</b> · invoke v1 + devnet 水龙头;SNIP-12 授权面已备,链上 admission 未开放</div></div>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-swap"/></svg><div><b class="mono">网络</b> · mainnet 刻意不注册 → NetworkUnsupported;devnet/testnet 才可选</div></div>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-key"/></svg><div><b class="mono">边界</b> · 盲签拒绝;私钥 / 助记词 / nullifier 不出边界;网关水位原样展示、不推进</div></div>
-      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-lock"/></svg><div><b class="mono">会话</b> · 三层共用口令、会话彼此独立;后台被回收即锁定(fail-closed)</div></div>
-      <div class="btn-row" style="margin-top:14px"><button class="btn btn-p" data-close>知道了</button></div>
-    </div>
-  </div>
-</section></div></div>
-      <div class="px-cap"><span class="px-no">16</span><b>设置</b><small>settings</small></div>
-    </div>
-    <div class="px-cell">
-      <div class="frame"><div class="frame-inner"><section class="scr" aria-label="证明中心">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="证明中心">
   <header class="dh">
-    <div class="dh-top"><span class="dh-kind">Proofs</span><span class="net"><span class="dot"></span>engine stwo</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"/></svg></button></span></div>
-    <div class="dh-main"><span class="seal seal-ok">独立可验</span><div class="grow" style="min-width:0"><div class="acct-n">本机凭证簿</div><div class="acct-a">最近 24 小时 · 5 份结算证明</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg></button></span></div>
+    <div class="dh-top"><span class="dh-kind">Proofs</span><span class="net"><span class="dot"></span>engine stwo</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="seal seal-ok">独立可验</span><div class="grow" style="min-width:0"><div class="acct-n">本机凭证簿</div><div class="acct-a">最近 24 小时 · 5 份结算证明</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
   </header>
   <div class="body">
     <div class="cd">
@@ -1180,8 +1437,8 @@ body{background:var(--pg)}
     </div>
     <div class="sec-t">待复验</div>
     <div class="cd" style="padding:2px 14px">
-      <button class="mi" data-nav="zc-portal"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-shield"/></svg></span><span class="grow"><b>8♠ 桌 #128 · 结算</b><span>0x3f9e…aa · seen 未 included</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-      <button class="mi" data-nav="zc-portal"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-bolt"/></svg></span><span class="grow"><b>9♣ 桌 #96 · 超期回执</b><span>0x51b7…c8 · 可 ForceInclude</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi" data-nav="zc-portal"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-shield"></use></svg></span><span class="grow"><b>8♠ 桌 #128 · 结算</b><span>0x3f9e…aa · seen 未 included</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi" data-nav="zc-portal"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-bolt"></use></svg></span><span class="grow"><b>9♣ 桌 #96 · 超期回执</b><span>0x51b7…c8 · 可 ForceInclude</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
     <div class="sec-t">已复验</div>
     <div class="cd" style="padding:2px 14px">
@@ -1189,16 +1446,58 @@ body{background:var(--pg)}
       <div class="lr"><span class="lr-k">校验耗时</span><span class="lr-v dim">1.72s(浏览器内 stwo)</span></div>
       <div class="lr"><span class="lr-k">payout_root</span><span class="lr-v">0x8c3f…d210</span></div>
     </div>
-    <div class="bn bn-info"><svg class="ic"><use href="#i-info"/></svg><div><b>验证在本地完成</b><p>证明文件与结算明细由网关拉取,复验在 wallet-core(wasm)本地执行;不依赖服务端「已验证」结论。</p></div></div>
+    <div class="bn bn-info"><svg class="ic"><use href="#i-info"></use></svg><div><b>验证在本地完成</b><p>证明文件与结算明细由网关拉取,复验在 wallet-core(wasm)本地执行;不依赖服务端「已验证」结论。</p></div></div>
     <p class="hint-s" style="text-align:left">阶梯是<b style="color:var(--ink)">凭证</b>状态(锚定在 note 上);回执的 signed → seen → included 是<b style="color:var(--ink)">投递</b>状态。两者在 DS-07 里刻意用了不同笔触。</p>
   </div>
   <nav class="tabs">
-    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"/></svg>总账</button>
-    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"/></svg>账簿</button>
-    <button class="tb on" data-nav="proofs"><svg class="ic"><use href="#i-shield"/></svg>证明</button>
+    <button class="tb" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb on" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
   </nav>
 </section></div></div>
-      <div class="px-cap"><span class="px-no">17</span><b>证明中心</b><small>proofs</small></div>
+      <div class="px-cap"><span class="px-no">18</span><b>凭证簿 · v2 新增屏</b><small>proofs</small></div>
+    </div>
+    <div class="px-cell">
+      <div class="frame"><div class="frame-in"><section class="scr" aria-label="设置">
+  <header class="sub"><button class="ib bare" data-nav="home"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">设置</div><div class="sub-s"></div></header>
+  <div class="body">
+    <div class="sec-t">通用</div>
+    <div class="cd" style="padding:2px 14px">
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-clock"></use></svg></span><span class="grow"><b>自动锁定</b><span>无操作 15 分钟,或后台页面被浏览器回收(即 fail-closed)</span></span><span class="ch ch-xs mono">15 min</span></button>
+      <div class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-eye"></use></svg></span><span class="grow"><b>显示测试网</b><span>关闭后隐藏 devnet 资产</span></span><span class="sw2 on" role="switch" aria-checked="true"></span></div>
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-wallet"></use></svg></span><span class="grow"><b>货币计价</b><span>USD(仅展示,非托管承诺)</span></span><span class="ch ch-xs mono">USD</span></button>
+      <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-book"></use></svg></span><span class="grow"><b>外观底面</b><span>纸白账簿 / 夜场账簿</span></span><span class="ch ch-xs mono">纸白</span></button>
+    </div>
+    <div class="sec-t">安全与备份</div>
+    <div class="cd" style="padding:2px 14px">
+      <button class="mi" data-toast="示意:加密导出 .zcbk"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-dl"></use></svg></span><span class="grow"><b>备份导出(.zcbk)</b><span>仅 ZChain 层 REAL/PLAY 双库 · 备份口令独立</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi" data-nav="import"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ul"></use></svg></span><span class="grow"><b>从备份恢复</b><span>Argon2id 本地解密</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi" data-nav="zc-sessions"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"></use></svg></span><span class="grow"><b>授权簿 / 会话密钥</b><span>按 origin 撤销 dapp 授权</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+      <button class="mi" data-open="n20_mdl-cap"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-file"></use></svg></span><span class="grow"><b>能力矩阵</b><span>各层能力与红线的如实说明</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="sec-t">关于</div>
+    <div class="cd" style="padding:2px 14px">
+      <div class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-info"></use></svg></span><span class="grow"><b>版本</b><span>MV3 · DevNet 形态 · 本设计稿 v0.2 对齐此版本</span></span><span class="ch ch-xs mono">0.6.1</span></div>
+      <button class="mi" data-toast="示意:打开文档站"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-ext"></use></svg></span><span class="grow"><b>文档与源码</b><span>docs / website</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+    </div>
+    <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"></use></svg><div><b>未通过第三方审计</b><p>「可验证」指密码学与结算证明可被独立复核,不等于已审计;本界面不出现任何审计徽章。</p></div></div>
+    <div class="foot">ZChain Wallet · 桌上飞快,结算可证<br>Fast at the table. Verifiable at settlement.<br>Play / DevNet / v1.3</div>
+  </div>
+  <div class="mdl-bg" id="n20_mdl-cap">
+    <div class="mdl">
+      <h3>能力矩阵</h3>
+      <p style="margin-bottom:6px">逐层能力与红线,按 extension 的交付面如实列举;不为好看放宽。</p>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-spade"></use></svg><div><b class="mono">ZChain</b> · GAME 域可签可转;REAL 仅展示,提现预览 canSubmit 恒 false</div></div>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-ether"></use></svg><div><b class="mono">EVM</b> · 转账与合约写入可签名广播(EIP-155 + chainId 校验);不签 note spend</div></div>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-layers"></use></svg><div><b class="mono">Starknet</b> · invoke v1 + devnet 水龙头;SNIP-12 授权面已备,链上 admission 未开放</div></div>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-swap"></use></svg><div><b class="mono">网络</b> · mainnet 刻意不注册 → NetworkUnsupported;devnet/testnet 才可选</div></div>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-key"></use></svg><div><b class="mono">边界</b> · 盲签拒绝;私钥 / 助记词 / nullifier 不出边界;网关水位原样展示、不推进</div></div>
+      <div class="rsn"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-lock"></use></svg><div><b class="mono">会话</b> · 三层共用口令、会话彼此独立;后台被回收即锁定(fail-closed)</div></div>
+      <div class="btn-row" style="margin-top:14px"><button class="btn btn-p" data-close="">知道了</button></div>
+    </div>
+  </div>
+</section></div></div>
+      <div class="px-cap"><span class="px-no">19</span><b>设置 · 能力矩阵</b><small>settings</small></div>
     </div>
   </div>
   <div class="px-sec">Design System</div>
@@ -1207,7 +1506,7 @@ body{background:var(--pg)}
     <p class="ds-desc">方向 A(毡布绿)把钱包做成<b>牌桌</b>:夜色、毡布、发光翡翠、圆角胶囊,情绪是「上桌」。方向 B 把钱包做成<b>账簿</b>:纸白、细线账格、方形印章、等宽数字右对齐,情绪是「对账」。产品的真实差异点不是牌桌——牌桌是竞品都有的——而是<b>结算可证</b>。所以方向 B 把 finality 状态从二级页面提成一等公民组件(凭证条),出现在每一个涉及资产变动的位置。</p>
     <div class="panel" style="display:block">
       <table class="spec">
-        <tr><th>维度</th><th>方向 A · 毡布绿 v0.1</th><th>方向 B · 账簿 v0.2</th><th>为什么换</th></tr>
+        <tbody><tr><th>维度</th><th>方向 A · 毡布绿 v0.1</th><th>方向 B · 账簿 v0.2</th><th>为什么换</th></tr>
         <tr><td class="m">底色</td><td>青黑毡布 #070d0a</td><td>纸白 #f5f2ea(可切夜场)</td><td>账簿语义;强光/桌面环境下可读</td></tr>
         <tr><td class="m">容器</td><td>填充卡 + 渐变 + 8–20px 圆角</td><td>细线账格 + 3px 圆角 + 1px hairline</td><td>减少「卡片套卡片」的层级噪声</td></tr>
         <tr><td class="m">标签</td><td>胶囊 pill</td><td>方形 chip + 等宽大字距</td><td>印刷票据上的分类戳,不是营销徽章</td></tr>
@@ -1216,7 +1515,7 @@ body{background:var(--pg)}
         <tr><td class="m">finality</td><td>提现页一个 dot 行 + 回执列表 chip</td><td>凭证条组件,凡资产变动处必现</td><td>「可证」是这个产品唯一不可复制的资产</td></tr>
         <tr><td class="m">状态强调</td><td>颜色 + 发光感</td><td>印章(旋转 −4°)+ 反色块</td><td>品牌纪律:不用描边字/发光字</td></tr>
         <tr><td class="m">数字</td><td>等宽,左对齐为主</td><td>等宽 + tabular-nums,右对齐成列</td><td>账簿的对齐纪律:小数点必须能竖着读</td></tr>
-      </table>
+      </tbody></table>
     </div>
   </section></div>
   <div class="px-ds"><section class="ds-sec">
@@ -1243,7 +1542,7 @@ body{background:var(--pg)}
       <div class="blk" style="flex:1;min-width:420px">
         <div style="font-family:var(--mono);font-size:10px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);margin-bottom:10px">实测 WCAG 对比度(本次 node 计算)</div>
         <table class="spec">
-          <tr><th>前景 / 背景</th><th>纸白(pg / cd)</th><th>夜场(pg / cd)</th><th>门槛</th></tr>
+          <tbody><tr><th>前景 / 背景</th><th>纸白(pg / cd)</th><th>夜场(pg / cd)</th><th>门槛</th></tr>
           <tr><td class="m">ink / 底</td><td>16.61 / 18.27</td><td>18.00 / 16.08</td><td class="m">AAA</td></tr>
           <tr><td class="m">ink-2 / 底</td><td>8.16 / 8.98</td><td>10.47 / 9.35</td><td class="m">AAA</td></tr>
           <tr><td class="m">ink-3 / 底</td><td>5.45 / 5.99</td><td>6.41 / 5.73</td><td class="m">AA</td></tr>
@@ -1257,7 +1556,7 @@ body{background:var(--pg)}
           <tr><td class="m">反色块字 / ink 底</td><td>16.61</td><td>18.00</td><td class="m">AAA</td></tr>
           <tr><td class="m">代码块字 / code 底</td><td>15.48</td><td>17.44</td><td class="m">AAA</td></tr>
           <tr><td class="m">chip 字 / 自身 alpha 底纹(最紧一对)</td><td>5.11 ~ 7.09</td><td>6.94 ~ 9.71</td><td class="m">AA</td></tr>
-        </table>
+        </tbody></table>
         <p class="ds-desc" style="margin:10px 0 0;font-size:11px">全部「正文 / 说明」组合 ≥ 4.5:1。最紧的一对是 <span class="mono">ink-3 / pg-2</span>:纸白底最初取 <span class="mono">#6b675c</span> 时为 4.49,已按自检结果压深到 <span class="mono">#666256</span>(4.85)。剩余低于 4.5:1 的只有禁用按钮与占位符,属 WCAG 1.4.3 对非活动控件的豁免,不构成违规。</p>
         <p class="ds-desc" style="margin:6px 0 0;font-size:11px">自检口径:两套底色 × 19 屏 × 账簿屏的三个链数据面,共 2,349 个节点逐元素取实际渲染色(透明度按 alpha 合成后再算比值),<b>纸白底 0 项、夜场底 0 项</b>低于门槛。同一轮还查了横向溢出(0)与「中文落在 break-all 容器里」(0)。</p>
       </div>
@@ -1316,7 +1615,7 @@ body{background:var(--pg)}
           <span style="width:44px;height:44px;border:1px solid var(--ink);border-radius:3px"></span>
           <span style="width:44px;height:44px;border:1px solid var(--ink);border-radius:6px"></span>
           <span style="width:44px;height:44px;border:1px solid var(--ink)"></span>
-          <span class="logo-m" style="width:44px;height:44px"><svg viewBox="0 0 64 64" style="color:var(--ink)" aria-label="ZChain 单色 logo"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"/><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"/></svg></span>
+          <span class="logo-m" style="width:44px;height:44px"><svg viewBox="0 0 64 64" style="color:var(--ink)" aria-label="ZChain 单色 logo"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"></rect><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"></rect></svg></span>
         </div>
       </div>
     </div>
@@ -1332,17 +1631,17 @@ body{background:var(--pg)}
         <button class="btn btn-o">撤销授权</button>
       </div><div class="cap">primary / secondary / danger / outline</div></div>
       <div class="blk" style="width:200px"><div class="row" style="flex-direction:column;gap:9px;align-items:stretch">
-        <button class="btn btn-lg btn-p"><svg class="ic ic-s"><use href="#i-shield"/></svg>验证这一手牌</button>
+        <button class="btn btn-lg btn-p"><svg class="ic ic-s"><use href="#i-shield"></use></svg>验证这一手牌</button>
         <button class="btn btn-sm btn-s" style="width:auto">管理</button>
-        <button class="btn" disabled>提交提现</button>
+        <button class="btn" disabled="">提交提现</button>
         <div class="btn-row"><button class="btn btn-s">拒绝</button><button class="btn btn-p">批准签名</button></div>
       </div><div class="cap">lg / sm / disabled / 成对</div></div>
       <div class="blk"><div class="row" style="gap:8px">
-        <button class="ib"><svg class="ic ic-s"><use href="#i-copy"/></svg></button>
-        <button class="ib"><svg class="ic ic-s"><use href="#i-lock"/></svg></button>
-        <button class="ib"><svg class="ic ic-s"><use href="#i-gear"/></svg></button>
-        <button class="ib"><svg class="ic ic-s"><use href="#i-qr"/></svg></button>
-        <button class="ib"><svg class="ic ic-s"><use href="#i-ext"/></svg></button>
+        <button class="ib"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button>
+        <button class="ib"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button>
+        <button class="ib"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button>
+        <button class="ib"><svg class="ic ic-s"><use href="#i-qr"></use></svg></button>
+        <button class="ib"><svg class="ic ic-s"><use href="#i-ext"></use></svg></button>
       </div><div class="cap">icon button 30×30</div></div>
     </div>
   </section></div>
@@ -1352,28 +1651,28 @@ body{background:var(--pg)}
     <div class="panel">
       <div class="blk" style="width:230px">
         <div class="fld"><div class="fl">金额 <span class="aux">可用 12,400.00 · <button>MAX</button></span></div>
-          <div class="iw"><input class="inp-amt" value="500.00"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY<svg class="ic ic-xs"><use href="#i-chev-d"/></svg></span></div>
+          <div class="iw"><input class="inp-amt" value="500.00"><span class="tsel"><span class="tk tk-play" style="width:18px;height:18px;font-size:9px">P</span>PLAY<svg class="ic ic-xs"><use href="#i-chev-d"></use></svg></span></div>
           <div class="fiat">测试筹码 · 不计价</div>
         </div>
         <div class="cap">金额输入 + 代币选择</div>
       </div>
       <div class="blk" style="width:230px">
         <div class="fld"><div class="fl">收款 owner</div>
-          <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x… / zc1q…"><span class="in-ic"><button class="ib"><svg class="ic ic-xs"><use href="#i-copy"/></svg></button><button class="ib"><svg class="ic ic-xs"><use href="#i-qr"/></svg></button></span></div>
+          <div class="iw"><input class="mono" style="font-size:11.5px" placeholder="0x… / zc1q…"><span class="in-ic"><button class="ib"><svg class="ic ic-xs"><use href="#i-copy"></use></svg></button><button class="ib"><svg class="ic ic-xs"><use href="#i-qr"></use></svg></button></span></div>
         </div>
         <div class="fld"><div class="fl">有效期</div>
-          <button class="selrow"><span>7 天</span><svg class="ic ic-s"><use href="#i-chev-d"/></svg></button>
+          <button class="selrow"><span>7 天</span><svg class="ic ic-s"><use href="#i-chev-d"></use></svg></button>
         </div>
         <div class="fld" style="margin-bottom:0"><div class="fl">目标层</div>
-          <div class="iw"><input readonly value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"/></svg></span></div>
+          <div class="iw"><input readonly="" value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"></use></svg></span></div>
         </div>
         <div class="cap">下拉选择:独立行用 .selrow,窄字段用只读输入</div>
       </div>
       <div class="blk" style="width:210px">
         <div class="row" style="margin-bottom:11px"><span class="grow" style="font-size:12px">显示测试网</span><span class="sw2 on"></span></div>
         <div class="row" style="margin-bottom:11px"><span class="grow" style="font-size:12px">合并 Explorer 数据</span><span class="sw2"></span></div>
-        <label class="chk" style="margin-bottom:9px"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>开桌(OpenTable)</label>
-        <label class="chk"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"/></svg></span>结算(Settlement)</label>
+        <label class="chk" style="margin-bottom:9px"><span class="cb on"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>开桌(OpenTable)</label>
+        <label class="chk"><span class="cb"><svg class="ic ic-xs"><use href="#i-check"></use></svg></span>结算(Settlement)</label>
         <div class="cap">方形开关 / 反色复选</div>
       </div>
       <div class="blk" style="width:230px">
@@ -1398,13 +1697,13 @@ body{background:var(--pg)}
         <span class="ch ch-real">REAL</span><span class="ch ch-play">PLAY / GAME</span><span class="ch ch-felt">已解锁</span><span class="ch ch-amb">已锁定</span><span class="ch ch-bad">失败</span><span class="ch">只读</span><span class="ch ch-solid">DevNet</span>
       </div><div class="cap">资产域 / 状态</div></div>
       <div class="blk" style="min-width:300px"><div class="row" style="flex-wrap:wrap;gap:7px">
-        <span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="net"><span class="dot" style="background:var(--play)"></span>Ethereum</span><span class="net"><span class="dot" style="background:var(--amb)"></span>SN DevNet</span><span class="net"><span class="dot" style="background:var(--ink-3)"></span>已锁定<svg class="ic ic-xs"><use href="#i-chev-d"/></svg></span>
+        <span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="net"><span class="dot" style="background:var(--play)"></span>Ethereum</span><span class="net"><span class="dot" style="background:var(--amb)"></span>SN DevNet</span><span class="net"><span class="dot" style="background:var(--ink-3)"></span>已锁定<svg class="ic ic-xs"><use href="#i-chev-d"></use></svg></span>
       </div><div class="cap">网络选择器(统一入口)</div></div>
       <div class="blk" style="min-width:300px"><div class="row" style="flex-wrap:wrap;gap:7px">
         <span class="ch ch-felt">proven</span><span class="ch ch-amb">soft</span><span class="ch ch-amb">pending</span><span class="ch ch-felt">finalized</span><span class="ch">signed</span><span class="ch">seen</span><span class="ch">included</span><span class="ch ch-bad">超 deadline</span>
       </div><div class="cap">proof / 回执状态词(等宽原词不翻译)</div></div>
       <div class="blk" style="min-width:230px"><div class="row" style="gap:9px;flex-wrap:wrap">
-        <span class="tk tk-play">P</span><span class="tk tk-real">N</span><span class="tk">Ξ</span><span class="tk">U</span><span class="tk" style="color:var(--felt);border-color:var(--felt-rl);background:var(--felt-w)"><svg class="ic ic-xs"><use href="#i-spade"/></svg></span>
+        <span class="tk tk-play">P</span><span class="tk tk-real">N</span><span class="tk">Ξ</span><span class="tk">U</span><span class="tk" style="color:var(--felt);border-color:var(--felt-rl);background:var(--felt-w)"><svg class="ic ic-xs"><use href="#i-spade"></use></svg></span>
       </div><div class="cap">代币徽标 26×26 方形</div></div>
     </div>
   </section></div>
@@ -1430,7 +1729,7 @@ body{background:var(--pg)}
         <div class="rn"><i></i><span>proven</span></div><div class="rline"></div>
         <div class="rn"><i></i><span>finalized</span></div>
       </div><div class="rail-cap"><span>回执超出 deadline</span><span class="ch ch-bad">ForceInclude 仅展示</span></div><div class="cap" style="text-align:left">失败态:朱红方点,给出补救路径而不是只报错</div></div>
-      <div class="blk" style="min-width:200px"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="ch">signed</span><svg class="ic ic-xs" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg><span class="ch">seen</span><svg class="ic ic-xs" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg><span class="ch ch-felt">included</span></div><p style="font-size:11px;color:var(--ink-2);margin-top:10px;line-height:1.6">回执状态机 <span class="mono">signed → seen → included</span> 单向推进,与凭证条分开:前者是「网关见到没有」,后者是「资产能用到什么程度」。</p><div class="cap" style="text-align:left">两套状态,不混用</div></div>
+      <div class="blk" style="min-width:200px"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="ch">signed</span><svg class="ic ic-xs" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg><span class="ch">seen</span><svg class="ic ic-xs" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg><span class="ch ch-felt">included</span></div><p style="font-size:11px;color:var(--ink-2);margin-top:10px;line-height:1.6">回执状态机 <span class="mono">signed → seen → included</span> 单向推进,与凭证条分开:前者是「网关见到没有」,后者是「资产能用到什么程度」。</p><div class="cap" style="text-align:left">两套状态,不混用</div></div>
     </div>
   </section></div>
   <div class="px-ds"><section class="ds-sec">
@@ -1454,9 +1753,9 @@ body{background:var(--pg)}
       </div>
       <div class="blk" style="width:262px">
         <div class="cd-h">最新动态</div>
-        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"/></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
-        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"/></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
-        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"/></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
+        <div class="tx"><span class="tic ok"><svg class="ic ic-s"><use href="#i-check"></use></svg></span><div class="ar-m"><div class="ar-n">买入 · 8♠ 桌</div><div class="ar-s">0xc41d…9b · 2 分钟前</div></div><div class="ar-r"><div class="ar-amt neg">-500.00</div><div class="ar-st"><span class="ch ch-felt ch-xs">included</span></div></div></div>
+        <div class="tx"><span class="tic blue"><svg class="ic ic-s"><use href="#i-receipt"></use></svg></span><div class="ar-m"><div class="ar-n">结算 · 8♠ 桌 #128</div><div class="ar-s">0x3f9e…aa · 刚刚</div></div><div class="ar-r"><div class="ar-amt pos">+620.50</div><div class="ar-st"><span class="ch ch-xs">seen</span></div></div></div>
+        <div class="tx"><span class="tic warn"><svg class="ic ic-s"><use href="#i-clock"></use></svg></span><div class="ar-m"><div class="ar-n">开桌签名 · 8♠ 桌</div><div class="ar-s">0x77d0…31 · 92s 后过期</div></div><div class="ar-r"><div class="ar-amt">-500.00</div><div class="ar-st"><span class="ch ch-amb ch-xs">signed</span></div></div></div>
         <div class="cap" style="text-align:left">交易行 .tx</div>
       </div>
       <div class="blk" style="width:250px">
@@ -1475,22 +1774,22 @@ body{background:var(--pg)}
     <div class="panel">
       <div class="blk" style="width:380px;padding:0;overflow:hidden;border:none">
         <div class="dh" style="border-radius:var(--r) var(--r) 0 0">
-          <div class="dh-top"><span class="dh-kind">Ledger · Zchain</span><span class="ch ch-felt ch-xs">已解锁</span><span class="dh-r"><button class="ib bare"><svg class="ic ic-s"><use href="#i-gear"/></svg></button></span></div>
-          <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"/></svg></div><div class="acct-a">zc1qpoker…f7x2</div></div><span class="dh-r"><button class="ib"><svg class="ic ic-s"><use href="#i-copy"/></svg></button><button class="ib"><svg class="ic ic-s"><use href="#i-lock"/></svg></button></span></div>
+          <div class="dh-top"><span class="dh-kind">Ledger · Zchain</span><span class="ch ch-felt ch-xs">已解锁</span><span class="dh-r"><button class="ib bare"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+          <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a">zc1qpoker…f7x2</div></div><span class="dh-r"><button class="ib"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button><button class="ib"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
         </div>
         <div style="padding:14px 14px 0;background:var(--pg)">
           <div class="csw"><button class="on">ZChain<span class="cnt">2</span></button><button>EVM<span class="cnt">1</span></button><button>Starknet<span class="cnt">1</span></button></div>
         </div>
         <div class="tabs" style="margin-top:26px">
-          <button class="tb"><svg class="ic"><use href="#i-home"/></svg>总账</button>
-          <button class="tb on"><svg class="ic"><use href="#i-book"/></svg>账簿</button>
-          <button class="tb"><svg class="ic"><use href="#i-shield"/></svg>证明</button>
+          <button class="tb"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+          <button class="tb on"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+          <button class="tb"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
         </div>
       </div>
       <div class="blk" style="width:380px;padding:0;overflow:hidden;border:none">
-        <div class="sub"><button class="ib bare"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">REAL 提现(预览)</div><div class="sub-s"><span class="ch ch-real ch-xs">REAL</span></div></div>
+        <div class="sub"><button class="ib bare"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">REAL 提现(预览)</div><div class="sub-s"><span class="ch ch-real ch-xs">REAL</span></div></div>
         <div style="padding:14px;background:var(--pg)">
-          <div class="bn bn-real"><svg class="ic"><use href="#i-warn"/></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。以下为模拟预览,不会提交任何链上交易。</p></div></div>
+          <div class="bn bn-real"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。以下为模拟预览,不会提交任何链上交易。</p></div></div>
           <div class="row" style="gap:8px"><span class="ch ch-real">REAL</span><span class="net"><span class="dot" style="background:var(--real)"></span>zchain-devnet-1</span><span class="seal seal-bad">通道未开放</span></div>
         </div>
         <div class="cap" style="text-align:left">子页栏:方形返回 + 居中标题 + 右侧域标签</div>
@@ -1511,28 +1810,28 @@ body{background:var(--pg)}
     <p class="ds-desc">提示条用<b>左侧 3px 色条</b>而不是整圈描边,扫一眼就能分优先级;托管警示(金)与失败警示(朱红)在方向 B 里是两种不同形状的语言,不会互相冒充。</p>
     <div class="panel">
       <div class="blk" style="width:250px">
-        <div class="bn bn-real"><svg class="ic"><use href="#i-warn"/></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。</p></div></div>
-        <div class="bn bn-ok"><svg class="ic"><use href="#i-shield"/></svg><div><b>验证通过</b><p>结算与链上 STARK 证明一致。</p></div></div>
-        <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"/></svg><div><b>发送后不可撤销</b><p>请核对地址与金额。</p></div></div>
-        <div class="bn bn-info" style="margin-bottom:0"><svg class="ic"><use href="#i-info"/></svg><div><b>性能如实标注</b><p>约 1.7s,不伪装即时。</p></div></div>
+        <div class="bn bn-real"><svg class="ic"><use href="#i-warn"></use></svg><div><b>托管警示</b><p>REAL 域由运营方托管映射。</p></div></div>
+        <div class="bn bn-ok"><svg class="ic"><use href="#i-shield"></use></svg><div><b>验证通过</b><p>结算与链上 STARK 证明一致。</p></div></div>
+        <div class="bn bn-bad"><svg class="ic"><use href="#i-warn"></use></svg><div><b>发送后不可撤销</b><p>请核对地址与金额。</p></div></div>
+        <div class="bn bn-info" style="margin-bottom:0"><svg class="ic"><use href="#i-info"></use></svg><div><b>性能如实标注</b><p>约 1.7s,不伪装即时。</p></div></div>
         <div class="cap" style="text-align:left">real / ok / bad / info</div>
       </div>
       <div class="blk" style="width:250px">
         <div class="cd-h">验证步骤</div>
         <div class="steps">
-          <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"/></svg></i><div><b>拉取结算明细</b><span>网关 127.0.0.1:18900 · 200 OK</span></div></div>
-          <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"/></svg></i><div><b>下载 STARK 证明</b><span>payload 84.2 KB · engine stwo</span></div></div>
-          <div class="stp run"><i><svg class="ic ic-xs"><use href="#i-refresh"/></svg></i><div><b>浏览器内完整验证</b><span>stwo wasm 运行中…</span></div></div>
+          <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"></use></svg></i><div><b>拉取结算明细</b><span>网关 127.0.0.1:18900 · 200 OK</span></div></div>
+          <div class="stp done"><i><svg class="ic ic-xs"><use href="#i-check"></use></svg></i><div><b>下载 STARK 证明</b><span>payload 84.2 KB · engine stwo</span></div></div>
+          <div class="stp run"><i><svg class="ic ic-xs"><use href="#i-refresh"></use></svg></i><div><b>浏览器内完整验证</b><span>stwo wasm 运行中…</span></div></div>
           <div class="stp"><i>4</i><div><b>wallet-core 本地复验</b><span>结算关系与 payout_root 比对</span></div></div>
         </div>
         <div class="cap" style="text-align:left">步骤:方点 + 反色完成态</div>
       </div>
       <div class="blk" style="width:250px">
         <div class="cd-h">安全</div>
-        <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-eye"/></svg></span><span class="grow"><b>导出私钥</b><span>口令确认后展开 · 设计稿:30 秒自动收起</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-        <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"/></svg></span><span class="grow"><b>修改口令</b><span>三层 keystore 各自重派生(两套 KDF)</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-        <button class="mi danger"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-trash"/></svg></span><span class="grow"><b>删除账户</b><span>需输入口令确认</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
-        <div class="empty" style="margin-top:14px;padding:16px"><svg class="ic" style="margin:0 auto 6px;color:var(--ink-3)"><use href="#i-receipt"/></svg>暂无回执<br><span class="mono" style="font-size:10px">签名并提交后出现在此</span></div>
+        <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-eye"></use></svg></span><span class="grow"><b>导出私钥</b><span>口令确认后展开 · 设计稿:30 秒自动收起</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+        <button class="mi"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-key"></use></svg></span><span class="grow"><b>修改口令</b><span>三层 keystore 各自重派生(两套 KDF)</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+        <button class="mi danger"><span class="mi-ic"><svg class="ic ic-s"><use href="#i-trash"></use></svg></span><span class="grow"><b>删除账户</b><span>需输入口令确认</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
+        <div class="empty" style="margin-top:14px;padding:16px"><svg class="ic" style="margin:0 auto 6px;color:var(--ink-3)"><use href="#i-receipt"></use></svg>暂无回执<br><span class="mono" style="font-size:10px">签名并提交后出现在此</span></div>
         <div class="cap" style="text-align:left">菜单项 / 空状态</div>
       </div>
     </div>
@@ -1545,8 +1844,8 @@ body{background:var(--pg)}
         <div class="cap" style="margin:0 0 10px">收款 sheet</div>
         <div style="font-size:12.5px;font-weight:600;margin-bottom:3px">收款 · ZChain 层</div>
         <div class="mono" style="font-size:9.5px;color:var(--ink-3);margin-bottom:10px;word-break:break-all">zc1qpoker9xf7x2wwn2h3a5v8…</div>
-        <div class="qr"><svg viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"/><g fill="#14130f"><path d="M0 0h7v7H0zM22 0h7v7h-7zM0 22h7v7H0z"/><path d="M2 2h3v3H2zM24 2h3v3h-3zM2 24h3v3H2z" fill="#fff"/><path d="M9 0h2v2H9zM13 0h2v3h-2zM17 0h2v2h-2zM9 4h2v2H9zM12 4h2v2h-2zM16 4h3v2h-3zM20 4h1v2h-1zM0 9h2v2H0zM4 9h3v2H4zM9 9h3v3H9zM14 9h2v2h-2zM18 9h2v2h-2zM22 9h3v2h-3zM26 9h3v2h-3zM2 13h2v2H2zM7 13h2v2H7zM11 13h3v2h-3zM16 13h2v3h-2zM20 13h2v2h-2zM24 13h2v2h-2zM0 17h3v2H0zM5 17h2v2H5zM9 17h2v2H9zM13 17h3v2h-3zM18 17h2v2h-2zM22 17h2v2h-2zM26 17h3v2h-3zM2 21h2v2H2zM6 21h3v2H6zM11 21h2v2h-2zM15 21h2v2h-2zM19 21h3v2h-3zM23 21h2v2h-2zM27 21h2v3h-2zM9 25h3v2H9zM14 25h2v2h-2zM18 25h3v2h-3zM23 25h2v4h-2zM26 26h3v3h-3z"/></g></svg></div>
-        <button class="btn btn-s btn-sm" style="margin-top:12px;width:100%"><svg class="ic ic-s"><use href="#i-copy"/></svg>复制地址</button>
+        <div class="qr"><svg viewBox="0 0 29 29" shape-rendering="crispEdges"><rect width="29" height="29" fill="#fff"></rect><g fill="#14130f"><path d="M0 0h7v7H0zM22 0h7v7h-7zM0 22h7v7H0z"></path><path d="M2 2h3v3H2zM24 2h3v3h-3zM2 24h3v3H2z" fill="#fff"></path><path d="M9 0h2v2H9zM13 0h2v3h-2zM17 0h2v2h-2zM9 4h2v2H9zM12 4h2v2h-2zM16 4h3v2h-3zM20 4h1v2h-1zM0 9h2v2H0zM4 9h3v2H4zM9 9h3v3H9zM14 9h2v2h-2zM18 9h2v2h-2zM22 9h3v2h-3zM26 9h3v2h-3zM2 13h2v2H2zM7 13h2v2H7zM11 13h3v2h-3zM16 13h2v3h-2zM20 13h2v2h-2zM24 13h2v2h-2zM0 17h3v2H0zM5 17h2v2H5zM9 17h2v2H9zM13 17h3v2h-3zM18 17h2v2h-2zM22 17h2v2h-2zM26 17h3v2h-3zM2 21h2v2H2zM6 21h3v2H6zM11 21h2v2h-2zM15 21h2v2h-2zM19 21h3v2h-3zM23 21h2v2h-2zM27 21h2v3h-2zM9 25h3v2H9zM14 25h2v2h-2zM18 25h3v2h-3zM23 25h2v4h-2zM26 26h3v3h-3z"></path></g></svg></div>
+        <button class="btn btn-s btn-sm" style="margin-top:12px;width:100%"><svg class="ic ic-s"><use href="#i-copy"></use></svg>复制地址</button>
       </div>
       <div class="blk" style="width:250px">
         <div class="cap" style="margin:0 0 10px">破坏性模态</div>
@@ -1557,9 +1856,9 @@ body{background:var(--pg)}
       </div>
       <div class="blk" style="width:250px">
         <div class="cap" style="margin:0 0 10px">toast / 口令块 / 来源条</div>
-        <div class="tst on" style="position:relative;left:0;right:0;bottom:0;margin-bottom:10px"><svg class="ic ic-s"><use href="#i-check"/></svg>地址已复制</div>
-        <div class="pass" style="margin-bottom:10px"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib"><svg class="ic ic-s"><use href="#i-copy"/></svg></button></div>
-        <div class="dapp" style="margin-bottom:0"><span class="dapp-fav"><svg class="ic ic-s"><use href="#i-spade"/></svg></span><div class="grow" style="min-width:0"><b style="font-size:12px;display:block">poker.zchain.devnet</b><span style="font-size:10px;color:var(--ink-3)">请求签名 · 会话密钥路径</span></div><span class="ch ch-felt ch-xs">已授权</span></div>
+        <div class="tst on" style="position:relative;left:0;right:0;bottom:0;margin-bottom:10px"><svg class="ic ic-s"><use href="#i-check"></use></svg>地址已复制</div>
+        <div class="pass" style="margin-bottom:10px"><span class="grow">felt-poker-verifiable-9x2a</span><button class="ib"><svg class="ic ic-s"><use href="#i-copy"></use></svg></button></div>
+        <div class="dapp" style="margin-bottom:0"><span class="dapp-fav"><svg class="ic ic-s"><use href="#i-spade"></use></svg></span><div class="grow" style="min-width:0"><b style="font-size:12px;display:block">poker.zchain.devnet</b><span style="font-size:10px;color:var(--ink-3)">请求签名 · 会话密钥路径</span></div><span class="ch ch-felt ch-xs">已授权</span></div>
       </div>
     </div>
   </section></div>
@@ -1567,44 +1866,44 @@ body{background:var(--pg)}
     <div class="ds-h"><h2>图标</h2><span class="en">Icons</span><span class="no">DS-12</span></div>
     <p class="ds-desc">单线、<b>方头(linecap: square)、尖角(join: miter)</b>、1.6 stroke、24 格网。方向 A 的图标是圆头的,和毡布圆润一致;方向 B 全部改成方头,和细线账格同一支笔。扑克花色用抽象几何轮廓,不做写实牌面。笔触规则由 <span class="mono">.ic{stroke-width:1.6;stroke-linecap:square;stroke-linejoin:miter;fill:none}</span> 统一施加,38 枚线性图标无一例外;精灵里唯一的例外是 <span class="mono">qr-art</span>——它是 29 格的收款码版式数据,不是图标。</p>
     <div class="panel"><div class="blk" style="width:100%"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(62px,1fr));gap:10px;text-align:center;font-size:9.5px;color:var(--ink-3);font-family:var(--mono)">
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-home"/></svg><div>home</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-book"/></svg><div>book</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-shield"/></svg><div>shield</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-spade"/></svg><div>spade</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-ether"/></svg><div>ether</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-layers"/></svg><div>layers</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-lock"/></svg><div>lock</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-unlock"/></svg><div>unlock</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-key"/></svg><div>key</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-send"/></svg><div>send</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-recv"/></svg><div>recv</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-out"/></svg><div>withdraw</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-ul"/></svg><div>upload</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-qr"/></svg><div>qr</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-copy"/></svg><div>copy</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-receipt"/></svg><div>receipt</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-warn"/></svg><div>warn</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-check"/></svg><div>check</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-clock"/></svg><div>clock</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-file"/></svg><div>file</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-flask"/></svg><div>faucet</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-trash"/></svg><div>trash</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-swap"/></svg><div>swap</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-wallet"/></svg><div>wallet</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-back"/></svg><div>back</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-chev-d"/></svg><div>chevron-d</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-chev-r"/></svg><div>chevron-r</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-x"/></svg><div>close</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-eye"/></svg><div>eye</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-search"/></svg><div>search</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-info"/></svg><div>info</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-plus"/></svg><div>plus</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-pen"/></svg><div>rename</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-gear"/></svg><div>settings</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-refresh"/></svg><div>refresh</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-dl"/></svg><div>download</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-ext"/></svg><div>external</div></div>
-      <div><svg class="ic" style="margin:0 auto"><use href="#i-bolt"/></svg><div>force-include</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-home"></use></svg><div>home</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-book"></use></svg><div>book</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-shield"></use></svg><div>shield</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-spade"></use></svg><div>spade</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-ether"></use></svg><div>ether</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-layers"></use></svg><div>layers</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-lock"></use></svg><div>lock</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-unlock"></use></svg><div>unlock</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-key"></use></svg><div>key</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-send"></use></svg><div>send</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-recv"></use></svg><div>recv</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-out"></use></svg><div>withdraw</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-ul"></use></svg><div>upload</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-qr"></use></svg><div>qr</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-copy"></use></svg><div>copy</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-receipt"></use></svg><div>receipt</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-warn"></use></svg><div>warn</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-check"></use></svg><div>check</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-clock"></use></svg><div>clock</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-file"></use></svg><div>file</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-flask"></use></svg><div>faucet</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-trash"></use></svg><div>trash</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-swap"></use></svg><div>swap</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-wallet"></use></svg><div>wallet</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-back"></use></svg><div>back</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-chev-d"></use></svg><div>chevron-d</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-chev-r"></use></svg><div>chevron-r</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-x"></use></svg><div>close</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-eye"></use></svg><div>eye</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-search"></use></svg><div>search</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-info"></use></svg><div>info</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-plus"></use></svg><div>plus</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-pen"></use></svg><div>rename</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-gear"></use></svg><div>settings</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-refresh"></use></svg><div>refresh</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-dl"></use></svg><div>download</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-ext"></use></svg><div>external</div></div>
+      <div><svg class="ic" style="margin:0 auto"><use href="#i-bolt"></use></svg><div>force-include</div></div>
     </div></div></div>
   </section></div>
   <div class="px-ds"><section class="ds-sec">
@@ -1612,7 +1911,7 @@ body{background:var(--pg)}
     <p class="ds-desc">这套钱包的资产数字有一部分<b>不是</b>可自由动用的钱。方向 B 不但保留这些限制说明,还用印章把它做成视觉锚点——「模拟预览」「通道未开放」应该像盖在单据上的红章一样显眼,而不是缩成一行灰字。</p>
     <div class="panel"><div class="blk" style="width:100%">
       <table class="spec">
-        <tr><th>位置</th><th>必须出现的说明</th><th>方向 B 的承载组件</th></tr>
+        <tbody><tr><th>位置</th><th>必须出现的说明</th><th>方向 B 的承载组件</th></tr>
         <tr><td class="m">一切 REAL 区块</td><td>托管映射 · 提现通道未开放 · GAME 域筹码不上主网</td><td>金条提示条 + <span class="seal seal-bad">通道未开放</span></td></tr>
         <tr><td class="m">提现预览</td><td>「以下为模拟预览,不会提交任何链上交易」</td><td>抬头印章 + 提示条双写</td></tr>
         <tr><td class="m">canSubmit=false</td><td>逐条原因,不得合并成一句「暂不可用」</td><td>原因列表(.rsn)+ 禁用按钮虚线态</td></tr>
@@ -1625,7 +1924,7 @@ body{background:var(--pg)}
         <tr><td class="m">备份导出 .zcbk</td><td>只含 ZChain 层 note 库(REAL/PLAY 双库);EVM / Starknet 账户不在文件内,需各自导出私钥</td><td>字段行 <span class="mono">含:ZChain 层</span> + <span class="mono">不含:EVM / Starknet</span></td></tr>
         <tr><td class="m">口令与 KDF</td><td>同一口令喂给两套 KDF:ZChain 层 Argon2id,EVM / Starknet 层 PBKDF2-SHA256 600k</td><td>解锁页脚注 + 关于卡逐层列举</td></tr>
         <tr><td class="m">素材角落</td><td>水印 PLAY / devnet / 版本</td><td>屏幕右下 .wm 角标</td></tr>
-      </table>
+      </tbody></table>
     </div></div>
   </section></div>
 </div>

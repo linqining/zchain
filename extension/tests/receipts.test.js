@@ -19,6 +19,7 @@ import {
   isPastInclusionDeadline,
   markIncluded,
   openReceipt,
+  pendingSpendMap,
   validateSeenReceiptShape,
 } from '../common/receipts.js';
 
@@ -138,4 +139,54 @@ test('08 回执滚动上限：MAX_RECEIPTS 之外最旧回执被丢弃', () => {
     store = r.store;
   }
   assert.equal(Object.keys(store).length, MAX_RECEIPTS);
+});
+
+test('pendingSpendMap: signed/seen 的 transfer 收据输入占用，included 释放', () => {
+  const c1 = 'aa'.repeat(32);
+  const c2 = 'bb'.repeat(32);
+  let store = openReceipt({}, {
+    digest: DIGEST, kind: 'transfer', chainId: 'zchain-devnet-1', signedAtMs: NOW,
+    inputs: [{ commitment: c1, amount: 300 }, { commitment: c2, amount: 200 }],
+  }, NOW).store;
+  let m = pendingSpendMap(store);
+  assert.equal(m.size, 2);
+  assert.equal(m.get(c1), 300);
+  assert.equal(m.get(c2), 200);
+
+  // seen 仍占用
+  store = applySeenReceipt(store, DIGEST, validReceipt(), NOW + 50).store;
+  assert.equal(pendingSpendMap(store).size, 2);
+
+  // included 释放（真实链上 core 同步接管最终状态）
+  store = markIncluded(store, DIGEST, NOW + 100).store;
+  assert.equal(pendingSpendMap(store).size, 0);
+});
+
+test('pendingSpendMap: 非 transfer 收据 / 脏输入 / 空 store 安全', () => {
+  const store = openReceipt({}, {
+    digest: DIGEST, kind: 'buy_in', chainId: 'zchain-devnet-1', signedAtMs: NOW,
+    inputs: [{ commitment: 'cc'.repeat(32), amount: 1 }],
+  }, NOW).store;
+  assert.equal(pendingSpendMap(store).size, 0);
+  assert.equal(pendingSpendMap(null).size, 0);
+  assert.equal(pendingSpendMap({}).size, 0);
+  // 脏输入（无 commitment / amount 非数）不进表、不抛
+  const dirty = openReceipt({}, {
+    digest: 'cd'.repeat(32), kind: 'transfer', signedAtMs: NOW,
+    inputs: [{ amount: 5 }, { commitment: 'dd'.repeat(32), amount: 'xyz' }, 'garbage'],
+  }, NOW).store;
+  const m = pendingSpendMap(dirty);
+  assert.equal(m.size, 1);
+  assert.equal(m.get('dd'.repeat(32)), 0);
+});
+
+test('openReceipt: inputs 归一只留 {commitment, amount}', () => {
+  const store = openReceipt({}, {
+    digest: DIGEST, kind: 'transfer', signedAtMs: NOW,
+    inputs: [{ commitment: 'ee'.repeat(32), amount: '42', secret: 'x', nullifier: 'y' }, 7],
+  }, NOW).store;
+  assert.deepEqual(store[DIGEST].inputs, [{ commitment: 'ee'.repeat(32), amount: 42 }]);
+  // 无 inputs 的旧调用形状：空数组（buy_in 等不受影响）
+  const plain = openReceipt({}, { digest: 'ef'.repeat(32), kind: 'buy_in', signedAtMs: NOW }, NOW).store;
+  assert.deepEqual(plain['ef'.repeat(32)].inputs, []);
 });

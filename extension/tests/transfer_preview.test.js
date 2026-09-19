@@ -143,6 +143,8 @@ test('11 owner 形状 / 自转 / 非法金额：稳定错误码', () => {
   assert.equal(buildTransferPreview(base({ owner: '0x' + OWNER })).code, 'OwnerInvalid', '不接受 0x 前缀');
   assert.equal(buildTransferPreview(base({ owner: OWNER.slice(0, 60) })).code, 'OwnerInvalid');
   assert.equal(buildTransferPreview(base({ owner: SELF, selfOwner: SELF })).code, 'SelfTransfer');
+  // 全零 owner = 无效曲线点（收款即烧毁）：fail-closed 拒绝
+  assert.equal(buildTransferPreview(base({ owner: '0'.repeat(66) })).code, 'OwnerInvalid', '全零 owner 拒绝');
   assert.equal(buildTransferPreview(base({ amount: 'abc' })).code, 'AmountInvalid');
 });
 

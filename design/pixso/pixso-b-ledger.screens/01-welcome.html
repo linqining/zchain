@@ -1,6 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-ground="paper"><head><meta charset="UTF-8"><title>欢迎</title>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="UTF-8">
+<title>01 · 欢迎 · 一次创建三层</title>
 <style>
+
 /* ============================================================================
    ZChain Wallet —— 方向 B「账簿 / Ledger」v0.2
    ----------------------------------------------------------------------------
@@ -421,10 +425,13 @@ details[open] summary::before{content:"▾ "}
 #shot-mount.doc{width:1240px!important;height:auto!important;padding:26px 28px}
 .mode-shot #shot-mount.doc .ds-sec{margin-bottom:0}
 
-html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--bg,var(--pg))}
-.shell-bar,#proto-wrap{display:none !important}
-.screen,.scr{position:relative !important;display:flex !important;width:380px;height:600px}
-</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+/* ====== 导出画板:单屏静态可见,供 Pixso code_to_design 导入 ====== */
+html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--pg)}
+.shell-bar,#proto-wrap,#gallery,template{display:none !important}
+#shot-mount{box-shadow:none;margin:0 !important}
+</style>
+</head>
+<body class="mode-shot"><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
 <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
@@ -463,10 +470,11 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
 <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-6h4v6"/></symbol>
 <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
-</defs></svg><section class="scr" aria-label="欢迎">
+</defs></svg>
+<div id="shot-mount"><section class="scr" aria-label="欢迎">
   <div class="cover">
     <span class="ch ch-solid" style="position:absolute;right:0;top:2px">DevNet</span>
-    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ZChain 单色 logo" style="color:var(--ink)"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"/><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"/></svg>
+    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ZChain 单色 logo" style="color:var(--ink)"><rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="currentColor" stroke-width="4"></rect><path d="M17 21 H45 L24 43 H47" fill="none" stroke="currentColor" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path><rect x="42" y="8" width="9" height="9" rx="1.5" transform="rotate(45 46.5 12.5)" fill="currentColor"></rect></svg>
     <div class="cv-n">ZChain Wallet</div>
     <div class="cv-t">桌上飞快,结算可证</div>
     <div class="cv-e">Fast at the table. Verifiable at settlement.</div>
@@ -476,15 +484,17 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
       <div><b>STARK</b><span>可复验</span></div>
     </div>
     <div class="row" style="gap:6px;margin-top:14px;flex-wrap:wrap">
-      <span class="ch ch-felt"><svg class="ic ic-xs"><use href="#i-spade"/></svg>ZChain 隐私层</span>
-      <span class="ch"><svg class="ic ic-xs"><use href="#i-ether"/></svg>EVM 多链</span>
-      <span class="ch"><svg class="ic ic-xs"><use href="#i-layers"/></svg>Starknet</span>
+      <span class="ch ch-felt"><svg class="ic ic-xs"><use href="#i-spade"></use></svg>ZChain 隐私层</span>
+      <span class="ch"><svg class="ic ic-xs"><use href="#i-ether"></use></svg>EVM 多链</span>
+      <span class="ch"><svg class="ic ic-xs"><use href="#i-layers"></use></svg>Starknet</span>
     </div>
     <div class="cv-acts">
-      <button class="btn btn-p btn-lg" data-nav="success"><svg class="ic ic-s"><use href="#i-plus"/></svg>一键创建钱包</button>
+      <button class="btn btn-p btn-lg" data-nav="success"><svg class="ic ic-s"><use href="#i-plus"></use></svg>一键创建钱包</button>
       <button class="btn btn-s" data-nav="import">导入或恢复钱包</button>
       <div class="hint-s">一次创建三层账户:ZChain 隐私层 + EVM 多链 + Starknet</div>
     </div>
   </div>
   <div class="cv-foot">设计稿 v0.2 · 对齐 Extension 0.6.1 · MV3 · 继续即代表知悉测试网风险<br>Play / DevNet / v1.3</div>
-</section></body></html>
+</section></div>
+</body>
+</html>

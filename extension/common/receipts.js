@@ -28,7 +28,7 @@ export const MAX_RECEIPTS = 20;
  * 登记一条回执（签名成功后调用；digest 是确认摘要，chainId 参与展示）。
  * @returns {{ok:true, store}} | {ok:false, code, reason}
  */
-export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadlineMs }, now) {
+export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadlineMs, inputs }, now) {
   if (typeof digest !== 'string' || digest.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(digest)) {
     return { ok: false, code: 'InvalidArgument', reason: 'digest must be 64 hex' };
   }
@@ -44,12 +44,49 @@ export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadline
       status: 'signed',
       seenAtMs: null,
       includedAtMs: null,
+      // transfer 类收据携带输入 note（{commitment, amount}[]）：pendingSpendMap
+      // 据此对在途支出做本地软锁（防同一批 note 被反复签名转出）。
+      inputs: normalizeReceiptInputs(inputs),
       // 证据来源标注（诚实字段，UI 必须原样展示）：
       evidence: { seen: 'not_provided', included: 'local_manual_entry' },
       openedAt: now,
     },
   };
   return { ok: true, store: capStore(next) };
+}
+
+/** 收据输入 note 归一：只留 {commitment, amount}，其余丢弃（防脏字段入库）。 */
+function normalizeReceiptInputs(inputs) {
+  if (!Array.isArray(inputs)) return [];
+  return inputs
+    .filter((i) => i && typeof i.commitment === 'string' && i.commitment.length > 0)
+    .map((i) => ({
+      commitment: i.commitment,
+      amount: Number.isFinite(Number(i.amount)) ? Number(i.amount) : null,
+    }));
+}
+
+/**
+ * 在途已花 note 软锁表（防双花，本地口径）：
+ * transfer 收据在 signed/seen 状态期间，其输入 note 不得再次成为支出输入——
+ * 链上 inclusion 才真正消费 note 并把找零记回本地库；devnet stub 没有
+ * inclusion 回路，若不软锁，同一批 note 可被无限次签名转出（双花脚枪）。
+ * included = 链上已结算：软锁退出（真实部署由 core 同步接管最终状态）。
+ *
+ * @returns {Map<string, number>} commitment -> 在途占用金额
+ */
+export function pendingSpendMap(store) {
+  const map = new Map();
+  for (const entry of Object.values(store ?? {})) {
+    if (!entry || entry.kind !== 'transfer' || entry.status === 'included') continue;
+    for (const inp of Array.isArray(entry.inputs) ? entry.inputs : []) {
+      if (typeof inp?.commitment !== 'string' || inp.commitment.length === 0) continue;
+      if (!map.has(inp.commitment)) {
+        map.set(inp.commitment, Number.isFinite(inp.amount) ? inp.amount : 0);
+      }
+    }
+  }
+  return map;
 }
 
 /**

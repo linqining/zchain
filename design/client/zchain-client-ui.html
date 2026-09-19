@@ -1,0 +1,1025 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZChain Poker · 客户端账簿设计稿 C1–C7</title>
+<style>
+/* ==========================================================================
+   ZChain Poker 客户端 · 账簿 Ledger 设计稿
+   与 design/table/zchain-table-ui.html、design/site/ledger.css 同一套 token。
+   所有文案取自 poker_texas_air/client/src/context/localization/locales/zh.json
+   与 src/pages/*.tsx，不虚构功能。
+   出图：?g=paper|night#c1 … #c7（见 design/client/render.sh）
+   ========================================================================== */
+:root{
+  --pg:#f5f2ea; --pg-2:#eae5d9; --cd:#fffdf7; --cd-2:#f8f5ec;
+  --ink:#14130f; --ink-2:#4b4840; --ink-3:#666256;
+  --rl:#ddd6c6; --rl-2:#c3bba7;
+  --felt:#0b6b45; --felt-w:#e6efe8; --felt-rl:#a8c8b6;
+  --play:#15507f; --play-w:#e5ecf3; --play-rl:#a9c0d6;
+  --real:#7d5308; --real-w:#f6ebd4; --real-rl:#d8bd85;
+  --bad:#a83226; --bad-w:#f7e6e2; --bad-rl:#dda9a1;
+  --amb:#8a5a12; --amb-w:#f6eeda; --amb-rl:#dcc796;
+  --on-felt:#fffdf7; --on-ink:#f5f2ea; --on-bad:#fffdf7;
+  --code:#efeade; --rule-paper:rgba(20,19,15,.045);
+  --shadow:0 1px 0 rgba(20,19,15,.04);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Roboto,Arial,sans-serif;
+  --r:3px; --r-l:6px;
+}
+html[data-ground="night"]{
+  --pg:#070d0a; --pg-2:#0b1410; --cd:#101c15; --cd-2:#152418;
+  --ink:#f0f7f1; --ink-2:#abc3b6; --ink-3:#7d9a8b;
+  --rl:#1d3326; --rl-2:#2a4a37;
+  --felt:#37e39c; --felt-w:rgba(55,227,156,.11); --felt-rl:rgba(55,227,156,.35);
+  --play:#66c4ff; --play-w:rgba(102,196,255,.11); --play-rl:rgba(102,196,255,.35);
+  --real:#ffc75a; --real-w:rgba(255,199,90,.11); --real-rl:rgba(255,199,90,.38);
+  --bad:#ff9483; --bad-w:rgba(255,148,131,.10); --bad-rl:rgba(255,148,131,.35);
+  --amb:#ffd166; --amb-w:rgba(255,209,102,.10); --amb-rl:rgba(255,209,102,.35);
+  --on-felt:#05130c; --on-ink:#070d0a; --on-bad:#1a0a08;
+  --code:#0a120d; --rule-paper:rgba(240,247,241,.05);
+  --shadow:none;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:light}
+html[data-ground="night"]{color-scheme:dark}
+body{background:var(--pg);color:var(--ink);font-family:var(--ui);font-size:13px;line-height:1.55;-webkit-font-smoothing:antialiased}
+button,input,select{font:inherit;color:inherit}
+a{color:var(--felt);text-decoration:none}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums}
+b,strong{font-weight:600;color:var(--ink)}
+
+/* ---------- 画布与工具条 ---------- */
+.toolbar{position:sticky;top:0;z-index:90;display:flex;gap:8px;align-items:center;
+  padding:9px 16px;background:var(--cd);border-bottom:1px solid var(--rl-2);font-family:var(--mono);font-size:11px}
+.toolbar b{letter-spacing:.14em;text-transform:uppercase;font-size:10px;color:var(--ink-3);font-weight:700}
+.toolbar button{border:1px solid var(--rl-2);background:var(--cd-2);border-radius:var(--r);
+  padding:4px 9px;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;cursor:pointer;color:var(--ink-2)}
+.toolbar button:hover{background:var(--pg-2);color:var(--ink)}
+.toolbar button[aria-pressed="true"]{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+.stage{padding:26px 16px 60px}
+.screen{max-width:1280px;margin:0 auto 30px;background:var(--pg);border:1px solid var(--rl-2);
+  border-radius:var(--r-l);overflow:hidden;box-shadow:var(--shadow)}
+.screen-tag{display:flex;align-items:baseline;gap:10px;padding:9px 16px;
+  background:var(--cd);border-bottom:1px solid var(--rl-2);font-family:var(--mono);font-size:11px}
+.screen-tag .id{font-weight:700;letter-spacing:.1em;background:var(--ink);color:var(--on-ink);
+  padding:2px 7px;border-radius:2px;font-size:10px}
+.screen-tag .rt{color:var(--felt);font-weight:700}
+.screen-tag .ds{color:var(--ink-3)}
+#shot-mount{max-width:1280px;margin:0 auto}
+
+/* ---------- 客户端外壳：吸顶导航 ---------- */
+.cnav{display:flex;align-items:center;gap:14px;padding:0 20px;height:54px;
+  background:var(--cd);border-bottom:1px solid var(--rl-2);position:relative}
+.cnav .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px;letter-spacing:-.01em}
+.cnav .brand .mk{width:26px;height:26px;border:1.5px solid var(--felt);border-radius:var(--r);
+  display:grid;place-items:center;font-family:var(--mono);font-size:12px;font-weight:700;color:var(--felt)}
+.cnav .links{display:flex;gap:2px;margin-left:8px}
+.cnav .links a{padding:6px 10px;font-family:var(--mono);font-size:11px;letter-spacing:.06em;
+  color:var(--ink-2);border-left:1px solid var(--rl);text-transform:uppercase}
+.cnav .links a:first-child{border-left:0}
+.cnav .links a:hover{color:var(--ink);background:var(--pg-2);text-decoration:none}
+.cnav .links a.on{color:var(--felt);box-shadow:inset 0 -2px 0 var(--felt);font-weight:700}
+.cnav .sp{flex:1}
+.wallet-chip{display:flex;align-items:center;gap:7px;border:1px solid var(--rl-2);border-radius:var(--r);
+  padding:5px 9px;background:var(--cd-2);font-family:var(--mono);font-size:11px;color:var(--ink-2)}
+.wallet-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--felt);flex:none}
+.wallet-chip .net{color:var(--ink-3);letter-spacing:.06em}
+
+/* ---------- 通用件：按钮 / 标签 / 计量 ---------- */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;height:38px;padding:0 16px;
+  border:1px solid var(--rl-2);border-radius:var(--r);background:var(--cd);color:var(--ink);
+  font-size:13px;font-weight:600;cursor:pointer;box-shadow:none}
+.btn:hover{background:var(--pg-2);text-decoration:none}
+.btn.pri{background:var(--felt);border-color:var(--felt);color:var(--on-felt)}
+.btn.pri:hover{background:var(--felt);filter:brightness(1.1)}
+.btn.ink{background:var(--ink);border-color:var(--ink);color:var(--on-ink)}
+.btn.gho{background:transparent;border-color:var(--ink);color:var(--ink)}
+.btn.gho:hover{background:var(--ink);color:var(--on-ink)}
+.btn.sm{height:30px;padding:0 11px;font-size:12px}
+.btn.lg{height:46px;padding:0 24px;font-size:14.5px}
+.btn.dis{background:var(--cd-2);color:var(--ink-3);border-color:var(--rl);cursor:not-allowed}
+.btn .k{font-family:var(--mono);font-size:10px;letter-spacing:.08em;opacity:.72}
+.ch{display:inline-block;font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.11em;
+  text-transform:uppercase;padding:2px 6px;border:1px solid var(--rl-2);border-radius:2px;
+  color:var(--ink-2);background:var(--cd);white-space:nowrap;vertical-align:1px}
+.ch.ok{color:var(--felt);border-color:var(--felt-rl);background:var(--felt-w)}
+.ch.no{color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)}
+.ch.info{color:var(--play);border-color:var(--play-rl);background:var(--play-w)}
+.ch.real{color:var(--real);border-color:var(--real-rl);background:var(--real-w)}
+.ch.amb{color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)}
+.ch.mut{color:var(--ink-3);border-color:var(--rl);background:transparent}
+.seal{position:absolute;width:74px;height:74px;border:1.5px dashed var(--felt-rl);border-radius:50%;
+  display:grid;place-items:center;text-align:center;font-family:var(--mono);font-size:8.5px;font-weight:700;
+  letter-spacing:.1em;color:var(--felt);transform:rotate(-13deg);line-height:1.25}
+.hair{height:1px;background:var(--rl);border:0}
+.lbl{font-family:var(--mono);font-size:9.5px;font-weight:700;letter-spacing:.15em;
+  text-transform:uppercase;color:var(--ink-3)}
+.paper{background:
+  repeating-linear-gradient(to bottom,transparent 0 27px,var(--rule-paper) 27px 28px),var(--cd)}
+
+/* ==========================================================================
+   C1 · 首页 /
+   ========================================================================== */
+.h-hero{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:0;
+  border-bottom:1px solid var(--rl-2)}
+.h-hero-l{padding:52px 40px 46px}
+.h-hero-l .badge{display:inline-flex;align-items:center;gap:8px;border:1px solid var(--felt-rl);
+  background:var(--felt-w);color:var(--felt);border-radius:2px;padding:4px 10px;
+  font-family:var(--mono);font-size:10.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.h-hero-l h1{font-size:44px;line-height:1.18;letter-spacing:-.025em;font-weight:800;margin:20px 0 0}
+.h-hero-l h1 .l2{display:block;color:var(--felt)}
+.h-hero-l .desc{margin:18px 0 0;font-size:15px;color:var(--ink-2);max-width:34em;line-height:1.72}
+.h-hero-l .desc .r{display:block;color:var(--ink)}
+.h-cta{display:flex;flex-wrap:wrap;gap:10px;margin-top:28px}
+.h-hero-r{position:relative;border-left:1px solid var(--rl);padding:34px 30px;display:grid;place-items:center}
+.blindbox{width:100%;max-width:330px;border:1px solid var(--rl-2);border-radius:var(--r);background:var(--cd);overflow:hidden}
+.blindbox .bh{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;
+  background:var(--cd-2);border-bottom:1px solid var(--rl);font-family:var(--mono);font-size:10px;
+  letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3)}
+.blindbox .rows{padding:4px 12px 12px}
+.brow{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:9px 0;
+  border-bottom:1px dotted var(--rl);font-family:var(--mono);font-size:11.5px}
+.brow:last-child{border-bottom:0}
+.brow .who{color:var(--ink-2)}
+.brow .val{color:var(--ink);font-weight:700;letter-spacing:.04em}
+.brow .val.hid{color:var(--ink-3)}
+.brow .val.me{color:var(--felt)}
+.blindbox .bf{padding:9px 12px;background:var(--code);border-top:1px solid var(--rl);
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--ink-3);text-align:center}
+/* 三格统计带 */
+.stat3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;background:var(--rl);
+  border-bottom:1px solid var(--rl-2)}
+.stat3 .cell{background:var(--cd);padding:20px 24px}
+.stat3 .n{font-family:var(--mono);font-size:30px;font-weight:700;letter-spacing:-.02em;color:var(--felt);
+  font-variant-numeric:tabular-nums;line-height:1.1}
+.stat3 .t{font-size:12.5px;color:var(--ink-2);margin-top:5px}
+.stat3 .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);margin-top:7px;padding-top:7px;border-top:1px solid var(--rl)}
+/* 区块 */
+.sec{padding:44px 40px;border-bottom:1px solid var(--rl-2)}
+.sec.alt{background:var(--cd)}
+.sec-h{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap}
+.sec-h h2{font-size:25px;letter-spacing:-.015em;font-weight:800}
+.sec-h .tag{margin-bottom:6px}
+.sec-h .sub{font-size:13.5px;color:var(--ink-2);max-width:44em;margin-top:8px}
+.grid4{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:var(--rl);
+  border:1px solid var(--rl);margin-top:26px}
+.grid4>.g{background:var(--cd);padding:20px 18px 22px;position:relative}
+.grid4 .g::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:var(--rl-2)}
+.grid4 .g.f::before{background:var(--felt)} .grid4 .g.p::before{background:var(--play)}
+.grid4 .g.r::before{background:var(--real)} .grid4 .g.a::before{background:var(--amb)}
+.grid4 h3{font-size:14.5px;font-weight:700;letter-spacing:-.005em}
+.grid4 p{font-size:12.5px;color:var(--ink-2);margin-top:8px;line-height:1.68}
+.grid4 .num{font-family:var(--mono);font-size:10px;color:var(--ink-3);letter-spacing:.1em;margin-bottom:11px}
+.grid4 .big{font-family:var(--mono);font-size:27px;font-weight:700;color:var(--felt);margin-top:14px;
+  font-variant-numeric:tabular-nums}
+.grid4 .bigk{font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);margin-top:2px}
+/* 五步流程：账簿竖排 */
+.steps{margin-top:26px;border-top:1px solid var(--rl)}
+.step{display:grid;grid-template-columns:64px 210px minmax(0,1fr) 96px;gap:18px;align-items:baseline;
+  padding:15px 0;border-bottom:1px solid var(--rl)}
+.step .no{font-family:var(--mono);font-size:20px;font-weight:700;color:var(--rl-2);font-variant-numeric:tabular-nums}
+.step.on .no{color:var(--felt)}
+.step h4{font-size:14.5px;font-weight:700}
+.step p{font-size:12.5px;color:var(--ink-2)}
+.step .ev{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);text-align:right;letter-spacing:.06em;line-height:1.5}
+.step .ev b{display:block;color:var(--felt);font-family:var(--mono)}
+/* CTA 带 */
+.cta-band{padding:46px 40px;text-align:center;background:var(--ink);color:var(--on-ink)}
+html[data-ground="night"] .cta-band{background:var(--cd-2);border-top:1px solid var(--rl-2);border-bottom:1px solid var(--rl-2)}
+.cta-band h2{font-size:29px;font-weight:800;letter-spacing:-.02em}
+.cta-band p{font-size:13.5px;opacity:.78;margin:11px auto 22px;max-width:38em}
+.cta-band .btn.pri{height:46px;padding:0 26px;font-size:14.5px}
+/* 页脚 */
+.cfoot{display:grid;grid-template-columns:minmax(0,1.4fr) repeat(2,minmax(0,1fr));gap:28px;
+  padding:30px 40px;background:var(--cd);border-top:1px solid var(--rl-2)}
+.cfoot .tg{font-size:13.5px;color:var(--ink);font-weight:600}
+.cfoot .bs{font-size:12px;color:var(--ink-3);margin-top:9px;font-family:var(--mono);line-height:1.8}
+.cfoot h5{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;margin-bottom:9px}
+.cfoot ul{list-style:none}
+.cfoot li{padding:4px 0;font-size:12.5px}
+.cfoot a{color:var(--ink-2)} .cfoot a:hover{color:var(--felt)}
+
+/* ==========================================================================
+   C2 · 大厅 /lobby
+   ========================================================================== */
+.lobby{padding:0 40px 40px;min-height:566px;display:flex;flex-direction:column;align-items:center;
+  background:
+   repeating-linear-gradient(to bottom,transparent 0 27px,var(--rule-paper) 27px 28px),var(--pg)}
+.fund-banner{width:100%;display:flex;align-items:center;gap:14px;margin:0 0 26px;padding:13px 16px;
+  border:1px solid var(--amb-rl);border-left:3px solid var(--amb);border-radius:var(--r);
+  background:var(--amb-w);color:var(--ink)}
+.fund-banner .tx{flex:1}
+.fund-banner .t{font-size:13.5px;font-weight:700}
+.fund-banner .d{font-size:12px;color:var(--ink-2);margin-top:2px}
+.fund-banner .amt{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--real);
+  font-variant-numeric:tabular-nums;white-space:nowrap}
+.salute{font-size:23px;font-weight:800;letter-spacing:-.015em;margin:34px 0 4px;text-align:center}
+.salute .nm{color:var(--felt)}
+.salute-sub{font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;
+  color:var(--ink-3);text-align:center;margin-bottom:26px}
+.tiles{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px;width:100%}
+.tile{position:relative;display:flex;flex-direction:column;align-items:stretch;text-align:left;
+  background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);padding:0;overflow:hidden;cursor:pointer}
+.tile:hover{border-color:var(--felt);box-shadow:0 0 0 1px var(--felt-rl) inset}
+.tile .top{display:flex;align-items:center;justify-content:space-between;padding:12px 14px 0}
+.tile .rk{font-family:var(--mono);font-size:34px;font-weight:700;line-height:1;letter-spacing:-.04em}
+.tile.k .rk{color:var(--felt)} .tile.q .rk{color:var(--play)}
+.tile.j .rk{color:var(--real)} .tile.a .rk{color:var(--ink-2)}
+.tile .su{font-size:26px;line-height:1}
+.tile.k .su{color:var(--felt)} .tile.q .su{color:var(--play)}
+.tile.j .su{color:var(--real)} .tile.a .su{color:var(--ink-2)}
+.tile .bd{padding:16px 14px 14px;border-top:1px solid var(--rl);margin-top:12px}
+.tile h3{font-family:var(--mono);font-size:12.5px;font-weight:700;letter-spacing:.1em;text-transform:uppercase}
+.tile p{font-size:12px;color:var(--ink-2);margin-top:6px;line-height:1.6}
+.tile .ft{display:flex;justify-content:space-between;align-items:center;padding:9px 14px;
+  background:var(--cd-2);border-top:1px solid var(--rl);font-family:var(--mono);font-size:10px;color:var(--ink-3)}
+.tile .ft .go{color:var(--felt);font-weight:700;letter-spacing:.08em}
+.lobby-meta{display:flex;gap:26px;flex-wrap:wrap;width:100%;margin-top:22px;padding-top:14px;
+  border-top:1px solid var(--rl);font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:.06em}
+.lobby-meta b{color:var(--ink);font-weight:700}
+
+/* ==========================================================================
+   C3 · 个人中心 /dashboard
+   ========================================================================== */
+.dash{display:grid;grid-template-columns:236px minmax(0,1fr);gap:0;min-height:600px}
+.dash-side{border-right:1px solid var(--rl);background:var(--cd);padding:22px 0}
+.dash-side .grp{padding:0 16px 16px}
+.dash-side h5{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;padding-bottom:7px;border-bottom:1px solid var(--rl);margin-bottom:6px}
+.dash-side a{display:block;padding:6px 9px;border-left:2px solid transparent;font-size:12.5px;color:var(--ink-2)}
+.dash-side a:hover{background:var(--pg-2);color:var(--ink)}
+.dash-side a.on{background:var(--felt-w);color:var(--felt);font-weight:600;border-left-color:var(--felt)}
+.dash-main{padding:26px 32px 34px}
+.dash-main>h1{font-size:23px;font-weight:800;letter-spacing:-.015em}
+.dash-main>.sub{font-size:12.5px;color:var(--ink-3);margin:5px 0 24px;font-family:var(--mono)}
+.panel{border:1px solid var(--rl-2);border-radius:var(--r);background:var(--cd);margin-bottom:20px}
+.panel>.ph{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 16px;
+  background:var(--cd-2);border-bottom:1px solid var(--rl)}
+.panel>.ph h3{font-size:13.5px;font-weight:700}
+.panel>.pb{padding:16px}
+.field{display:grid;grid-template-columns:112px minmax(0,1fr) auto;gap:14px;align-items:center;
+  padding:11px 0;border-bottom:1px dotted var(--rl)}
+.field:last-child{border-bottom:0}
+.field label{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3)}
+.field .v{font-size:13.5px;color:var(--ink);font-family:var(--mono);word-break:break-all}
+.field .v.empty{color:var(--ink-3)}
+.danger-zone{border-color:var(--bad-rl)}
+.danger-zone>.ph{background:var(--bad-w);border-bottom-color:var(--bad-rl)}
+.danger-zone>.ph h3{color:var(--bad)}
+.pk-modes{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
+.warn{display:flex;gap:10px;padding:11px 13px;border:1px solid var(--amb-rl);border-left:3px solid var(--amb);
+  background:var(--amb-w);border-radius:var(--r);font-size:12.5px;color:var(--ink);line-height:1.6}
+.tip{font-size:12px;color:var(--ink-3);margin-top:8px;line-height:1.6}
+
+/* ==========================================================================
+   C4 · 白皮书 /whitepaper
+   ========================================================================== */
+.wp{display:grid;grid-template-columns:248px minmax(0,1fr);gap:0;min-height:640px}
+.wp-toc{border-right:1px solid var(--rl);background:var(--cd);padding:24px 0;position:sticky;top:0}
+.wp-toc .cov{padding:0 18px 20px;border-bottom:1px solid var(--rl);margin-bottom:16px}
+.wp-toc .bd{font-family:var(--mono);font-size:9.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--felt)}
+.wp-toc h4{font-size:16px;font-weight:800;margin-top:8px;line-height:1.3;letter-spacing:-.01em}
+.wp-toc ol{list-style:none;counter-reset:s}
+.wp-toc li{counter-increment:s}
+.wp-toc li a{display:flex;gap:9px;padding:5px 18px;font-size:12.5px;color:var(--ink-2);border-left:2px solid transparent}
+.wp-toc li a::before{content:counter(s,decimal-leading-zero);font-family:var(--mono);font-size:10px;color:var(--ink-3);flex:none;padding-top:2px}
+.wp-toc li a:hover{background:var(--pg-2);color:var(--ink)}
+.wp-toc li a.on{background:var(--felt-w);color:var(--felt);font-weight:600;border-left-color:var(--felt)}
+.wp-body{padding:34px 44px 44px;max-width:74em}
+.wp-body .cover{border:1px solid var(--rl-2);background:var(--cd);padding:26px 28px;position:relative;
+  border-radius:var(--r);margin-bottom:30px;overflow:hidden}
+.wp-body .cover h1{font-size:31px;font-weight:800;letter-spacing:-.022em;line-height:1.2;max-width:18em}
+.wp-body .cover .meta{font-family:var(--mono);font-size:11px;color:var(--ink-3);margin-top:14px;letter-spacing:.06em}
+.wp-body .cover .seal{right:26px;top:26px}
+.wp-body h2{font-size:19px;font-weight:800;margin:34px 0 10px;padding-top:14px;border-top:1px solid var(--rl);letter-spacing:-.01em}
+.wp-body h2:first-of-type{border-top:0;padding-top:0;margin-top:0}
+.wp-body h3{font-size:14.5px;font-weight:700;margin:22px 0 6px;color:var(--ink)}
+.wp-body p{font-size:13.5px;line-height:1.82;color:var(--ink-2);margin-bottom:12px;max-width:70ch}
+.wp-body .formula{display:block;background:var(--code);border:1px solid var(--rl);border-radius:var(--r);
+  padding:12px 14px;margin:14px 0;font-family:var(--mono);font-size:12px;line-height:1.75;color:var(--ink);
+  overflow-x:auto;font-variant-numeric:tabular-nums}
+.wp-body table{width:100%;border-collapse:collapse;border:1px solid var(--rl);font-size:12.5px;margin:14px 0}
+.wp-body th{background:var(--cd-2);text-align:left;padding:7px 11px;border-bottom:1px solid var(--ink);
+  font-family:var(--mono);font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);white-space:nowrap}
+.wp-body td{padding:8px 11px;border-bottom:1px solid var(--rl);color:var(--ink-2);vertical-align:top}
+.wp-body td code{font-family:var(--mono);font-size:11.5px;color:var(--ink)}
+
+/* ==========================================================================
+   C5 · 404
+   ========================================================================== */
+.nf{min-height:420px;display:grid;place-items:center;padding:44px 24px;text-align:center;
+  background:repeating-linear-gradient(to bottom,transparent 0 27px,var(--rule-paper) 27px 28px),var(--pg)}
+.nf .code{font-family:var(--mono);font-size:76px;font-weight:700;line-height:1;color:var(--rl-2);letter-spacing:-.04em}
+.nf h2{font-size:23px;font-weight:800;margin-top:16px}
+.nf p{font-size:13.5px;color:var(--ink-2);margin:9px 0 24px}
+.nf .links{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:22px;padding-top:20px;border-top:1px solid var(--rl)}
+.nf .links a{font-family:var(--mono);font-size:11px;color:var(--ink-3);letter-spacing:.06em}
+.nf .links a:hover{color:var(--felt)}
+
+/* ==========================================================================
+   C6 / C7 · 弹窗
+   ========================================================================== */
+.ovl{position:relative;background:var(--pg-2);padding:34px 24px;display:flex;
+  align-items:flex-start;justify-content:center;min-height:560px}
+.ovl::before{content:"";position:absolute;inset:0;background:rgba(20,19,15,.42)}
+html[data-ground="night"] .ovl::before{background:rgba(0,0,0,.62)}
+.clip{position:relative;width:100%;max-width:520px;background:var(--cd);border:1px solid var(--rl-2);
+  border-radius:var(--r-l);box-shadow:0 1px 0 rgba(20,19,15,.06);overflow:hidden}
+.clip.wide{max-width:660px}
+.clip .ch-head{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:14px 18px;border-bottom:1px solid var(--rl);background:var(--cd-2)}
+.clip .ch-head h3{font-size:15px;font-weight:800;letter-spacing:-.01em}
+.clip .ch-head .x{width:26px;height:26px;border:1px solid var(--rl-2);border-radius:var(--r);
+  display:grid;place-items:center;font-family:var(--mono);font-size:13px;color:var(--ink-3);cursor:pointer;background:var(--cd)}
+.clip .ch-head .x:hover{color:var(--ink);border-color:var(--ink)}
+.clip .ch-body{padding:18px}
+.clip .ch-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:13px 18px;border-top:1px solid var(--rl);background:var(--cd-2)}
+.w-state{display:flex;gap:11px;align-items:flex-start;padding:12px 13px;border:1px solid var(--rl);
+  border-radius:var(--r);background:var(--cd-2);margin-bottom:16px}
+.w-state.bad{border-color:var(--bad-rl);background:var(--bad-w)}
+.w-state.ok{border-color:var(--felt-rl);background:var(--felt-w)}
+.w-state .ic{font-family:var(--mono);font-size:15px;font-weight:700;line-height:1.3;flex:none}
+.w-state.bad .ic{color:var(--bad)} .w-state.ok .ic{color:var(--felt)} .w-state .ic{color:var(--ink-3)}
+.w-state .tx{font-size:12.5px;line-height:1.65;color:var(--ink)}
+.w-state .tx .s{display:block;color:var(--ink-2);margin-top:3px}
+.opt{display:flex;gap:12px;align-items:flex-start;width:100%;text-align:left;padding:13px 14px;
+  border:1px solid var(--rl-2);border-radius:var(--r);background:var(--cd);cursor:pointer;margin-bottom:9px}
+.opt:hover{border-color:var(--felt)}
+.opt.on{border-color:var(--felt);background:var(--felt-w);box-shadow:inset 3px 0 0 var(--felt)}
+.opt.real.on{border-color:var(--real);background:var(--real-w);box-shadow:inset 3px 0 0 var(--real)}
+.opt .rd{width:14px;height:14px;border:1.5px solid var(--ink-3);border-radius:50%;flex:none;margin-top:3px;position:relative}
+.opt.on .rd{border-color:var(--felt)}
+.opt.on .rd::after{content:"";position:absolute;inset:3px;border-radius:50%;background:var(--felt)}
+.opt.real.on .rd{border-color:var(--real)} .opt.real.on .rd::after{background:var(--real)}
+.opt .t{font-size:13.5px;font-weight:700}
+.opt .d{font-size:12px;color:var(--ink-2);margin-top:3px;line-height:1.6}
+.opt .tg{margin-left:auto;font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-3);flex:none}
+/* 领取：金额 + 条件清单 */
+.claim-hero{padding:20px 18px;border-bottom:1px solid var(--rl);background:var(--cd-2);
+  display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.claim-hero .amt{font-family:var(--mono);font-size:40px;font-weight:700;line-height:1;color:var(--felt);
+  font-variant-numeric:tabular-nums;letter-spacing:-.03em}
+.claim-hero .amt .u{font-size:14px;color:var(--ink-3);margin-left:6px;letter-spacing:.06em}
+.claim-hero .r{text-align:right}
+.ck{list-style:none}
+.ck li{display:flex;gap:11px;align-items:flex-start;padding:10px 0;border-bottom:1px dotted var(--rl);font-size:12.5px}
+.ck li:last-child{border-bottom:0}
+.ck .bx{width:15px;height:15px;flex:none;margin-top:2px;border:1.5px solid var(--ink-3);border-radius:2px;
+  display:grid;place-items:center;font-family:var(--mono);font-size:10px;line-height:1}
+.ck li.ok .bx{background:var(--felt);border-color:var(--felt);color:var(--on-felt)}
+.ck li.ok .bx::after{content:"✓"}
+.ck li.no .bx{border-color:var(--bad);border-style:dashed}
+.ck li.no .bx::after{content:"!";color:var(--bad);font-weight:700}
+.ck li.no .tx{color:var(--ink)}
+.ck .tx{flex:1;line-height:1.6}
+.ck .tx .fix{display:block;color:var(--felt);font-weight:600;margin-top:2px}
+.ck .lk{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);letter-spacing:.08em;text-transform:uppercase;flex:none;padding-top:3px}
+.lockbar{margin:14px 0 0;border:1px solid var(--real-rl);background:var(--real-w);border-radius:var(--r);padding:11px 13px}
+.lockbar .lh{display:flex;justify-content:space-between;align-items:baseline;font-family:var(--mono);font-size:11px;color:var(--real)}
+.lockbar .lh b{font-size:15px;font-weight:700;font-variant-numeric:tabular-nums}
+.lockbar .m{height:4px;background:rgba(125,83,8,.16);border-radius:2px;margin-top:9px;overflow:hidden}
+.lockbar .m i{display:block;height:100%;width:68%;background:var(--real)}
+.lockbar .lt{font-size:11.5px;color:var(--ink-2);margin-top:8px;line-height:1.55}
+.split2{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rl);border:1px solid var(--rl);margin-top:16px}
+.split2 .c{background:var(--cd);padding:13px 14px}
+.split2 h5{font-family:var(--mono);font-size:9.5px;letter-spacing:.13em;text-transform:uppercase;color:var(--ink-3);font-weight:700}
+.split2 .v{font-family:var(--mono);font-size:17px;font-weight:700;margin-top:7px;font-variant-numeric:tabular-nums}
+.split2 .v.f{color:var(--felt)} .split2 .v.r{color:var(--real)}
+.split2 p{font-size:11.5px;color:var(--ink-2);margin-top:6px;line-height:1.6}
+.guide{margin-top:14px;border-top:1px solid var(--rl);padding-top:13px}
+.guide ol{list-style:none;counter-reset:g}
+.guide li{counter-increment:g;display:flex;gap:10px;padding:6px 0;font-size:12px;color:var(--ink-2);line-height:1.6}
+.guide li::before{content:counter(g);font-family:var(--mono);font-size:10px;font-weight:700;color:var(--ink-3);
+  border:1px solid var(--rl-2);border-radius:2px;width:17px;height:17px;display:grid;place-items:center;flex:none;margin-top:2px}
+
+/* ---------- 说明块（评审用，出图时可隐藏） ---------- */
+.note{max-width:1280px;margin:-14px auto 30px;padding:0 16px;font-size:12px;color:var(--ink-3);line-height:1.7}
+.note b{color:var(--ink-2)}
+body.shot .toolbar,body.shot .screen-tag,body.shot .note,body.shot .screen{display:none}
+body.shot #shot-mount{margin:0}
+body.shot #shot-mount .screen{display:block;border:0;border-radius:0;margin:0;max-width:none}
+body.shot{background:var(--pg)}
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <b>底面</b>
+  <button data-g="paper" aria-pressed="true">纸白 PAPER</button>
+  <button data-g="night" aria-pressed="false">夜场 NIGHT</button>
+  <span style="flex:1"></span>
+  <b>屏</b>
+  <button data-jump="c1">C1 首页</button>
+  <button data-jump="c2">C2 大厅</button>
+  <button data-jump="c3">C3 个人中心</button>
+  <button data-jump="c4">C4 白皮书</button>
+  <button data-jump="c5">C5 404</button>
+  <button data-jump="c6">C6 登录</button>
+  <button data-jump="c7">C7 领取</button>
+</div>
+
+<div id="shot-mount"></div>
+<div class="stage">
+
+<!-- ================= C1 首页 ================= -->
+<section class="screen" id="c1">
+  <div class="screen-tag"><span class="id">C1</span><span class="rt">/</span>
+    <span class="ds">首页 · SecretPokerHomePage.tsx · 文案全部来自 zh.json homepage_*</span></div>
+
+  <nav class="cnav">
+    <p class="brand"><span class="mk">♠</span>Secret Poker</p>
+    <div class="links">
+      <a class="on" href="#c1">首页</a><a href="#c2">大厅</a><a href="#c1">特性</a>
+      <a href="#c1">优势</a><a href="#c1">工作原理</a><a href="#c4">白皮书</a>
+    </div>
+    <span class="sp"></span>
+    <span class="wallet-chip"><span class="dot"></span>0x7c1a…4a9f<span class="net">· SEPOLIA</span></span>
+    <button class="btn sm real" style="margin-left:10px">领取</button>
+    <button class="btn sm" style="margin-left:6px">购买筹码</button>
+  </nav>
+
+  <div class="h-hero">
+    <div class="h-hero-l">
+      <span class="badge">对作弊者数学上不公平</span>
+      <h1>唯一的扑克室<span class="l2">作弊不可能发生</span></h1>
+      <p class="desc">
+        <span class="r">每张牌在离开你的设备前就已加密。</span>
+        <span class="r">服务器看不到你的手牌，我们也看不到。</span>
+      </p>
+      <div class="h-cta">
+        <a class="btn pri lg" href="#c2">加入牌桌 <span class="k">→ /play</span></a>
+        <a class="btn gho lg" href="#c1">了解工作原理</a>
+      </div>
+    </div>
+    <div class="h-hero-r">
+      <div class="blindbox">
+        <div class="bh"><span>SEAT 5 · 你</span><span>HERO VIEW</span></div>
+        <div class="rows">
+          <div class="brow"><span class="who">你的底牌</span><span class="val me">■ ■</span></div>
+          <div class="brow"><span class="who">SEAT 1 Aria</span><span class="val hid">■ ■</span></div>
+          <div class="brow"><span class="who">SEAT 3 Kenji</span><span class="val hid">■ ■</span></div>
+          <div class="brow"><span class="who">公共牌 FLOP</span><span class="val hid">■ ■ ■</span></div>
+          <div class="brow"><span class="who">服务器可见</span><span class="val">∅ 空集</span></div>
+        </div>
+        <div class="bf">CIPHERTEXT ONLY · 256-BIT · E2E</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="stat3">
+    <div class="cell"><div class="n">∅</div><div class="t">服务器盲</div><div class="k">你的手牌始终隐藏</div></div>
+    <div class="cell"><div class="n">256 位</div><div class="t">端到端加密</div><div class="k">设备端加解密</div></div>
+    <div class="cell"><div class="n">100%</div><div class="t">可证明公平</div><div class="k">每一手牌留证明</div></div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-h">
+      <div>
+        <div class="lbl tag">传统扑克室对你隐瞒了什么</div>
+        <h2>你的手牌只有你自己能看到</h2>
+        <p class="sub">在普通扑克室，服务器知道每一张牌。在这里，它什么都看不到。</p>
+      </div>
+    </div>
+    <div class="grid4">
+      <div class="g f"><div class="num">01 / ENCRYPT</div><h3>设备端加密</h3>
+        <p>你的底牌在离开浏览器前就已锁定。即使服务器被攻破，也不会泄露任何信息。</p></div>
+      <div class="g p"><div class="num">02 / SHUFFLE</div><h3>全员洗牌</h3>
+        <p>每位玩家依次洗牌。没有任何人——包括平台——知道牌的顺序。</p></div>
+      <div class="g a"><div class="num">03 / UNLOCK</div><h3>只有你的浏览器能解锁你的手牌</h3>
+        <p>你的私钥永远不会离开你的设备。服务器永远无法偷看你的手牌。</p></div>
+      <div class="g r"><div class="num">04 / KEYS</div><h3>密钥在你手中</h3>
+        <p>你的私钥始终保存在你的设备上。你控制访问权限，也可以安全地委托。</p></div>
+    </div>
+  </div>
+
+  <div class="sec alt">
+    <div class="sec-h">
+      <div>
+        <div class="lbl tag">保持优势，保持隐私</div>
+        <h2>更低费用，零服务器可见性，永不宕机</h2>
+      </div>
+    </div>
+    <div class="grid4">
+      <div class="g f"><div class="num">可审计</div><h3>每一手牌都可审计</h3>
+        <p>每一手牌都留下密码学证明。任何人都可以验证公平性。无需信任。</p>
+        <div class="big">100%</div><div class="bigk">AUDITABLE</div></div>
+      <div class="g p"><div class="num">下载量</div><h3>随时随地，即开即玩</h3>
+        <p>打开浏览器即可游戏。无需下载，无需注册，无需等待。</p>
+        <div class="big">0</div><div class="bigk">INSTALLS NEEDED</div></div>
+      <div class="g r"><div class="num">平台费用</div><h3>我们收取不到 1%</h3>
+        <p>传统平台每锅抽取 2–5%。我们收取不到 1%。这个差距很快就会体现出来。</p>
+        <div class="big">&lt;1%</div><div class="bigk">RAKE</div></div>
+      <div class="g a"><div class="num">可用性</div><h3>零停机，零维护</h3>
+        <p>基于去中心化基础设施构建。没有单点故障，意味着没有"服务器维护"的借口。</p>
+        <div class="big">24/7</div><div class="bigk">UPTIME</div></div>
+    </div>
+  </div>
+
+  <div class="sec">
+    <div class="sec-h">
+      <div>
+        <div class="lbl tag">五个步骤，完全透明</div>
+        <h2>我们如何在看不到你手牌的情况下发牌</h2>
+        <p class="sub">不需要数学学位。以下是逐步发生的全过程。</p>
+      </div>
+    </div>
+    <div class="steps">
+      <div class="step on"><span class="no">01</span><h4>锁定牌组</h4>
+        <p>每位玩家为牌组添加一把数字锁。没有人能单独打开它。</p>
+        <span class="ev">commit<sub>1..n</sub><b>SHA-256</b></span></div>
+      <div class="step"><span class="no">02</span><h4>共同洗牌</h4>
+        <p>每位玩家依次洗牌。最终顺序是随机的，任何人都不知道。</p>
+        <span class="ev">shuffle<b>MULTI-PROVER</b></span></div>
+      <div class="step"><span class="no">03</span><h4>暗牌发放</h4>
+        <p>牌在锁定状态下发放。服务器只能看到加密数据。</p>
+        <span class="ev">deal<b>CIPHERTEXT</b></span></div>
+      <div class="step"><span class="no">04</span><h4>适时揭示</h4>
+        <p>到了展示的时候，你的浏览器会使用私钥在本地解锁你的手牌。</p>
+        <span class="ev">reveal<b>LOCAL-ONLY</b></span></div>
+      <div class="step"><span class="no">05</span><h4>公共牌开放</h4>
+        <p>公共牌由所有玩家协作逐张解锁。</p>
+        <span class="ev">board<b>THRESHOLD</b></span></div>
+      <div class="step"><span class="no">06</span><h4>验证一切</h4>
+        <p>每个操作都留下证明。如果任何内容被篡改，任何人都能立即发现。</p>
+        <span class="ev">verify<b>STARK / AIR</b></span></div>
+    </div>
+  </div>
+
+  <div class="cta-band">
+    <h2>无需信任，只需数学</h2>
+    <p>几秒内加入牌桌。无需下载，没有暗牌，没有庄家优势。</p>
+    <a class="btn pri" href="#c2">免费开始游戏</a>
+  </div>
+
+  <footer class="cfoot">
+    <div>
+      <div class="tg">相信数学，不信庄家。</div>
+      <div class="bs">基于：经同行评审的心理扑克密码学<br>技术栈：Starknet · STWO · Cairo</div>
+    </div>
+    <div><h5>产品</h5><ul><li><a href="#c2">大厅</a></li><li><a href="#c3">个人中心</a></li><li><a href="#c5">规则</a></li></ul></div>
+    <div><h5>透明</h5><ul><li><a href="#c4">白皮书</a></li><li><a href="#c1">赔付承诺</a></li><li><a href="#c1">状态</a></li></ul></div>
+  </footer>
+</section>
+<div class="note"><b>C1 决策</b>：原页是三张卡通人物 PNG 卡片 + 渐变文字。改成「服务器视角」的密文表——
+一把牌全部显示为 ■，最后一行 <b>服务器可见 = ∅ 空集</b>，把"看不到牌"这句话变成看得见的证据。
+统计带用等宽数字 + 顶部细线，不用渐变大数字。<b>homepage_how</b> 的六步（源码里是 5 个 step + verify）
+排成账簿竖表，右侧一列标出该步对应的密码学原语，方便评审对着白皮书看。</div>
+
+<!-- ================= C2 大厅 ================= -->
+<section class="screen" id="c2">
+  <div class="screen-tag"><span class="id">C2</span><span class="rt">/lobby</span>
+    <span class="ds">大厅 · SecretPokerLobby.tsx · main_page_* / navbar_* / funds-banner_*</span></div>
+
+  <nav class="cnav">
+    <p class="brand"><span class="mk">♠</span>Secret Poker</p>
+    <div class="links">
+      <a href="#c1">首页</a><a class="on" href="#c2">大厅</a><a href="#c3">个人中心</a><a href="#c4">白皮书</a>
+    </div>
+    <span class="sp"></span>
+    <span class="wallet-chip"><span class="dot"></span>0x7c1a…4a9f<span class="net">· SEPOLIA</span></span>
+    <button class="btn sm real" style="margin-left:10px">领取</button>
+    <button class="btn sm" style="margin-left:6px">购买筹码</button>
+  </nav>
+
+  <div class="lobby">
+    <div class="fund-banner" style="width:100%;margin-top:26px">
+      <span class="ch amb">链上金库</span>
+      <div class="tx">
+        <div class="t">未领取，可随时领回钱包</div>
+        <div class="d">离开牌桌后筹码保存在链上金库，不会自动回到你的钱包。本桌剩余 1,240 筹码已存入链上金库，可随时领取。</div>
+      </div>
+      <span class="amt">1,240</span>
+      <button class="btn sm pri">去领取</button>
+      <button class="btn sm">关闭提醒</button>
+    </div>
+
+    <div class="salute">你好，<span class="nm">玩家</span>!</div>
+    <div class="salute-sub">A-2231 · 6 MAX · BLINDS 25/50 · RAKE 1.5% CAP 50</div>
+
+    <div class="tiles">
+      <button class="tile k">
+        <div class="top"><span class="rk">A</span><span class="su">♠</span></div>
+        <div class="bd"><h3>加入牌桌</h3><p>选择桌号入座。买入即锁定，离桌后 12 小时可解锁。</p></div>
+        <div class="ft"><span>3 张空位</span><span class="go">→ /play</span></div>
+      </button>
+      <button class="tile q">
+        <div class="top"><span class="rk">K</span><span class="su">♠</span></div>
+        <div class="bd"><h3>快速游戏</h3><p>直接进入有空位的最快一桌，不挑盲注结构。</p></div>
+        <div class="ft"><span>平均等待 4s</span><span class="go">→ /play</span></div>
+      </button>
+      <button class="tile j">
+        <div class="top"><span class="rk">Q</span><span class="su">♠</span></div>
+        <div class="bd"><h3>商店</h3><p>商店即将上线！敬请期待。</p></div>
+        <div class="ft"><span class="ch mut">COMING SOON</span><span class="go">—</span></div>
+      </button>
+      <button class="tile a">
+        <div class="top"><span class="rk">J</span><span class="su">♠</span></div>
+        <div class="bd"><h3>规则</h3><p>德州扑克规则、结算口径、超时与踢出降级。</p></div>
+        <div class="ft"><span>12 节</span><span class="go">→ /game-rules</span></div>
+      </button>
+    </div>
+
+    <div class="lobby-meta">
+      <span>已连接 <b>sequencer-1</b></span>
+      <span>WS <b>OPEN</b></span>
+      <span>筹码 <b>12,480 PLAY</b></span>
+      <span>REAL 映射 <b>0.00</b></span>
+      <span>本手证明 <b>proven</b></span>
+      <span>版本 <b>v0.2.0-alpha</b></span>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C2 决策</b>：原来四张 196×210 的卡通人物 PNG（king/queen/jack）换成<b>牌面本身</b>作图标语言——
+A♠ 加入牌桌、K♠ 快速游戏、Q♠ 商店、J♠ 规则，零图片、零加载，和牌桌稿的牌面完全同源。
+每张卡底部一条状态脚注（空位数 / 等待时长 / 即将上线 / 节数），把"按钮"升级成"可读的账目行"。
+未领取资金横幅用 <b>--amb</b> 左规线 + <b>--real</b> 金额，因为这笔钱是托管语义，不是错误。</div>
+
+<!-- ================= C3 个人中心 ================= -->
+<section class="screen" id="c3">
+  <div class="screen-tag"><span class="id">C3</span><span class="rt">/dashboard</span>
+    <span class="ds">个人中心 · Dashboard.tsx · dashboard-* / playerkey-*</span></div>
+
+  <nav class="cnav">
+    <p class="brand"><span class="mk">♠</span>Secret Poker</p>
+    <div class="links"><a href="#c1">首页</a><a href="#c2">大厅</a><a class="on" href="#c3">个人中心</a><a href="#c4">白皮书</a></div>
+    <span class="sp"></span>
+    <span class="wallet-chip"><span class="dot"></span>0x7c1a…4a9f<span class="net">· SEPOLIA</span></span>
+    <button class="btn sm real" style="margin-left:10px">领取</button>
+  </nav>
+
+  <div class="dash">
+    <aside class="dash-side">
+      <div class="grp"><h5>账户</h5>
+        <a class="on" href="#c3">个人中心</a><a href="#c3">牌局记录</a><a href="#c3">资金与领取</a></div>
+      <div class="grp"><h5>身份</h5>
+        <a href="#c3">牌桌身份密钥</a><a href="#c3">已授权设备</a></div>
+      <div class="grp"><h5>文档</h5>
+        <a href="#c4">白皮书</a><a href="#c1">规则</a></div>
+    </aside>
+
+    <div class="dash-main">
+      <h1>个人中心</h1>
+      <p class="sub">0x7c1a…4a9f · SEPOLIA · 注册于 2026-08-14</p>
+
+      <div class="panel">
+        <div class="ph"><h3>资料</h3><span class="ch info">可编辑</span></div>
+        <div class="pb">
+          <div class="field"><label>昵称</label><span class="v">hero_4a9f</span>
+            <button class="btn sm">更新昵称</button></div>
+          <div class="field"><label>邮箱</label><span class="v empty">未填写</span>
+            <button class="btn sm">更新邮箱</button></div>
+          <div class="field"><label>密码</label><span class="v">••••••••</span>
+            <button class="btn sm">重置密码</button></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h3>牌桌身份密钥</h3><span class="ch ok">已生成</span></div>
+        <div class="pb">
+          <div class="pk-modes">
+            <span class="ch ok">随机密钥 · 当前</span>
+            <span class="ch mut">口令派生</span>
+            <span class="ch mut">旧版钱包派生</span>
+            <button class="btn sm" style="margin-left:auto">换随机密钥</button>
+            <button class="btn sm">用口令生成/恢复</button>
+          </div>
+          <div class="field" style="grid-template-columns:112px minmax(0,1fr);border-bottom:0">
+            <label>当前 pk</label>
+            <span class="v">0x049bdf1b…7f3c2a8e5d14b0a6c9e2f7718ab340dc5e6f10293847b5a1</span>
+          </div>
+          <div class="tip">生成全新随机身份（放弃口令可恢复性）。同一口令在任何设备派生同一身份；忘记口令无法找回。</div>
+          <div class="warn" style="margin-top:13px">
+            <span class="ch amb" style="flex:none;margin-top:1px">注意</span>
+            <span>牌局进行中切换身份会使当前座位的义务失效（走超时/踢出降级），建议牌局间歇操作。</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="ph"><h3>资金</h3><span class="ch real">托管网络 v1</span></div>
+        <div class="pb">
+          <div class="field"><label>PLAY 筹码</label><span class="v">12,480</span><span></span></div>
+          <div class="field"><label>在局锁定</label><span class="v">2,000 <span class="ch amb">12h 后解锁</span></span><button class="btn sm dis">解锁</button></div>
+          <div class="field"><label>可领取</label><span class="v" style="color:var(--felt);font-weight:700">1,240</span><button class="btn sm pri">去领取</button></div>
+          <div class="field"><label>REAL 映射</label><span class="v empty">0.00 · v1 不对外开放充值</span><span></span></div>
+        </div>
+      </div>
+
+      <div class="panel danger-zone">
+        <div class="ph"><h3>危险操作</h3><span class="ch no">不可撤销</span></div>
+        <div class="pb">
+          <div class="field" style="grid-template-columns:112px minmax(0,1fr) auto">
+            <label>删除账户</label>
+            <span style="font-size:12.5px;color:var(--ink-2)">删除后牌局记录与链上金库票据仍留在链上，但本设备不再能派生对应身份。</span>
+            <button class="btn sm" style="border-color:var(--bad);color:var(--bad)">删除账户</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C3 决策</b>：Dashboard 原本只有四个按钮。这里把它按<b>账户 / 身份 / 资金 / 危险操作</b>
+四块面板重排，字段行用点线分隔（账簿内页），值一律等宽数字。牌桌身份密钥面板把
+playerkey-* 的三种派生模式做成互斥标签，并把"牌局中切换会失效座位义务"的警告留在原位——
+这条是玩家最容易踩的坑，不能收进 tooltip。</div>
+
+<!-- ================= C4 白皮书 ================= -->
+<section class="screen" id="c4">
+  <div class="screen-tag"><span class="id">C4</span><span class="rt">/whitepaper</span>
+    <span class="ds">白皮书 · Whitepaper.tsx + whitepaper/WhitepaperZh.tsx · 目录 + 正文</span></div>
+
+  <nav class="cnav">
+    <p class="brand"><span class="mk">♠</span>Secret Poker</p>
+    <div class="links"><a href="#c1">首页</a><a href="#c2">大厅</a><a href="#c3">个人中心</a><a class="on" href="#c4">白皮书</a></div>
+    <span class="sp"></span>
+    <button class="btn sm">返回首页</button>
+  </nav>
+
+  <div class="wp">
+    <aside class="wp-toc">
+      <div class="cov"><div class="bd">白皮书 v2.0</div><h4>加密扑克</h4></div>
+      <ol>
+        <li><a class="on" href="#c4">摘要</a></li>
+        <li><a href="#c4">威胁模型</a></li>
+        <li><a href="#c4">密码学构造</a></li>
+        <li><a href="#c4">协作洗牌协议</a></li>
+        <li><a href="#c4">结算与赔付承诺</a></li>
+        <li><a href="#c4">STARK 证明系统</a></li>
+        <li><a href="#c4">链上合约</a></li>
+        <li><a href="#c4">性能与成本</a></li>
+        <li><a href="#c4">局限与路线图</a></li>
+      </ol>
+    </aside>
+
+    <div class="wp-body">
+      <div class="cover">
+        <div class="lbl">ZChain Poker · 技术白皮书</div>
+        <h1 style="margin-top:10px">让庄家看不到牌，<br>同时让任何人能验证牌没被换过</h1>
+        <div class="meta">v2.0 · 2026-09-12 · 中文 · 同行评审心理扑克（Mental Poker）构造 · Starknet Appchain</div>
+        <div class="seal">ZCHAIN<br>PROVEN<br>2026</div>
+      </div>
+
+      <h2>1. 摘要</h2>
+      <p>传统在线扑克把三件互相冲突的职责交给同一个服务器：发牌、保管筹码、审计公平。
+        本白皮书描述的系统把这三件事拆开——发牌由玩家协作完成，服务器只见密文；
+        筹码由链上金库托管，结算由可验证的状态转移驱动；审计由公开的 STARK 证明承担，任何第三方无需信任运营方即可复核。</p>
+      <p>结果是：作弊在协议层不可能，而不是在承诺层不被允许。</p>
+      <div class="formula">
+Inputs  == proofs == Σpayouts + rake        （守恒：逐手强制）
+plan.rake.total = Σ plan.pots[*].rake       （分层自洽）
+finality: soft accepted → BFT ordered → proven → finalized/claimable
+      </div>
+
+      <h2>2. 威胁模型</h2>
+      <h3>2.1 运营方（Sequencer）</h3>
+      <p>运营方假设是<b>诚实但好奇</b>（honest-but-curious）：它按协议排序与执行，但会尝试读取任何它能读到的信息。
+        协议对它的保证是——它在任何一手牌进行中都无法区分任意两张未揭示的牌，因为它从未拿到过对应的解密密钥。</p>
+      <h3>2.2 合谋玩家</h3>
+      <p>至多 <span class="mono">t &lt; n/2</span> 个玩家可以合谋。超过该阈值时洗牌阶段的门限解密不再安全，
+        系统在牌桌层面拒绝开局而不是静默降级——这条在 §4.3 有对应的强制点。</p>
+      <table>
+        <thead><tr><th>攻击面</th><th>能拿到什么</th><th>拿不到什么</th><th>强制点</th></tr></thead>
+        <tbody>
+          <tr><td><code>sequencer</code></td><td>密文牌序、动作时序</td><td>任何未揭示底牌</td><td>设备端加密 §3.1</td></tr>
+          <tr><td><code>t &lt; n/2</code> 合谋</td><td>自己的底牌与共享份额</td><td>他人底牌、最终顺序</td><td>开局拒绝 §4.3</td></tr>
+          <tr><td><code>rpc</code> 中间人</td><td>交易内容与 gas</td><td>身份私钥</td><td>签名校验 §7.2</td></tr>
+          <tr><td><code>db</code> 泄露</td><td>历史昵称与邮箱</td><td>可伪造的历史结算</td><td>证明根上链 §6.1</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C4 决策</b>：白皮书页用与站点 docs 完全相同的<b>左目录 + 右正文</b>骨架，
+目录项前置两位序号，正文首行给一个旋转的 PROVEN 印章。这样客户端和站点的长文档读起来是同一份东西。
+封面标题从产品口号改成技术命题本身——白皮书的第一句应该是它证明了什么，而不是它卖什么。</div>
+
+<!-- ================= C5 404 ================= -->
+<section class="screen" id="c5">
+  <div class="screen-tag"><span class="id">C5</span><span class="rt">/*</span>
+    <span class="ds">未找到 · NotFoundPage.tsx · notfound-* / static_page-back_btn_txt</span></div>
+
+  <nav class="cnav">
+    <p class="brand"><span class="mk">♠</span>Secret Poker</p>
+    <div class="links"><a href="#c1">首页</a><a href="#c2">大厅</a><a href="#c3">个人中心</a><a href="#c4">白皮书</a></div>
+    <span class="sp"></span>
+    <button class="btn sm">登录</button>
+  </nav>
+
+  <div class="nf">
+    <div>
+      <div class="code">404</div>
+      <h2>页面未找到</h2>
+      <p>您访问的页面不存在。</p>
+      <a class="btn pri lg" href="#c1">返回</a>
+      <div class="links">
+        <a href="#c1">→ 首页</a><a href="#c2">→ 大厅</a><a href="#c3">→ 个人中心</a>
+        <a href="#c4">→ 白皮书</a><a href="#c1">→ 规则</a>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C5 决策</b>：404 只有一个大数字和一句"不存在"，其余交给五条常用出口。
+数字用 <b>--rl-2</b> 灰而非主色，避免错误页抢注意力。</div>
+
+<!-- ================= C6 登录 ================= -->
+<section class="screen" id="c6">
+  <div class="screen-tag"><span class="id">C6</span><span class="rt">modal · 登录</span>
+    <span class="ds">login-* / navbar-login_btn · 钱包未检测到 → 已检测到 两态</span></div>
+
+  <div class="ovl">
+    <div class="clip">
+      <div class="ch-head"><h3>登录</h3><button class="x" aria-label="关闭">×</button></div>
+      <div class="ch-body">
+        <div class="w-state ok">
+          <span class="ic">✓</span>
+          <div class="tx">已检测到 <b>Ready 钱包</b>（Chrome 插件）· 账户 0x7c1a…4a9f
+            <span class="s">使用 Starknet 钱包登录 — 无需社交账号。</span></div>
+        </div>
+
+        <div class="lbl" style="margin-bottom:9px">使用 Starknet 钱包登录</div>
+        <button class="opt on">
+          <span class="rd"></span>
+          <div><div class="t">Ready 钱包（Chrome 插件）</div>
+            <div class="d">STRK20 用于筹码买入，您的钱包支付 gas。</div></div>
+          <span class="tg">推荐</span>
+        </button>
+        <button class="opt">
+          <span class="rd"></span>
+          <div><div class="t">其他 Starknet 钱包</div>
+            <div class="d">需支持 STRK20 Wallet API ≥ 0.10.3，否则无法私密领取。</div></div>
+          <span class="tg">API ≥ 0.10.3</span>
+        </button>
+
+        <div class="split2">
+          <div class="c"><h5>Wallet API</h5><div class="v f">0.10.4</div>
+            <p>已报告 · 支持 STRK20 私密交易</p></div>
+          <div class="c"><h5>网络</h5><div class="v r">SEPOLIA</div>
+            <p>主网状态下钱包会直接拒绝私密操作（151 TOKEN_NOT_SUPPORTED）</p></div>
+        </div>
+
+        <div class="tip" style="margin-top:14px">
+          <button class="btn sm" style="margin-right:6px">重新检测</button>
+          <button class="btn sm">切换钱包账户</button>
+        </div>
+      </div>
+      <div class="ch-foot">
+        <span class="lbl">还没有账户？注册即登录</span>
+        <button class="btn pri">登录</button>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C6 决策</b>：本稿画的是"钱包已检测到"这一态；未检测到时上面的绿块换成红块，
+文案为源码原文「未检测到 Starknet 钱包。请安装 Ready 钱包浏览器插件，安装后刷新本页即可登录。」，
+底部两个次级按钮相应变为「我已安装，重新检测」+「安装 Ready 钱包（Chrome 插件）」，
+Wallet API 读数格显示「未报告（钱包不支持或版本过旧）」。登录弹窗里最容易被藏起来的两个事实——<b>Wallet API 版本</b>和<b>当前网络</b>——
+直接决定玩家能不能私密领取，所以提到弹窗内做成两格读数，而不是等他领币失败后再报错。
+社交登录（Google/Apple/Facebook/Twitch）在 zh.json 里存在但与"无需社交账号"的说明冲突，
+本稿按源码注释的钱包优先路径只保留钱包两条，社交入口是否保留需要产品确认（见走查未达项）。</div>
+
+<!-- ================= C7 领取 ================= -->
+<section class="screen" id="c7">
+  <div class="screen-tag"><span class="id">C7</span><span class="rt">modal · 领取奖励</span>
+    <span class="ds">claim-* · 差异化主屏：条件清单 + 锁定倒计时 + 私密/公开双路径</span></div>
+
+  <div class="ovl">
+    <div class="clip wide">
+      <div class="ch-head">
+        <h3>领取奖励</h3>
+        <div style="display:flex;gap:6px;align-items:center">
+          <span class="ch ok">条件 4/5 满足</span>
+          <button class="x" aria-label="关闭">×</button>
+        </div>
+      </div>
+
+      <div class="claim-hero">
+        <div>
+          <div class="lbl">可领取</div>
+          <div class="amt">1,240<span class="u">筹码</span></div>
+        </div>
+        <div class="r">
+          <div class="lbl">池内屏蔽余额</div>
+          <div class="mono" style="font-size:19px;font-weight:700;margin-top:4px">0.084 STRK</div>
+          <div class="tip" style="margin-top:4px">需 ≥ 领取额，执行后等额退回</div>
+        </div>
+      </div>
+
+      <div class="ch-body">
+        <div class="lbl" style="margin-bottom:4px">领取条件</div>
+        <ul class="ck">
+          <li class="ok"><span class="bx"></span>
+            <span class="tx"><b>赔付承诺（我们合约）</b>已注册 —— 提交 payout commitment（一次性链上交易，任何钱包均可）</span>
+            <span class="lk">已注册 ✓</span></li>
+          <li class="ok"><span class="bx"></span>
+            <span class="tx"><b>池 viewing key（Ready 隐私系统）</b>已注册 —— viewing key 只保存在钱包里，dapp 无法代注册</span>
+            <span class="lk">已注册 ✓</span></li>
+          <li class="ok"><span class="bx"></span>
+            <span class="tx">钱包支持 STRK20 私密交易（Wallet API 0.10.4 ≥ 0.10.3）</span>
+            <span class="lk">OK</span></li>
+          <li class="ok"><span class="bx"></span>
+            <span class="tx">钱包当前在 <b>Sepolia 测试网</b></span>
+            <span class="lk">OK</span></li>
+          <li class="no"><span class="bx"></span>
+            <span class="tx">池内屏蔽余额不足：请先在钱包内将 STRK shield 入隐私池（私密领取要求池内余额 ≥ 领取额，执行后等额退回）
+              <span class="fix">注册指引（钱包内 Shield）→ 4 步</span></span>
+            <span class="lk">待处理</span></li>
+        </ul>
+
+        <div class="lockbar">
+          <div class="lh"><span>在局锁定（买入锁定）</span><b>2,000 STRK</b></div>
+          <div class="m"><i></i></div>
+          <div class="lt">入座时锁定的买入筹码，离桌后最多 12 小时自动解锁。
+            最后一手后约 <b class="mono">07:12:44</b> 解锁 —— 倒计时结束后点"解锁"按钮，或直接点击领取解锁后的余额。现在可提 1,240 STRK。</div>
+        </div>
+
+        <div class="lbl" style="margin:18px 0 9px">领取方式</div>
+        <button class="opt real on">
+          <span class="rd"></span>
+          <div><div class="t">私密领取</div>
+            <div class="d">池内两动作：烧筹码 + 产出隐藏归属的 STRK 票据。奖励记入只有你能扫描的池内票据。</div></div>
+          <span class="tg">归属隐藏</span>
+        </button>
+        <button class="opt">
+          <span class="rd"></span>
+          <div><div class="t">公开出金</div>
+            <div class="d">vault.withdraw 直提钱包地址（链上边缘公开）。链上任何人可查。</div></div>
+          <span class="tg">链上公开</span>
+        </button>
+
+        <div class="guide">
+          <div class="lbl" style="margin-bottom:6px">注册指引（钱包内 Shield）</div>
+          <ol>
+            <li>打开 Ready 钱包 → STRK 资产页「Shield / 入池」（隐私池入口）</li>
+            <li>小额 Shield 一次（如 0.01 STRK）；钱包会依次弹出 approve 与 deposit 两次确认（非重复交易）</li>
+            <li>首次入池时钱包自动完成池注册——viewing key 只保存在钱包里，dapp 无法代注册</li>
+            <li>回到本弹窗重新校验，本行变绿即可私密领取</li>
+          </ol>
+        </div>
+      </div>
+
+      <div class="ch-foot">
+        <div style="display:flex;gap:6px;align-items:center">
+          <button class="btn sm">重新校验</button>
+          <button class="btn sm">收起注册指引</button>
+        </div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="lbl">私密领取已禁用：池内余额不足</span>
+          <button class="btn pri dis">私密领取</button>
+          <button class="btn">公开出金</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="note"><b>C7 决策 · 这屏是整套客户端设计的重心</b>：私密领取要跨 5 个前置条件、
+两种出金路径和一段 12 小时锁定，原实现把它们散在 tooltip 和报错里。这里改成<b>账簿的条件清单</b>——
+每行一个条件，左侧方框勾/未勾，右侧是系统实际读到的值，未满足那行直接把修复动作写成链接文字。
+锁定用一条线性计量条（不转圈），因为它是"还剩多少"而不是"进度到哪"。
+私密/公开两条路径用 <b>--real</b> 与 <b>--felt</b> 两种语义色区分归属可见性，而不是用"推荐/普通"的视觉等级——
+这是玩家的隐私选择，不是消费选择。</div>
+
+</div><!-- /stage -->
+
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  if (q.get('g')) document.documentElement.setAttribute('data-ground', q.get('g'));
+  var ids = ['c1','c2','c3','c4','c5','c6','c7'];
+  document.querySelectorAll('[data-g]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      document.documentElement.setAttribute('data-ground', b.dataset.g);
+      document.querySelectorAll('[data-g]').forEach(function (o) {
+        o.setAttribute('aria-pressed', String(o === b));
+      });
+    });
+  });
+  document.querySelectorAll('[data-jump]').forEach(function (b) {
+    b.addEventListener('click', function () {
+      var t = document.getElementById(b.dataset.jump);
+      if (t) t.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+  // 出图模式：?shot=1#c3 → 把目标屏搬进 #shot-mount，去掉评审标注
+  var hash = (location.hash || '').replace('#', '');
+  if (q.get('shot') && ids.indexOf(hash) >= 0) {
+    var src = document.getElementById(hash);
+    document.body.classList.add('shot');
+    var wrap = document.createElement('div');
+    wrap.className = 'screen';
+    while (src.firstElementChild) {
+      var ch = src.firstElementChild;
+      if (ch.classList.contains('screen-tag')) { src.removeChild(ch); continue; }
+      wrap.appendChild(ch);
+    }
+    document.getElementById('shot-mount').appendChild(wrap);
+  }
+})();
+</script>
+</body>
+</html>

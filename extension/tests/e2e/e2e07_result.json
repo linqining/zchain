@@ -1,5 +1,5 @@
 {
-  "date": "2026-09-19T07:40:07.859Z",
+  "date": "2026-09-19T08:22:00.375Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
   "total": 13,
@@ -19,12 +19,12 @@
     {
       "step": "O2-diag",
       "ok": true,
-      "detail": "raw={\"pw\":\"VkmZXZ…\"} rej=[]"
+      "detail": "raw={\"pw\":\"DmfnBI…\"} rej=[]"
     },
     {
       "step": "O2 一键创建 → 成功页：自动口令只显一次 + 三链地址",
       "ok": true,
-      "detail": "VkmZXZ…（24 字符）"
+      "detail": "DmfnBI…（24 字符）"
     },
     {
       "step": "O2b 创建后 SW 状态：onboarded=true + 三层有钱包 + 全部已解锁",

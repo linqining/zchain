@@ -247,22 +247,33 @@ function nodeErr(scope) {
   if (!scope) return null;
   return scope.querySelector?.('.errx') ?? null;
 }
+// 当前屏的错误备忘（{screen,text,code}）：act 处理器普遍「setErr 后 render()」，
+// 而 render 重挂 DOM 会把刚写入的错误行擦掉（zc-send-preview/confirm 等 4 处
+// 真实受害点——用户看不到任何报错）。setErr 记备忘，render 完成后按屏重放。
+let lastErrMemo = null;
+function errApply(n, err) {
+  const code = typeof err === 'string' ? err : err.code;
+  n.appendChild(document.createTextNode(errorText(err)));
+  // 稳定错误码原样附在文案后（中文口径给人读，code 给排查/测试对照；不吞码）。
+  if (code && ERROR_TEXT[code]) n.appendChild(h('code', { class: 'code', text: code }));
+}
 function setErr(scope, err, extra = '') {
   const n = nodeErr(scope);
   if (!n) return;
   n.replaceChildren();
   if (!err) {
     n.textContent = extra;
+    lastErrMemo = null;
     return;
   }
+  errApply(n, err);
   const code = typeof err === 'string' ? err : err.code;
-  n.appendChild(document.createTextNode(errorText(err)));
-  // 稳定错误码原样附在文案后（中文口径给人读，code 给排查/测试对照；不吞码）。
-  if (code && ERROR_TEXT[code]) n.appendChild(h('code', { class: 'code', text: code }));
+  lastErrMemo = { screen: rt.screen, text: errorText(err), code: code && ERROR_TEXT[code] ? code : null };
 }
 function clearErr(scope) {
   const n = nodeErr(scope);
   if (n) n.textContent = '';
+  lastErrMemo = null;
 }
 
 /** 资产行（token 方块 / 名称 + 芯片 / 副行 / 右金额）。 */
@@ -682,6 +693,15 @@ async function render() {
 
     await (RENDERERS[rt.screen] ?? RENDERERS.home)(ov);
     if (mySeq !== rt.seq) return;
+    // 错误重放（见 lastErrMemo）：只重放当前屏的备忘，换屏不串扰。
+    if (lastErrMemo && lastErrMemo.screen === rt.screen) {
+      const n = nodeErr(currentScr());
+      if (n) {
+        n.replaceChildren();
+        n.appendChild(document.createTextNode(lastErrMemo.text));
+        if (lastErrMemo.code) n.appendChild(h('code', { class: 'code', text: lastErrMemo.code }));
+      }
+    }
     applyGround();
     applyOvl();          // 浮层开合跨渲染保持
     ensureCapMatrix();   // 模态仍在打开时把按需内容补回新节点
@@ -1307,7 +1327,9 @@ async function zcPane(ov) {
 
   const faucet = stRes?.networkKind === 'devnet'
     ? cd('devnet 水龙头（本地 stub，仅测试）', [
-      field('铸造金额（PLAY）', input('faucet-amount', { type: 'text', value: '500', cls: 'mono', attrs: { inputmode: 'numeric' } })),
+      // 用户上次输入的铸造金额跨 render 保留（否则铸造一次后金额被打回默认 500，
+      // 连续铸造不同面额会静默铸错——e2e run_09 C0 实测）。
+      field('铸造金额（PLAY）', input('faucet-amount', { type: 'text', value: rt.faucetAmt ?? '500', cls: 'mono', attrs: { inputmode: 'numeric' } })),
       btn('铸造 PLAY note', { cls: 'btn-s', id: 'zc-faucet-btn', attrs: { 'data-act': 'faucet' } }),
       h('p', { class: 'hint-s', style: 'text-align:left', text: '测试筹码：无真实价值、不上主网、不可赎回。' }),
     ])
@@ -1360,6 +1382,7 @@ function notesTable(notes, domain) {
 act('faucet', async () => {
   const v = (document.getElementById('faucet-amount')?.value ?? '').trim();
   if (!/^\d+$/.test(v) || BigInt(v) === 0n) { toast('金额必须是正整数'); return; }
+  rt.faucetAmt = v;
   const res = await send({ type: 'popup:faucet', amount: v });
   if (res?.error) { toast(errorText(res.error)); return; }
   toast(`已铸造 ${fmtAmount(v)} PLAY`);
@@ -1592,6 +1615,9 @@ act('zc-send-max', async () => {
   const v = await availablePlay();
   const n = document.getElementById('zc-send-amount');
   if (n) n.value = v;
+  // MAX 结果必须过 captureForm：随后本 handler 自己的 render() 会用
+  // rt.form 的旧捕获值重挂输入框，不捕获则填入的金额立刻被打回原形。
+  captureForm('zc-send-amount', 'zc-send-owner');
   rt.transfer = null;
   render();
 });

@@ -1,9 +1,9 @@
 {
-  "date": "2026-09-19T07:39:11.880Z",
+  "date": "2026-09-19T08:22:44.582Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
   "gateway": {
-    "baseUrl": "http://127.0.0.1:19205",
+    "baseUrl": "http://127.0.0.1:19263",
     "binding": "0000000000000001000000000000000000000000000000000000000000000000"
   },
   "total": 36,
@@ -18,17 +18,17 @@
     {
       "step": "A1 创建账户1",
       "ok": true,
-      "detail": "{\"accountId\":\"85695fd0-1f17-438d-8057-e10d2dea1ca6\",\"publicKey\":\"03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b"
+      "detail": "{\"accountId\":\"afd50c0f-364b-4587-af5c-bf8f3e1c27ac\",\"publicKey\":\"036241e90c18a2f9937f6b9c35e49a7b3dcc583ade7b9e793324bc6"
     },
     {
       "step": "A2 devnet 水龙头 500 PLAY",
       "ok": true,
-      "detail": "{\"commitment\":\"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02\",\"faucet\":\"local-devnet-stub\",\"play_free"
+      "detail": "{\"commitment\":\"04651c7e3a14745e97b2c5bb83b1568b07992390486e697da74c68c3592f1e8c\",\"faucet\":\"local-devnet-stub\",\"play_free"
     },
     {
       "step": "A3 REAL/PLAY 分库视图（PLAY 有 note / REAL 空 / 余额分栏）",
       "ok": true,
-      "detail": "{\"notes\":[{\"commitment\":\"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spendable\":true}],\"real"
+      "detail": "{\"notes\":[{\"commitment\":\"04651c7e3a14745e97b2c5bb83b1568b07992390486e697da74c68c3592f1e8c\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spendable\":true}],\"real"
     },
     {
       "step": "A4 分库视图脱敏（无 spend_secret/nullifier）",
@@ -43,7 +43,7 @@
     {
       "step": "A6 备份导出（ZCBK，自包含备份口令）",
       "ok": true,
-      "detail": "{\"backupHex\":\"5a43424b0100e9fd6428568c53b23cfd960be45c71ae004c0000020000000100000001e18a1521a66f16f0"
+      "detail": "{\"backupHex\":\"5a43424b01004ac6ab27b0c4a20f73357c2173b927af004c000002000000010000009a0f146ee0953a9e5c"
     },
     {
       "step": "A7 错误口令导入 → BadPassword（fail-closed）",
@@ -58,7 +58,7 @@
     {
       "step": "A9 正确口令导入 → 新增锁定账户（公钥一致）",
       "ok": true,
-      "detail": "{\"accountId\":\"c7fdaeca-6e65-45ea-9788-27691d7a736e\",\"publicKey\":\"03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b88a0bc6fb1a\",\"create"
+      "detail": "{\"accountId\":\"51414c06-7036-45ec-8997-dcdfc452d323\",\"publicKey\":\"036241e90c18a2f9937f6b9c35e49a7b3dcc583ade7b9e793324bc6258b2f979df\",\"create"
     },
     {
       "step": "A10 创建账户2（会话切到账户2）",
@@ -78,7 +78,7 @@
     {
       "step": "A13 账户1 重新解锁：note 库完整（隔离）",
       "ok": true,
-      "detail": "{\"notes\":[{\"commitment\":\"0297b2d2b71b7927f9b545b4b639b36dbfe89ff6bc6873aaf2f319779524de02\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spe"
+      "detail": "{\"notes\":[{\"commitment\":\"04651c7e3a14745e97b2c5bb83b1568b07992390486e697da74c68c3592f1e8c\",\"amount\":\"500\",\"tableId\":null,\"proof\":\"soft\",\"spe"
     },
     {
       "step": "A14 错误账户口令 → BadPassword（fail-closed）",
@@ -103,7 +103,7 @@
     {
       "step": "C1 页面连接（origin 授权 → 当前账户）",
       "ok": true,
-      "detail": "{\"accounts\":[\"03616d94fce6bb5695538506e4eaf6a666367e8b8fa49e9dddb892b88a0bc6fb1a\"],\"chainId\":\"zchain-devnet-1\",\"granted\":true}"
+      "detail": "{\"accounts\":[\"036241e90c18a2f9937f6b9c35e49a7b3dcc583ade7b9e793324bc6258b2f979df\"],\"chainId\":\"zchain-devnet-1\",\"granted\":true}"
     },
     {
       "step": "C2 结构化签名预览请求打开（含 REAL/PLAY 徽章字段）",
@@ -113,7 +113,7 @@
     {
       "step": "C3 真实签名成功（wallet-core digest）",
       "ok": true,
-      "detail": "{\"digest\":\"0c8d0e910a43ed167e577b014313ab9cb5c6dca6d9951a19a3df4a34b625f4c9\",\"kind\":\"transfer\"}"
+      "detail": "{\"digest\":\"f96bc460bbb7851da6da0bc54f163dc44842c6ee23817a70c0448f4b859e654d\",\"kind\":\"transfer\"}"
     },
     {
       "step": "C4 签名回执登记：signed 状态位 + deadline=10000ms（协议默认）",
@@ -173,7 +173,7 @@
     {
       "step": "D2 展示 verifier 名称/版本/耗时",
       "ok": true,
-      "detail": "{\"verifier\":{\"abi_version\":1,\"name\":\"wallet-core/verifier\",\"version\":\"0.1.0\"},\"elapsedMs\":24}"
+      "detail": "{\"verifier\":{\"abi_version\":1,\"name\":\"wallet-core/verifier\",\"version\":\"0.1.0\"},\"elapsedMs\":21}"
     },
     {
       "step": "D3 proof 归档元数据展示（engine + 字节数；不宣称 STARK 已验证）",

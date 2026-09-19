@@ -1,6 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-ground="paper"><head><meta charset="UTF-8"><title>导入恢复</title>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="UTF-8">
+<title>03 · 导入 / 恢复</title>
 <style>
+
 /* ============================================================================
    ZChain Wallet —— 方向 B「账簿 / Ledger」v0.2
    ----------------------------------------------------------------------------
@@ -421,10 +425,13 @@ details[open] summary::before{content:"▾ "}
 #shot-mount.doc{width:1240px!important;height:auto!important;padding:26px 28px}
 .mode-shot #shot-mount.doc .ds-sec{margin-bottom:0}
 
-html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--bg,var(--pg))}
-.shell-bar,#proto-wrap{display:none !important}
-.screen,.scr{position:relative !important;display:flex !important;width:380px;height:600px}
-</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+/* ====== 导出画板:单屏静态可见,供 Pixso code_to_design 导入 ====== */
+html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--pg)}
+.shell-bar,#proto-wrap,#gallery,template{display:none !important}
+#shot-mount{box-shadow:none;margin:0 !important}
+</style>
+</head>
+<body class="mode-shot"><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
 <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
@@ -463,22 +470,23 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
 <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-6h4v6"/></symbol>
 <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
-</defs></svg><section class="scr" aria-label="导入恢复">
-  <header class="sub"><button class="ib bare" data-nav="welcome"><svg class="ic"><use href="#i-back"/></svg></button><div class="sub-t">导入 / 恢复</div><div class="sub-s"></div></header>
+</defs></svg>
+<div id="shot-mount"><section class="scr" aria-label="导入恢复">
+  <header class="sub"><button class="ib bare" data-nav="welcome"><svg class="ic"><use href="#i-back"></use></svg></button><div class="sub-t">导入 / 恢复</div><div class="sub-s"></div></header>
   <div class="body">
     <div class="seg"><button class="on" data-seg="backup">备份恢复</button><button data-seg="key">私钥导入</button><button data-seg="pass">自定义口令</button></div>
     <div data-pane="backup">
       <button class="empty" style="width:100%;padding:24px 14px;cursor:pointer" data-toast="示意:文件选择器">
-        <svg class="ic" style="width:24px;height:24px;margin:0 auto 7px;color:var(--felt)"><use href="#i-ul"/></svg>
+        <svg class="ic" style="width:24px;height:24px;margin:0 auto 7px;color:var(--felt)"><use href="#i-ul"></use></svg>
         <b style="display:block;font-size:13px;color:var(--ink);margin-bottom:3px">选择 .zcbk 备份文件</b>
         <span class="mono" style="font-size:10.5px">由「设置 → 备份导出」生成 · 仅 ZChain 层 note 库</span>
       </button>
       <div class="fld" style="margin-top:13px"><div class="fl">备份口令</div><input type="password" placeholder="≥ 8 位,与钱包解锁口令相互独立"></div>
       <button class="btn btn-p" data-toast="示意:Argon2id 本地解密中">恢复钱包</button>
-      <div class="bn bn-info" style="margin-top:12px"><svg class="ic"><use href="#i-info"/></svg><div><b>只覆盖 ZChain 层</b><p>ZCBK v1 含 REAL/PLAY 双库与 keystore 信封,不含 EVM / Starknet 账户——那两层请在各自管理页导出私钥。解密全程本地完成,备份口令不离开设备。</p></div></div>
+      <div class="bn bn-info" style="margin-top:12px"><svg class="ic"><use href="#i-info"></use></svg><div><b>只覆盖 ZChain 层</b><p>ZCBK v1 含 REAL/PLAY 双库与 keystore 信封,不含 EVM / Starknet 账户——那两层请在各自管理页导出私钥。解密全程本地完成,备份口令不离开设备。</p></div></div>
     </div>
     <div data-pane="key" style="display:none">
-      <div class="fld"><div class="fl">目标层</div><div class="iw"><input readonly value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"/></svg></span></div></div>
+      <div class="fld"><div class="fl">目标层</div><div class="iw"><input readonly="" value="EVM · Ethereum compatible" style="cursor:pointer"><span class="in-ic"><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-d"></use></svg></span></div></div>
       <div class="fld"><div class="fl">私钥(hex)</div><input class="mono" style="font-size:11.5px" placeholder="0x…"></div>
       <div class="fld"><div class="fl">加密口令</div><input type="password" placeholder="用于本地 keystore 加密"></div>
       <button class="btn btn-p">导入到所选层</button>
@@ -492,4 +500,6 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
       <button class="btn btn-p" data-nav="home">创建并使用自定义口令</button>
     </div>
   </div>
-</section></body></html>
+</section></div>
+</body>
+</html>

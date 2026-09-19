@@ -1,6 +1,10 @@
 <!DOCTYPE html>
-<html lang="zh-CN" data-ground="paper"><head><meta charset="UTF-8"><title>三链总账</title>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="UTF-8">
+<title>05 · 三链总账</title>
 <style>
+
 /* ============================================================================
    ZChain Wallet —— 方向 B「账簿 / Ledger」v0.2
    ----------------------------------------------------------------------------
@@ -421,10 +425,13 @@ details[open] summary::before{content:"▾ "}
 #shot-mount.doc{width:1240px!important;height:auto!important;padding:26px 28px}
 .mode-shot #shot-mount.doc .ds-sec{margin-bottom:0}
 
-html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--bg,var(--pg))}
-.shell-bar,#proto-wrap{display:none !important}
-.screen,.scr{position:relative !important;display:flex !important;width:380px;height:600px}
-</style></head><body><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+/* ====== 导出画板:单屏静态可见,供 Pixso code_to_design 导入 ====== */
+html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background:var(--pg)}
+.shell-bar,#proto-wrap,#gallery,template{display:none !important}
+#shot-mount{box-shadow:none;margin:0 !important}
+</style>
+</head>
+<body class="mode-shot"><svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
 <symbol id="i-back" viewBox="0 0 24 24"><path d="M15 5 8 12l7 7"/></symbol>
 <symbol id="i-chev-d" viewBox="0 0 24 24"><path d="M5 9l7 7 7-7"/></symbol>
 <symbol id="i-chev-r" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
@@ -463,22 +470,23 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
 <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11 12 4l8 7v9H4z"/><path d="M10 20v-6h4v6"/></symbol>
 <symbol id="i-pen" viewBox="0 0 24 24"><path d="M4 20l1.2-4.2L16 5l3 3L8.2 18.8z"/></symbol>
 <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3 5 14h6l-1 7 8-11h-6z"/></symbol>
-</defs></svg><section class="scr" aria-label="三链总账">
+</defs></svg>
+<div id="shot-mount"><section class="scr" aria-label="三链总账">
   <header class="dh">
-    <div class="dh-top"><span class="dh-kind">General Ledger</span><span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"/></svg></button></span></div>
-    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"/></svg></div><div class="acct-a">三层统一账户 · 已解锁 2 / 3</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg></button></span></div>
+    <div class="dh-top"><span class="dh-kind">General Ledger</span><span class="net"><span class="dot"></span>zchain-devnet-1</span><span class="dh-r"><button class="ib bare" data-nav="settings"><svg class="ic ic-s"><use href="#i-gear"></use></svg></button></span></div>
+    <div class="dh-main"><span class="av">A</span><div class="grow" style="min-width:0"><div class="acct-n">牌手一号<svg class="ic ic-s"><use href="#i-chev-d"></use></svg></div><div class="acct-a">三层统一账户 · 已解锁 2 / 3</div></div><span class="dh-r"><button class="ib" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg></button></span></div>
   </header>
   <div class="body">
     <div class="tot">
-      <div class="tot-l">三链总资产 <button class="ib bare" data-toast="示意:隐藏金额"><svg class="ic ic-xs"><use href="#i-eye"/></svg></button></div>
+      <div class="tot-l">三链总资产 <button class="ib bare" data-toast="示意:隐藏金额"><svg class="ic ic-xs"><use href="#i-eye"></use></svg></button></div>
       <div class="tot-a"><span class="eq">≈</span>$22,288.63</div>
       <div class="tot-s"><span class="ch ch-real">REAL 托管 $10,120.00</span><span>PLAY 为测试筹码,不计价</span></div>
     </div>
     <div class="sec-t">账户层</div>
     <div class="cd tight" style="padding:2px 14px">
-      <button class="ar" data-nav="zc-dash"><span class="tk tk-felt"><svg class="ic ic-s"><use href="#i-spade"/></svg></span><div class="ar-m"><div class="ar-n">ZChain 隐私层 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">PLAY 12,400.00 · NATIVE 10,000.00</div></div><div class="ar-r"><div class="ar-amt">$10,120.00</div><div class="ar-s mono" style="text-align:right">zc1qpoker…f7x2</div></div></button>
-      <button class="ar" data-nav="evm-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-ether"/></svg></span><div class="ar-m"><div class="ar-n">EVM 多链 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">ETH 2.4183 · Ethereum</div></div><div class="ar-r"><div class="ar-amt">$8,124.69</div><div class="ar-s mono" style="text-align:right">0x5919…7527</div></div></button>
-      <button class="ar" data-nav="stk-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-layers"/></svg></span><div class="ar-m"><div class="ar-n">Starknet <span class="ch ch-amb ch-xs">已锁定</span></div><div class="ar-s">ETH 1.2034 · SN DevNet</div></div><div class="ar-r"><div class="ar-amt">$4,043.42</div><div class="ar-s mono" style="text-align:right">0x058f…853f</div></div></button>
+      <button class="ar" data-nav="zc-dash"><span class="tk tk-felt"><svg class="ic ic-s"><use href="#i-spade"></use></svg></span><div class="ar-m"><div class="ar-n">ZChain 隐私层 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">PLAY 12,400.00 · NATIVE 10,000.00</div></div><div class="ar-r"><div class="ar-amt">$10,120.00</div><div class="ar-s mono" style="text-align:right">zc1qpoker…f7x2</div></div></button>
+      <button class="ar" data-nav="evm-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-ether"></use></svg></span><div class="ar-m"><div class="ar-n">EVM 多链 <span class="ch ch-felt ch-xs">已解锁</span></div><div class="ar-s">ETH 2.4183 · Ethereum</div></div><div class="ar-r"><div class="ar-amt">$8,124.69</div><div class="ar-s mono" style="text-align:right">0x5919…7527</div></div></button>
+      <button class="ar" data-nav="stk-dash"><span class="tk"><svg class="ic ic-s"><use href="#i-layers"></use></svg></span><div class="ar-m"><div class="ar-n">Starknet <span class="ch ch-amb ch-xs">已锁定</span></div><div class="ar-s">ETH 1.2034 · SN DevNet</div></div><div class="ar-r"><div class="ar-amt">$4,043.42</div><div class="ar-s mono" style="text-align:right">0x058f…853f</div></div></button>
     </div>
     <div class="cd">
       <div class="cd-h">最弱凭证</div>
@@ -492,14 +500,16 @@ html,body{margin:0;padding:0;width:380px;height:600px;overflow:hidden;background
     </div>
     <div class="cd">
       <div class="cd-h">待办 <span class="more" data-nav="zc-confirm">1 项</span></div>
-      <button class="mi"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-pen"/></svg></span><span class="grow"><b>开桌签名请求 · 8♠ 桌</b><span>poker.zchain.devnet · 92s 后过期</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"/></svg></button>
+      <button class="mi"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)"><svg class="ic ic-s"><use href="#i-pen"></use></svg></span><span class="grow"><b>开桌签名请求 · 8♠ 桌</b><span>poker.zchain.devnet · 92s 后过期</span></span><svg class="ic ic-s" style="color:var(--ink-3)"><use href="#i-chev-r"></use></svg></button>
     </div>
-    <button class="btn btn-s btn-sm" style="width:100%;height:38px" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"/></svg>全部锁定</button>
+    <button class="btn btn-s btn-sm" style="width:100%;height:38px" data-nav="lock"><svg class="ic ic-s"><use href="#i-lock"></use></svg>全部锁定</button>
     <div class="foot">ZChain Wallet · 设计稿 v0.2 / Extension 0.6.1 · DevNet<br>Play / DevNet / v1.3</div>
   </div>
   <nav class="tabs">
-    <button class="tb on" data-nav="home"><svg class="ic"><use href="#i-home"/></svg>总账</button>
-    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"/></svg>账簿</button>
-    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"/></svg>证明</button>
+    <button class="tb on" data-nav="home"><svg class="ic"><use href="#i-home"></use></svg>总账</button>
+    <button class="tb" data-nav="acct"><svg class="ic"><use href="#i-book"></use></svg>账簿</button>
+    <button class="tb" data-nav="proofs"><svg class="ic"><use href="#i-shield"></use></svg>证明</button>
   </nav>
-</section></body></html>
+</section></div>
+</body>
+</html>

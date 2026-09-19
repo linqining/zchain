@@ -1,30 +1,30 @@
-[2026-09-19T07:40:11.006Z] PASS: A0 一键创建三层 → 成功页自动口令只显一次
-[2026-09-19T07:40:11.311Z] PASS: A1 首页 = 三链总账（账户层卡片 + 底部三 tab）
-[2026-09-19T07:40:11.616Z] PASS: A1b 账簿 tab = 带链切换器的账簿面板
-[2026-09-19T07:40:11.618Z] PASS: A2 切到 ZChain 链：账簿模板换 GAME/REAL 数据面
-[2026-09-19T07:40:11.927Z] PASS: A3 切到 EVM 链：同一屏结构、地址/余额面来自 EVM 层
-[2026-09-19T07:40:12.233Z] PASS: A4 切到 Starknet 链：模板不变、数据面换层
-[2026-09-19T07:40:12.537Z] PASS: A5 三链来回切换后抬头结构一致（票据头 + 齿孔线，未各写一份）
-[2026-09-19T07:40:12.848Z] PASS: B1 无价格源 → 合计显示占位而非编造法币数字 — —
-[2026-09-19T07:40:12.848Z] PASS: B2 首页显式标注「价格源未接入」
-[2026-09-19T07:40:13.156Z] PASS: B3 GAME / REAL 分栏展示（跨域金额不轧差） — GAME可用筹码0PLAYREAL托管映射0NATIVE
-[2026-09-19T07:40:13.411Z] PASS: C1 水龙头铸 500 PLAY → 账面即时反映
-[2026-09-19T07:40:13.973Z] PASS: C2 转账预览：选币 + 找零 + 守恒三行齐全（note 全额消费） — 贪心选币 · 消耗 1 张 NOTE | 找零 note | 守恒核对 | note 全额消费：不足额时自动多输出一条找零回本账户。提交后可在「账簿 → 回执」跟踪状态。
-[2026-09-19T07:40:13.974Z] PASS: C3 摘要来自 wallet-core 预览（展示与签名同源） — 17fb503085f0…38031ecd83
-[2026-09-19T07:40:13.975Z] PASS: C4 凭证阶梯作为一等组件出现在转账预览（4 级 + 短板文案） — 支出 note 短板 soft · 满足 GAME 域要求
-[2026-09-19T07:40:13.975Z] PASS: C5 达标后「确认转账」解禁（devnet 门槛=soft，见策略注释）
-[2026-09-19T07:40:14.231Z] PASS: C6 确认 → 签名成功并登记回执（状态位 signed） — rows=2
-[2026-09-19T07:40:14.232Z] PASS: C7 回执分桶：全部 1 / 未上链 1（投递状态机） — 全部 1 / 未上链 1
-[2026-09-19T07:40:14.236Z] PASS: D1 摘要被换 → PreviewMismatch（不签） — {"error":{"code":"PreviewMismatch","reason":"展示摘要与待签内容不一致，请重新生成预览"}}
-[2026-09-19T07:40:14.239Z] PASS: D2 输入 note 不在库 → NoteNotFound（第二道闸在后台） — {"error":{"code":"NoteNotFound","reason":"输入 note ffffffffffff… 不在本账户库中"}}
-[2026-09-19T07:40:14.241Z] PASS: D3 预览本身可提交判定与门槛一致（requiredProof 随网络形态） — {"worstProof":"soft","requiredProof":"soft","reached":true}
-[2026-09-19T07:40:14.853Z] PASS: E1 REAL 提现预览：逐条列出不可提交原因 — fail-closed：canSubmit 由 wallet-core 展示门与 finality 合取决定，UI 只消费。虚线笔触即「不可用」的专用表达。
-[2026-09-19T07:40:14.855Z] PASS: E2 提交按钮恒禁用 + 后台 canSubmit 恒 false（双层同结论） — disabled=true canSubmitFalse=true
-[2026-09-19T07:40:15.414Z] PASS: F1 凭证簿：阶梯组件 + note 级凭证计数（解锁后可见） — 最近 0 次本地复验 · 1 张 note 带凭证 | 阶梯锚定在 note 上：pending → soft → proven → finalized | 已达 finalized | 短板停在 | 阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen →
-[2026-09-19T07:40:15.415Z] PASS: F2 两套状态机并列说明（投递 vs 凭证，笔触不混用）
-[2026-09-19T07:40:16.484Z] PASS: G1 网关不可达 → 第 1 步标红 + 错误码原样呈现（不伪造结论） — GatewayUnreachable：网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。 | GatewayUnreachable
-[2026-09-19T07:40:16.484Z] PASS: G2 结论印章为「未通过」（fail-closed：任一阶段失败即非 verified） — 未通过|seal seal-bad
-[2026-09-19T07:40:17.098Z] PASS: H1 双底色切换生效且持久化（纸白 ↔ 夜场） — paper→night stored=night
-[2026-09-19T07:40:17.403Z] PASS: H2 金额显隐只影响展示且持久化（余额数据本身不变） — hidden=true stored=1
-[2026-09-19T07:40:17.714Z] PASS: I1 能力矩阵如实列出各层红线 — ZCHAIN | GAME 域可签可转；REAL 仅隔离展示，提现预览 canSubmit 恒 false | EVM | 转账与合约写入可签名广播（EIP-155 + chainId 校验）；不签 note spend | STARKNET | invoke v1 + devnet 水龙头；SNIP-12 授权面已备，链上 admission 未开放 | 
-[2026-09-19T07:40:17.717Z] PASS: I2 不出现审计徽章：未审计这件事写在界面上
+[2026-09-19T10:06:37.115Z] PASS: A0 一键创建三层 → 成功页自动口令只显一次
+[2026-09-19T10:06:37.420Z] PASS: A1 首页 = 三链总账（账户层卡片 + 底部三 tab）
+[2026-09-19T10:06:37.724Z] PASS: A1b 账簿 tab = 带链切换器的账簿面板
+[2026-09-19T10:06:37.726Z] PASS: A2 切到 ZChain 链：账簿模板换 GAME/REAL 数据面
+[2026-09-19T10:06:38.034Z] PASS: A3 切到 EVM 链：同一屏结构、地址/余额面来自 EVM 层
+[2026-09-19T10:06:38.337Z] PASS: A4 切到 Starknet 链：模板不变、数据面换层
+[2026-09-19T10:06:38.641Z] PASS: A5 三链来回切换后抬头结构一致（票据头 + 齿孔线，未各写一份）
+[2026-09-19T10:06:38.949Z] PASS: B1 无价格源 → 合计显示占位而非编造法币数字 — —
+[2026-09-19T10:06:38.949Z] PASS: B2 首页显式标注「价格源未接入」
+[2026-09-19T10:06:39.260Z] PASS: B3 GAME / REAL 分栏展示（跨域金额不轧差） — GAME可用筹码0PLAYREAL托管映射0NATIVE
+[2026-09-19T10:06:39.517Z] PASS: C1 水龙头铸 500 PLAY → 账面即时反映
+[2026-09-19T10:06:40.075Z] PASS: C2 转账预览：选币 + 找零 + 守恒三行齐全（note 全额消费） — 贪心选币 · 消耗 1 张 NOTE | 找零 note | 守恒核对 | note 全额消费：不足额时自动多输出一条找零回本账户。提交后可在「账簿 → 回执」跟踪状态。
+[2026-09-19T10:06:40.076Z] PASS: C3 摘要来自 wallet-core 预览（展示与签名同源） — f2d004f0c967…1cb49eea28
+[2026-09-19T10:06:40.076Z] PASS: C4 凭证阶梯作为一等组件出现在转账预览（4 级 + 短板文案） — 支出 note 短板 soft · 满足 GAME 域要求
+[2026-09-19T10:06:40.077Z] PASS: C5 达标后「确认转账」解禁（devnet 门槛=soft，见策略注释）
+[2026-09-19T10:06:40.330Z] PASS: C6 确认 → 签名成功并登记回执（状态位 signed） — rows=2
+[2026-09-19T10:06:40.330Z] PASS: C7 回执分桶：全部 1 / 未上链 1（投递状态机） — 全部 1 / 未上链 1
+[2026-09-19T10:06:40.336Z] PASS: D1 摘要被换 → PreviewMismatch（不签） — {"error":{"code":"PreviewMismatch","reason":"展示摘要与待签内容不一致，请重新生成预览"}}
+[2026-09-19T10:06:40.337Z] PASS: D2 输入 note 不在库 → NoteNotFound（第二道闸在后台） — {"error":{"code":"NoteNotFound","reason":"输入 note ffffffffffff… 不在本账户库中"}}
+[2026-09-19T10:06:40.338Z] PASS: D3 预览本身可提交判定与门槛一致（requiredProof 随网络形态） — {"worstProof":"soft","requiredProof":"soft","reached":true}
+[2026-09-19T10:06:40.946Z] PASS: E1 REAL 提现预览：逐条列出不可提交原因 — fail-closed：canSubmit 由 wallet-core 展示门与 finality 合取决定，UI 只消费。虚线笔触即「不可用」的专用表达。
+[2026-09-19T10:06:40.948Z] PASS: E2 提交按钮恒禁用 + 后台 canSubmit 恒 false（双层同结论） — disabled=true canSubmitFalse=true
+[2026-09-19T10:06:41.504Z] PASS: F1 凭证簿：阶梯组件 + note 级凭证计数（解锁后可见） — 最近 0 次本地复验 · 2 张 note 带凭证 | 阶梯锚定在 note 上：pending → soft → proven → finalized | 已达 finalized | 短板停在 | 阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen →
+[2026-09-19T10:06:41.504Z] PASS: F2 两套状态机并列说明（投递 vs 凭证，笔触不混用）
+[2026-09-19T10:06:42.571Z] PASS: G1 网关不可达 → 第 1 步标红 + 错误码原样呈现（不伪造结论） — GatewayUnreachable：网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。 | GatewayUnreachable
+[2026-09-19T10:06:42.571Z] PASS: G2 结论印章为「未通过」（fail-closed：任一阶段失败即非 verified） — 未通过|seal seal-bad
+[2026-09-19T10:06:43.182Z] PASS: H1 双底色切换生效且持久化（纸白 ↔ 夜场） — paper→night stored=night
+[2026-09-19T10:06:43.488Z] PASS: H2 金额显隐只影响展示且持久化（余额数据本身不变） — hidden=true stored=1
+[2026-09-19T10:06:43.795Z] PASS: I1 能力矩阵如实列出各层红线 — ZCHAIN | GAME 域可签可转；REAL 仅隔离展示，提现预览 canSubmit 恒 false | EVM | 转账与合约写入可签名广播（EIP-155 + chainId 校验）；不签 note spend | STARKNET | invoke v1 + devnet 水龙头；SNIP-12 授权面已备，链上 admission 未开放 | 
+[2026-09-19T10:06:43.797Z] PASS: I2 不出现审计徽章：未审计这件事写在界面上

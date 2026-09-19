@@ -1,0 +1,1444 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZChain 牌桌 · 账簿 Ledger 方向 v0.1 — 设计稿</title>
+<style>
+/* ============================================================================
+   ZChain 牌桌 —— 「账簿 / Ledger」方向 v0.1
+   ----------------------------------------------------------------------------
+   范围:poker_texas_air/client 的两套牌桌 —— 生产桌 /play(可玩)与
+   ZK 展示桌 /game/:gameId(结算可证叙事)。共 8 屏 + 1 组件板。
+
+   为什么要重做:现桌是开源 Secret Poker 客户端的紫色渐变换皮
+   (primaryCta #4f46e5 / brandGradient / radius 2rem / surfaceGlass),
+   与自家钱包的 brand token 毫无关系;座位靠 scale(.55) 绝对定位堆叠,
+   15 秒计时是 CSS 无限旋转环(与真实剩余时间无关),数字非等宽所以
+   筹码无法对齐成列,关键局面信息(还需多少、彩池归属、台费)散在胶囊里。
+   观感结论:像 demo,不像产品。
+
+   设计立场:**牌桌=账页**。不引入新的视觉体系,而是把钱包方向 B 已成立
+   的账簿原语(.seal 印章 / .rail 状态轨 / .lr 账目行 / .tot 合计块 /
+   .meter 细条 / .empty 虚线空格 / .ch 方角标签)推到牌桌上。牌桌与钱包
+   因此是同一套体系的两个表面,而不是两张皮。
+
+   毡面语汇 → 账簿语汇 的逐项翻译:
+     绿毡台面   → 账格纸面(--cd-2 + rule-paper 横纹),细线双线桌沿
+     木质桌沿   → 1px --rl-2 外沿 + 1px --rl 内沿,零厚度零阴影
+     圆形头像座 → 方形纸卡座位(账目条目):头像 .av + 名 + 等宽余量
+     庄家圆扣   → 旋转印章 .seal(「庄 BTN」),不发光不立体质感
+     筹码堆     → 等宽数字 + 点线引线(dotted leader)指向彩池合计行
+     彩池显示   → .tot 合计块:主池 / 边池 / 台费 逐行右对齐,像资产负债表
+     街段文字   → .rail 五节点状态轨(翻前/翻牌/转牌/河牌/摊牌)
+     旋转计时环 → .meter 线性细条(纸是线性的,不转圈)
+     牌背       → 密封信封:交叉细网纹 + 锁 + 「SEALED」+ 牌序 #idx
+     赢家高亮   → 印章落章 + 彩池行结转(金额从合计行移到赢家行)
+     操作条     → 表单页脚:.btn 方角按钮 + .seg 加注档位 + 刻度滑轨
+     下注滑杆   → 印刷刻度尺(带 min-raise / 底池 / all-in 刻度标注)
+
+   品牌合规(逐条继承 design/zchain-wallet-ui-b-ledger.html 的 7 条硬规则):
+     1. 零 webfont:只用 system-ui 栈 + ui-monospace。
+     2. 哈希 / 地址 / 金额一律等宽,永不换行折断。
+     3. 不使用描边字、发光字;强调只用颜色与字重 → 全文件零 text-shadow。
+     4. 金(--real)只用于托管/真实资产语义,不作通用强调。
+     5. 对比度:纸白底全部语义色 ≥ 5.2:1(实测见组件板 DS-1)。
+     6. 不做 scroll-driven 动画(整页截图会停在 opacity:0)。
+     7. logo 不与任何「已审计」类徽章组合;印章只陈述结算事实,不陈述审计。
+   token 与钱包方向 B **逐字同源**,含双底色(纸白 / 夜场)——夜场底抄自
+   website/media-kit/v0.1/brand.css。选体系不选底色。
+   ============================================================================ */
+
+/* ---- 底色 A:纸白(默认)——与 zchain-wallet-ui-b-ledger.html 逐字一致 ---- */
+:root{
+  --pg:#f5f2ea; --pg-2:#eae5d9; --cd:#fffdf7; --cd-2:#f8f5ec;
+  --ink:#14130f; --ink-2:#4b4840; --ink-3:#666256;
+  --rl:#ddd6c6; --rl-2:#c3bba7;
+  --felt:#0b6b45; --felt-w:#e6efe8; --felt-rl:#a8c8b6;
+  --play:#15507f; --play-w:#e5ecf3; --play-rl:#a9c0d6;
+  --real:#7d5308; --real-w:#f6ebd4; --real-rl:#d8bd85;
+  --bad:#a83226; --bad-w:#f7e6e2; --bad-rl:#dda9a1;
+  --amb:#8a5a12; --amb-w:#f6eeda; --amb-rl:#dcc796;
+  --on-felt:#fffdf7; --on-ink:#f5f2ea; --on-bad:#fffdf7;
+  --code:#efeade; --rule-paper:rgba(20,19,15,.045);
+  --shadow:0 1px 0 rgba(20,19,15,.04);
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  --ui:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",Roboto,Arial,sans-serif;
+  --r:3px; --r-l:6px;
+}
+/* ---- 底色 B:夜场 ——14 个 token 逐字抄自 media-kit/v0.1/brand.css ---- */
+html[data-ground="night"]{
+  --pg:#070d0a; --pg-2:#0b1410; --cd:#101c15; --cd-2:#152418;
+  --ink:#f0f7f1; --ink-2:#abc3b6; --ink-3:#7d9a8b;
+  --rl:#1d3326; --rl-2:#2a4a37;
+  --felt:#37e39c; --felt-w:rgba(55,227,156,.11); --felt-rl:rgba(55,227,156,.35);
+  --play:#66c4ff; --play-w:rgba(102,196,255,.11); --play-rl:rgba(102,196,255,.35);
+  --real:#ffc75a; --real-w:rgba(255,199,90,.11); --real-rl:rgba(255,199,90,.38);
+  --bad:#ff9483; --bad-w:rgba(255,148,131,.10); --bad-rl:rgba(255,148,131,.35);
+  --amb:#ffd166; --amb-w:rgba(255,209,102,.10); --amb-rl:rgba(255,209,102,.35);
+  --on-felt:#05130c; --on-ink:#070d0a; --on-bad:#1a0a08;
+  --code:#0a120d; --rule-paper:rgba(240,247,241,.05);
+  --shadow:none;
+}
+
+*{box-sizing:border-box;margin:0;padding:0}
+html{color-scheme:light}
+html[data-ground="night"]{color-scheme:dark}
+body{background:var(--pg);color:var(--ink);font-family:var(--ui);font-size:13px;line-height:1.55;-webkit-font-smoothing:antialiased}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer;font-size:inherit;line-height:inherit}
+a{color:var(--felt);text-decoration:none}
+input,select{font-family:inherit;font-size:13px;color:var(--ink);background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);padding:0 12px;height:42px;width:100%;outline:none}
+input:focus,select:focus{border-color:var(--ink);box-shadow:0 0 0 2px var(--felt-w)}
+.mono{font-family:var(--mono);font-variant-numeric:tabular-nums;font-feature-settings:"tnum" 1}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.ic{width:18px;height:18px;flex:none;display:block;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:square;stroke-linejoin:miter}
+.ic-s{width:14px;height:14px}
+.ic-xs{width:11px;height:11px}
+.trunc{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.row{display:flex;align-items:center;gap:8px}
+.grow{flex:1;min-width:0}
+
+/* ================= 原语(从钱包方向 B 原样继承,不改一个像素) ================= */
+.ch{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9.5px;letter-spacing:.09em;text-transform:uppercase;padding:1.5px 6px;border:1px solid var(--rl-2);border-radius:2px;color:var(--ink-2);background:var(--cd);white-space:nowrap;font-weight:500}
+.ch-real{color:var(--real);border-color:var(--real-rl);background:var(--real-w)}
+.ch-play{color:var(--play);border-color:var(--play-rl);background:var(--play-w)}
+.ch-felt{color:var(--felt);border-color:var(--felt-rl);background:var(--felt-w)}
+.ch-bad{color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)}
+.ch-amb{color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)}
+.ch-solid{background:var(--ink);color:var(--on-ink);border-color:var(--ink)}
+.ch-xs{font-size:9px;padding:0 4px;letter-spacing:.06em}
+
+.seal{display:inline-flex;align-items:center;gap:4px;font-family:var(--mono);font-size:9px;letter-spacing:.13em;text-transform:uppercase;padding:3px 7px;border:1.5px solid currentColor;border-radius:2px;transform:rotate(-4deg);opacity:.92;font-weight:600;white-space:nowrap}
+.seal-ok{color:var(--felt)} .seal-bad{color:var(--bad)} .seal-real{color:var(--real)} .seal-ink{color:var(--ink-2)}
+
+.rail{display:flex;align-items:flex-start;gap:0}
+.rn{display:flex;flex-direction:column;align-items:center;gap:5px;flex:none;width:60px}
+.rn i{width:9px;height:9px;border:1.5px solid var(--rl-2);background:var(--cd);display:block;flex:none}
+.rn.done i{background:var(--felt);border-color:var(--felt)}
+.rn.cur i{background:var(--amb);border-color:var(--amb)}
+.rn.bad i{background:var(--bad);border-color:var(--bad)}
+.rn span{font-family:var(--mono);font-size:8.5px;letter-spacing:.05em;color:var(--ink-3);text-transform:uppercase;text-align:center}
+.rn.done span{color:var(--felt)} .rn.cur span{color:var(--amb);font-weight:600} .rn.bad span{color:var(--bad)}
+.rline{flex:1;height:1.5px;background:var(--rl-2);margin-top:4px;min-width:8px}
+.rline.done{background:var(--felt)}
+
+.lr{display:flex;align-items:baseline;gap:10px;padding:7px 0;border-bottom:1px solid var(--rl);font-size:12.5px}
+.lr:last-child{border-bottom:none}
+.lr-k{color:var(--ink-2);flex:none;max-width:46%}
+.lr-v{margin-left:auto;font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;color:var(--ink);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lr-v.dim{color:var(--ink-3)}
+.hashline{font-family:var(--mono);font-size:11px;color:var(--ink-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+.btn{height:42px;padding:0 16px;border-radius:var(--r);font-size:13px;font-weight:600;display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid transparent;transition:filter .12s,background .12s,color .12s}
+.btn-p{background:var(--felt);color:var(--on-felt)}
+.btn-s{background:transparent;color:var(--ink);border-color:var(--ink)}
+.btn-s:hover{background:var(--ink);color:var(--on-ink)}
+.btn-d{background:var(--ink);color:var(--on-ink)}
+.btn-o{background:transparent;color:var(--bad);border-color:var(--bad-rl)}
+.btn-o:hover{background:var(--bad-w)}
+.btn[disabled]{opacity:.42;cursor:not-allowed;background:var(--pg-2);color:var(--ink-3);border:1px dashed var(--rl-2)}
+.btn-sm{height:32px;font-size:12px;padding:0 12px}
+
+.bn{display:grid;grid-template-columns:18px 1fr;gap:9px;padding:10px 12px;border:1px solid var(--rl);border-left:3px solid var(--ink-3);border-radius:var(--r);background:var(--cd);font-size:11.5px;color:var(--ink-2);line-height:1.55}
+.bn>b{display:block;font-size:12px;color:var(--ink);font-weight:600;margin-bottom:1px}
+.bn-ok{border-left-color:var(--felt);background:var(--felt-w);border-color:var(--felt-rl)} .bn-ok>b{color:var(--felt)}
+.bn-bad{border-left-color:var(--bad);background:var(--bad-w);border-color:var(--bad-rl)} .bn-bad>b{color:var(--bad)}
+.bn-info{border-left-color:var(--play);background:var(--play-w);border-color:var(--play-rl)} .bn-info>b{color:var(--play)}
+.bn-amb{border-left-color:var(--amb);background:var(--amb-w);border-color:var(--amb-rl)} .bn-amb>b{color:var(--amb)}
+.bn-real{border-left-color:var(--real);background:var(--real-w);border-color:var(--real-rl)} .bn-real>b{color:var(--real)}
+
+.meter{height:4px;background:var(--pg-2);border:1px solid var(--rl);border-radius:1px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--felt)}
+.meter i.warn{background:var(--amb)}
+.meter i.crit{background:var(--bad)}
+
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;border:1px solid var(--rl-2);border-radius:var(--r);overflow:hidden;background:var(--rl-2);gap:1px}
+.seg button{height:32px;font-size:11.5px;font-family:var(--mono);letter-spacing:.03em;color:var(--ink-2);background:var(--cd)}
+.seg button.on{background:var(--ink);color:var(--on-ink);font-weight:600}
+
+.empty{border:1px dashed var(--rl-2);border-radius:var(--r);text-align:center;color:var(--ink-3);background:var(--cd)}
+.net{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;color:var(--ink-2);border:1px solid var(--rl-2);border-radius:2px;padding:2px 7px;background:var(--cd);white-space:nowrap}
+.net:hover{border-color:var(--ink)}
+.cd{background:var(--cd);border:1px solid var(--rl);border-radius:var(--r);box-shadow:var(--shadow)}
+.cd-h{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3);padding-bottom:8px;margin-bottom:8px;border-bottom:1px solid var(--rl)}
+.sec-t{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:8px}
+.sec-t::after{content:"";flex:1;height:1px;background:var(--rl)}
+.av{width:30px;height:30px;border-radius:2px;flex:none;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:12px;font-family:var(--mono);background:var(--ink);color:var(--on-ink)}
+.pass{display:flex;align-items:center;gap:8px;background:var(--code);border:1px solid var(--rl-2);border-radius:var(--r);padding:11px 12px;font-family:var(--mono);font-size:13px;letter-spacing:.02em;word-break:break-all}
+.raw{font-family:var(--mono);font-size:9.5px;color:var(--ink-3);background:var(--code);border:1px solid var(--rl);border-radius:2px;padding:9px 10px;word-break:break-all;line-height:1.65}
+.tst{background:var(--ink);color:var(--on-ink);border-radius:var(--r);padding:9px 12px;font-size:11.5px;font-family:var(--mono);display:inline-flex;align-items:center;gap:8px}
+
+/* ================= 牌桌专有部件(本稿新增) ================= */
+
+/* -- 台面:一张铺在页面上的账格纸,细线双线桌沿,零厚度 --
+   大圆角矩形而非椭圆:同样读作牌桌,横向可用面积高约 25%,座位能干净地
+   压在长边上。公共牌与彩池**定位在台面内部**(百分比锚点),这样不论页脚
+   多高,它们永远落在桌面上而不会溢出到页脚。 */
+.felt{position:absolute;left:170px;right:170px;top:96px;bottom:92px;background:var(--cd-2);border-radius:170px}
+.felt::before,.felt::after{content:"";position:absolute;border-radius:170px}
+.felt::before{inset:0;border:1px solid var(--rl-2)}
+.felt::after{inset:6px;border:1px solid var(--rl);background:repeating-linear-gradient(180deg,transparent 0 25px,var(--rule-paper) 25px 26px)}
+.felt-tag{position:absolute;left:50%;top:12px;transform:translateX(-50%);font-family:var(--mono);font-size:8.5px;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-3);opacity:.7;white-space:nowrap;z-index:1}
+
+/* -- 屏幕外框 -- */
+.tb{width:1280px;height:800px;background:var(--pg);display:flex;flex-direction:column;position:relative;overflow:hidden;text-align:left}
+
+/* -- 票据抬头:桌号/手数/盲注 = 表单印刷头,带齿孔线 -- */
+.tb-hd{flex:none;padding:10px 22px 0;background:var(--cd);border-bottom:1px dashed var(--rl-2);position:relative;display:flex;align-items:flex-start;gap:14px}
+.tb-hd::after{content:"";position:absolute;left:0;right:0;bottom:-4px;height:7px;background:repeating-linear-gradient(90deg,var(--rl-2) 0 3px,transparent 3px 8px);background-size:8px 1px;background-repeat:repeat-x;background-position:0 3px;opacity:.85}
+.tb-hd-kind{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.tb-hd-t{font-size:17px;font-weight:700;letter-spacing:.01em;margin-top:2px;display:flex;align-items:baseline;gap:9px}
+.tb-hd-t .hand{font-family:var(--mono);font-size:11px;font-weight:500;color:var(--ink-3);letter-spacing:.06em}
+.tb-hd-r{margin-left:auto;display:flex;align-items:center;gap:7px;flex:none;padding-top:4px}
+
+/* -- 街段轨条(替代 InfoPill 文字)-- */
+.tb-street{flex:none;display:flex;align-items:center;gap:18px;padding:11px 22px;border-bottom:1px solid var(--rl);background:var(--pg)}
+.tb-street .rail{flex:none}
+.tb-street .sbar-note{margin-left:auto;display:flex;align-items:center;gap:8px}
+
+/* -- 座位:账目条目卡,不是圆形头像 -- */
+.seat{position:absolute;width:212px}
+.seat-cd{background:var(--cd);border:1px solid var(--rl);border-radius:var(--r);box-shadow:var(--shadow);padding:8px 10px;display:grid;grid-template-columns:30px 1fr auto;gap:9px;align-items:center;position:relative}
+.seat-id{min-width:0}
+.seat-id b{display:block;font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.seat-id .stk{display:flex;align-items:baseline;gap:4px;font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:13px;font-weight:600;color:var(--ink);white-space:nowrap;margin-top:1px}
+.seat-tag{position:absolute;top:-9px;left:9px;font-family:var(--mono);font-size:8.5px;letter-spacing:.1em;color:var(--ink-3);background:var(--pg);padding:0 4px}
+.seat.is-turn .seat-cd{border-color:var(--ink)}
+.seat.is-turn .seat-cd::before{content:"";position:absolute;left:-1px;top:-1px;bottom:-1px;width:3px;background:var(--amb)}
+.seat.is-fold{opacity:.5}
+.seat.is-fold .seat-cd{border-style:dashed;background:transparent}
+.seat.is-fold .seat-id b{text-decoration:line-through;text-decoration-thickness:1px}
+.seat.is-fold .stk{color:var(--ink-3);font-weight:400}
+.seat.is-fold .bet{display:none}
+.seat.is-won .seat-cd{border-color:var(--felt);background:var(--felt-w)}
+.seat-timer{margin-top:5px;display:flex;align-items:center;gap:7px}
+.seat-timer .num{font-family:var(--mono);font-size:10px;color:var(--amb);font-weight:600;letter-spacing:.04em}
+.seat-timer .meter{flex:1}
+.seat-hand{display:flex;justify-content:center;margin-top:-6px;position:relative;z-index:3}
+
+/* -- 空位:账页上的虚线待填行 -- */
+.seat--vacant .seat-cd{display:block;background:transparent;border:1px dashed var(--rl-2);box-shadow:none;padding:11px 10px;text-align:center}
+.vac-l{font-family:var(--mono);font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.vac-b{margin-top:7px;display:flex;justify-content:center}
+
+/* -- 注单:等宽数字 + 点线引线,指向彩池 -- */
+.bet{display:flex;align-items:baseline;gap:6px;padding:0 6px;font-size:10.5px;color:var(--ink-2)}
+.bet .lead{flex:1;border-bottom:1px dotted var(--rl-2);transform:translateY(-3px);min-width:14px}
+.bet .amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:600;color:var(--ink);font-size:12px}
+.bet .amt.allin{color:var(--bad)}
+.seat--t .bet{margin-top:6px}
+.seat--b .bet{margin-bottom:6px;flex-direction:column-reverse;align-items:center}
+.seat--b .bet .lead{display:none}
+
+/* -- 纸牌:白卡 + 细线 + 等宽角标,红牌用 --bad 语义色 -- */
+.pc{width:52px;height:74px;background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);box-shadow:var(--shadow);position:relative;flex:none;display:block}
+.pc .ix{position:absolute;left:4px;top:3px;font-family:var(--mono);font-size:11px;font-weight:700;line-height:1.05;text-align:center;letter-spacing:-.02em}
+.pc .ix i{display:block;font-style:normal;font-size:10px;line-height:1}
+.pc .pip{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:26px;line-height:1}
+.pc.r{color:var(--bad)} .pc.k{color:var(--ink)}
+.pc--sm{width:36px;height:52px}
+.pc--sm .ix{font-size:9px;left:3px;top:2px}
+.pc--sm .ix i{font-size:8px}
+.pc--sm .pip{font-size:17px}
+/* 牌背 = 密封信封:交叉细网 + 锁 + SEALED + 牌序 */
+.pc--back{background:
+    repeating-linear-gradient(45deg,var(--felt-w) 0 3px,transparent 3px 6px),
+    repeating-linear-gradient(-45deg,var(--felt-w) 0 3px,transparent 3px 6px),var(--cd);
+  border-color:var(--felt-rl)}
+.pc--back .bk{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;color:var(--felt)}
+.pc--back .bk span{font-family:var(--mono);font-size:7.5px;letter-spacing:.1em;font-weight:600}
+.pc--back .no{position:absolute;right:3px;top:2px;font-family:var(--mono);font-size:8px;color:var(--ink-3)}
+.hand-over{display:flex;justify-content:center}
+.hand-over .pc:first-child{margin-right:-11px}
+
+/* -- 公共牌区:印在台面上的横带(百分比锚点,跟随台面) -- */
+.board{position:absolute;left:50%;top:24%;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:5px;z-index:2}
+.board-row{display:flex;gap:7px}
+.board-l{font-family:var(--mono);font-size:8.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:6px;white-space:nowrap}
+
+/* -- 彩池:资产负债表合计块(两栏拆解,压住高度) -- */
+.pot{position:absolute;left:50%;top:54%;transform:translateX(-50%);background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);padding:10px 13px;overflow:hidden;box-shadow:var(--shadow);width:400px;z-index:2}
+.pot::before{content:"";position:absolute;inset:0;background:repeating-linear-gradient(180deg,transparent 0 25px,var(--rule-paper) 25px 26px);pointer-events:none}
+.pot-l{font-family:var(--mono);font-size:9.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3);display:flex;align-items:center;gap:7px;position:relative}
+.pot-a{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:28px;font-weight:600;letter-spacing:-.6px;line-height:1.15;margin:2px 0 0;position:relative;display:flex;align-items:baseline;gap:5px}
+.pot-a .u{font-size:11px;font-weight:500;letter-spacing:.08em;color:var(--ink-3)}
+.pot-brk{position:relative;margin-top:5px;border-top:1px solid var(--rl);padding-top:1px;display:grid;grid-template-columns:1fr 1fr;gap:0 16px}
+.pot-brk .lr{padding:4px 0;font-size:11.5px}
+.pot-brk .lr-k{max-width:none;font-size:11px}
+.pot--cleared .pot-a{text-decoration:line-through;text-decoration-thickness:1.5px;text-decoration-color:var(--ink-3);color:var(--ink-3)}
+.pot-settle{position:relative;margin-top:5px;display:flex;align-items:center;gap:8px;border-top:1px solid var(--felt-rl);padding-top:6px;font-size:11px;color:var(--felt);font-weight:600}
+.pot-settle .num{margin-left:auto;font-weight:700}
+
+/* -- 页脚:玩家本人 + 操作条(表单页脚语义) -- */
+.tb-ft{flex:none;background:var(--cd);border-top:1px solid var(--ink);padding:12px 22px 14px;display:flex;align-items:flex-end;gap:20px;position:relative}
+.hero{width:262px;flex:none;display:flex;gap:11px;align-items:flex-end}
+.hero-cd{background:var(--cd);border:1px solid var(--rl);border-radius:var(--r);box-shadow:var(--shadow);padding:9px 11px;width:100%}
+.act{flex:1;min-width:0}
+.act-btns{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+.act-btns .btn{width:100%;font-size:12.5px}
+.act-btns .btn .amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-weight:700}
+.act-ctl{display:grid;grid-template-columns:1fr auto;gap:14px;align-items:end;margin-bottom:9px}
+.scale{position:relative;height:26px;margin-top:14px}
+.scale-tick.l em{left:0;transform:none}
+.scale-tick.r em{left:auto;right:0;transform:none}
+.scale-rail{position:absolute;left:0;right:0;top:9px;height:2px;background:var(--rl-2)}
+.scale-fill{position:absolute;left:0;top:8px;height:4px;background:var(--felt)}
+.scale-tick{position:absolute;top:4px;width:1px;height:12px;background:var(--rl-2)}
+.scale-tick.key{height:16px;top:2px;background:var(--ink-3)}
+.scale-tick em{position:absolute;left:50%;transform:translateX(-50%);top:17px;font-style:normal;font-family:var(--mono);font-size:8.5px;color:var(--ink-3);white-space:nowrap;letter-spacing:.04em}
+.scale-knob{position:absolute;top:0;width:11px;height:20px;background:var(--ink);border-radius:1px;transform:translateX(-50%)}
+.scale-val{position:absolute;top:-13px;transform:translateX(-50%);font-family:var(--mono);font-size:9.5px;font-weight:700;color:var(--ink);white-space:nowrap}
+.act-read{font-family:var(--mono);font-variant-numeric:tabular-nums;text-align:right;min-width:150px}
+.act-read .v{font-size:22px;font-weight:600;letter-spacing:-.4px;line-height:1.1}
+.act-read .l{font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3)}
+
+/* -- 台面消息条 --
+   注意:这里必须是 block + nowrap。之前用 display:flex 装裸文本,浏览器会把
+   每段文字切成独立 anonymous flex item 各自换行,消息条被撑到 445px 高并压住彩池。 */
+.tb-msg{position:absolute;left:50%;transform:translateX(-50%);bottom:8px;display:block;background:var(--cd);border:1px solid var(--rl-2);border-left:3px solid var(--ink-3);border-radius:var(--r);padding:7px 13px;font-size:12px;color:var(--ink-2);box-shadow:var(--shadow);white-space:nowrap;z-index:3}
+/* 修饰类必须叫 .ok —— 不能叫 .felt:.felt 是台面组件类,带 inset 几何,
+   挂到消息条上会让它继承 left/right/top/bottom 被拉成一整张桌面。 */
+.tb-msg.ok{border-left-color:var(--felt);color:var(--ink)}
+.tb-msg .num{font-weight:600;color:var(--ink)}
+
+/* -- 桌面侧栏:观战 / 座位表 / 手牌记录入口 -- */
+.tb-side{position:absolute;right:22px;top:212px;width:172px;display:flex;flex-direction:column;gap:9px}
+.side-cd{background:var(--cd);border:1px solid var(--rl);border-radius:var(--r);padding:9px 11px;box-shadow:var(--shadow)}
+.side-h{font-family:var(--mono);font-size:8.5px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3);padding-bottom:6px;margin-bottom:6px;border-bottom:1px solid var(--rl)}
+.side-r{display:flex;align-items:baseline;gap:8px;padding:4px 0;border-bottom:1px solid var(--rl);font-size:11.5px;color:var(--ink-2)}
+.side-r:last-child{border-bottom:none}
+.side-r .num{margin-left:auto;font-weight:600;color:var(--ink)}
+.wm{position:absolute;left:22px;bottom:8px;font-family:var(--mono);font-size:8px;letter-spacing:.12em;text-transform:uppercase;color:var(--ink-3);opacity:.55;pointer-events:none}
+
+/* ================= 牌桌专有部件 · 第二批(弹窗 / 凭证 / 事件流) ================= */
+/* 齿孔线工具类:票据抬头的共同特征,牌桌抬头 / 弹窗头 / 凭证头共用 */
+.perf{position:relative;border-bottom:1px dashed var(--rl-2)}
+.perf::after{content:"";position:absolute;left:0;right:0;bottom:-4px;height:7px;background:repeating-linear-gradient(90deg,var(--rl-2) 0 3px,transparent 3px 8px);background-size:8px 1px;background-repeat:repeat-x;background-position:0 3px;opacity:.85}
+
+/* -- 浮层:买入弹窗(账簿里的「单据」形态,不是卡片浮层) -- */
+.ovl{position:absolute;inset:0;z-index:40}
+.ovl-bg{position:absolute;inset:0;background:rgba(20,19,15,.42)}
+html[data-ground="night"] .ovl-bg{background:rgba(0,0,0,.62)}
+.ovl-in{position:absolute;inset:0;display:flex;align-items:center;justify-content:center}
+.mdl{position:relative;width:430px;background:var(--pg);border:1px solid var(--ink);border-radius:var(--r-l);box-shadow:0 18px 50px rgba(20,19,15,.30);overflow:hidden}
+.mdl-hd{padding:10px 16px 9px;background:var(--cd)}
+.mdl-hd .t{font-size:14.5px;font-weight:700}
+.mdl-hd .k{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3)}
+.mdl-hd .x{position:absolute;right:12px;top:12px}
+.mdl-bd{padding:14px 16px 16px}
+.fld{margin-bottom:13px}
+.fl{display:flex;align-items:baseline;gap:8px;font-size:11px;color:var(--ink-2);margin-bottom:5px;font-family:var(--mono);letter-spacing:.05em;text-transform:uppercase}
+.fl .aux{margin-left:auto;text-transform:none;letter-spacing:0;font-size:10.5px;color:var(--ink-3)}
+.iw{position:relative}
+.inp-amt{height:56px;font-family:var(--mono);font-size:24px;font-weight:600;letter-spacing:-.3px;padding:0 96px 0 12px;background:var(--cd);border:1px solid var(--ink);border-radius:var(--r);width:100%;color:var(--ink)}
+.unit{position:absolute;right:6px;top:6px;height:44px;padding:0 10px;display:flex;align-items:center;border:1px solid var(--rl-2);border-radius:2px;background:var(--pg-2);font-family:var(--mono);font-size:11px;font-weight:600;color:var(--ink)}
+.ib{width:30px;height:30px;border:1px solid var(--rl-2);border-radius:var(--r);background:var(--cd);display:inline-flex;align-items:center;justify-content:center;color:var(--ink-2);flex:none}
+.ib:hover{border-color:var(--ink);color:var(--ink)}
+
+/* -- 结算凭证:一张横向账页,三栏细线分隔 -- */
+.btn-row{display:flex;gap:9px}
+.foot{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--ink-3);text-align:center;line-height:1.7}
+.lr-v.bad{color:var(--bad)} .lr-v.ok{color:var(--felt)}
+.doc-bd{flex:1;display:grid;grid-template-columns:1.12fr 1fr 1.06fr;overflow:hidden}
+.doc-col{padding:14px 22px;overflow:hidden;border-left:1px solid var(--rl)}
+.doc-col:first-child{border-left:none}
+.ar{display:grid;grid-template-columns:26px 1fr auto;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--rl)}
+.ar:last-child{border-bottom:none}
+.ar-m{min-width:0}
+.ar-n{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap;overflow:hidden}
+.ar-s{font-size:10.5px;color:var(--ink-3);font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ar-r{text-align:right;flex:none}
+.ar-amt{font-family:var(--mono);font-variant-numeric:tabular-nums;font-size:13px;font-weight:600;white-space:nowrap}
+.ar-amt.pos{color:var(--felt)} .ar-amt.bad{color:var(--bad)} .ar-amt.dim{color:var(--ink-3);font-weight:400}
+.tk{width:26px;height:26px;border:1px solid var(--rl-2);border-radius:2px;display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:10px;font-weight:700;color:var(--ink-2);background:var(--cd-2);flex:none}
+/* -- 密码学事件流 -- */
+.es{display:grid;grid-template-columns:22px 1fr auto;gap:9px;align-items:center;padding:7px 0;border-bottom:1px solid var(--rl);border-left:3px solid transparent;margin-left:-3px;padding-left:3px}
+.es:last-child{border-bottom:none}
+.es.sel{border-left-color:var(--play)}
+.es-ic{width:22px;height:22px;border:1px solid var(--rl-2);border-radius:2px;display:flex;align-items:center;justify-content:center;color:var(--ink-2);background:var(--cd-2)}
+.es-ic.ok{color:var(--felt);border-color:var(--felt-rl);background:var(--felt-w)}
+.es-ic.warn{color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)}
+.es-ic.bad{color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)}
+.es-ic.blue{color:var(--play);border-color:var(--play-rl);background:var(--play-w)}
+.es-m{min-width:0}
+.es-m b{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.09em;text-transform:uppercase;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.es-m span{display:block;font-family:var(--mono);font-size:10px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.es-t{font-family:var(--mono);font-size:10px;color:var(--ink-3);flex:none;text-align:right}
+/* -- 观战网格(ZK 展示桌:座位是账页条目,不是牌桌圆环) -- */
+.grid-seats{display:grid;grid-template-columns:repeat(3,1fr);gap:11px}
+.grid-seats .seat{position:static;width:auto}
+.grid-seats .seat .seat-cd{background:var(--cd)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:11px}
+
+/* ================= 稿面外壳(不属于牌桌 UI) ================= */
+.sbar{position:sticky;top:0;z-index:90;display:flex;align-items:center;gap:12px;padding:10px 22px;background:var(--pg);border-bottom:1px solid var(--rl)}
+.sbar .brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:14px}
+.sbar .brand small{color:var(--ink-3);font-weight:500;font-size:11px;font-family:var(--mono)}
+.seg-btn{display:flex;border:1px solid var(--ink);border-radius:var(--r);overflow:hidden}
+.seg-btn button{padding:5px 13px;font-size:12px;color:var(--ink-2);border-right:1px solid var(--rl-2);background:var(--cd)}
+.seg-btn button:last-child{border-right:none}
+.seg-btn button.on{background:var(--ink);color:var(--on-ink);font-weight:600}
+.sbar .hint{margin-left:auto;color:var(--ink-3);font-size:11px;font-family:var(--mono)}
+#gallery{max-width:1340px;margin:0 auto;padding:26px 28px 90px}
+.grp-h{display:flex;align-items:baseline;gap:11px;margin:34px 0 5px;padding-bottom:6px;border-bottom:2px solid var(--ink)}
+.grp-h:first-child{margin-top:0}
+.grp-h h2{font-size:17px}
+.grp-h .en{color:var(--ink-3);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;font-family:var(--mono)}
+.grp-h .no{margin-left:auto;font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.grp-d{color:var(--ink-2);font-size:12.5px;margin:10px 0 18px;max-width:960px}
+.grp-d b{color:var(--ink);font-weight:600}
+.shot{display:flex;flex-direction:column;gap:7px;margin-bottom:30px}
+.shot-l{display:flex;align-items:baseline;gap:9px;padding:0 2px}
+.shot-l .no{font-family:var(--mono);font-size:10.5px;color:var(--ink-3)}
+.shot-l b{font-size:13.5px}
+.shot-l .grp{margin-left:auto;font-size:10px;color:var(--ink-2);border:1px solid var(--rl-2);border-radius:2px;padding:1px 6px;font-family:var(--mono)}
+.shot-l .grp.new{color:var(--bad);border-color:var(--bad-rl);background:var(--bad-w)}
+.clip{border:1px solid var(--rl-2);border-radius:4px;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.10)}
+html[data-ground="night"] .clip{box-shadow:0 14px 44px rgba(0,0,0,.55)}
+.note{border:1px solid var(--rl);border-left:3px solid var(--play);background:var(--cd);border-radius:var(--r);padding:9px 12px;font-size:11.5px;color:var(--ink-2);line-height:1.6;max-width:1280px}
+.note b{color:var(--ink)}
+.note .mono{color:var(--ink-3);font-size:11px}
+#shot-mount{display:none;width:1280px;height:800px;position:relative;overflow:hidden;background:var(--pg)}
+.mode-shot{background:var(--pg)}
+.mode-shot .sbar,.mode-shot #gallery{display:none}
+.mode-shot #shot-mount{display:block}
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 4.5 3.2 8 8 9 4.8-1 8-4.5 8-9V6l-8-3Z"/><path d="m8.5 12 2.5 2.5 4.5-4.5"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></symbol>
+<symbol id="i-ext" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4 11 13M18 14v6H4V6h6"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></symbol>
+<symbol id="i-shuf" viewBox="0 0 24 24"><path d="M3 7h4l10 10h4M3 17h4l3-3M14 10l3-3h4"/><path d="M18 4l3 3-3 3M18 14l3 3-3 3"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s3.6-6.5 10-6.5S22 12 22 12s-3.6 6.5-10 6.5S2 12 2 12Z"/><circle cx="12" cy="12" r="2.6"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 1.5 21h21L12 3Z"/><path d="M12 9.5v5M12 17.6v.6"/></symbol>
+<symbol id="i-chk" viewBox="0 0 24 24"><path d="m4 12.5 5.2 5.5L20 6.5"/></symbol>
+<symbol id="i-x" viewBox="0 0 24 24"><path d="m5 5 14 14M19 5 5 19"/></symbol>
+<symbol id="i-ref" viewBox="0 0 24 24"><path d="M20 5v6h-6M4 19v-6h6"/><path d="M19.4 11a7.5 7.5 0 0 0-13-4.2L4 10M4.6 13a7.5 7.5 0 0 0 13 4.2L20 14"/></symbol>
+<symbol id="i-cu" viewBox="0 0 24 24"><path d="M3 7l9-4 9 4-9 4-9-4Z"/><path d="M3 12l9 4 9-4M3 17l9 4 9-4"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 4h7v16H4zM13 4h7v16h-7z"/><path d="M4 9h7M13 9h7"/></symbol>
+</defs></svg>
+
+<div class="sbar">
+  <div class="brand">ZChain · 牌桌设计稿 <small>账簿 Ledger v0.1 · 1280×800</small></div>
+  <div class="seg-btn" id="ground">
+    <button data-g="paper" class="on">纸白 paper</button>
+    <button data-g="night">夜场 night</button>
+  </div>
+  <div class="hint">9 屏 · /play 生产桌 6 + /game 展示桌 2 + 组件板 1 · 导出:<span class="mono">#t1 … #ds</span></div>
+</div>
+
+<div id="shot-mount"></div>
+
+<div id="gallery">
+
+<div class="grp-h"><h2>A · 生产桌 /play</h2><span class="en">Playable table · socket.io</span><span class="no">6 屏</span></div>
+<p class="grp-d">现桌数据契约:<span class="mono">Table.seats{n}.&#123;player.name, stack, bet, hand[], turn, lastAction, folded, sittingOut&#125;</span> + <span class="mono">mainPot / sidePots[] / board[] / callAmount / button / rakeCollected / roundState / handOver / winMessages[] / closed</span>。以下 6 屏逐字对应这些字段,未虚构任何数据。</p>
+
+<!-- ═══════════════ T1 空桌·待入座 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T1</span><b>空桌 · 待入座</b><span class="grp">/play</span></div>
+  <div class="clip" id="t1">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Texas Hold'em · No Limit · 5 seats</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">下一手 #1042 · 等待开盘</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">盲注 25 / 50</span>
+      <span class="net">最小买入 1,000</span>
+      <span class="net">上限 5,000</span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-shield"/></svg>结算可证</a>
+    </div>
+  </header>
+
+  <div class="tb-street">
+    <div class="rail">
+      <div class="rn"><i></i><span>翻前</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>翻牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>转牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>河牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>摊牌</span></div>
+    </div>
+    <div class="sbar-note">
+      <span class="ch ch-play">roundState · waiting</span>
+      <span class="net"><svg class="ic ic-xs"><use href="#i-shuf"/></svg>洗牌:各家轮流重加密,上链验证后开局</span>
+    </div>
+  </div>
+
+  <div class="tb-body" style="position:relative;flex:1">
+    <div class="felt">
+      <span class="felt-tag">公共区 · COMMON — 不归属任何玩家</span>
+
+      <div class="board">
+        <div class="board-l"><svg class="ic ic-xs"><use href="#i-lock"/></svg>公共牌 0 / 5 · 未发</div>
+        <div class="board-row">
+          <div class="pc pc--back"><span class="no">#1</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+          <div class="pc pc--back"><span class="no">#2</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+          <div class="pc pc--back"><span class="no">#3</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+          <div class="pc pc--back"><span class="no">#4</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+          <div class="pc pc--back"><span class="no">#5</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        </div>
+      </div>
+
+      <div class="pot">
+        <div class="pot-l">彩池 TOTAL POT</div>
+        <div class="pot-a">0 <span class="u">CHIPS</span></div>
+        <div class="pot-brk">
+          <div class="lr"><span class="lr-k">主池 MAIN</span><span class="lr-v dim">0</span></div>
+          <div class="lr"><span class="lr-k">台费 RAKE</span><span class="lr-v dim">0</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="seat seat--vacant seat--t" style="left:130px;top:44px"><div class="seat-cd"><span class="seat-tag">SEAT 1</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:400px;top:10px"><div class="seat-cd"><span class="seat-tag">SEAT 2</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:680px;top:10px"><div class="seat-cd"><span class="seat-tag">SEAT 3</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:950px;top:44px"><div class="seat-cd"><span class="seat-tag">SEAT 4</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+
+    <div class="tb-msg">上一手 <span class="num">#1041</span> 已上链结算 · 派彩 <span class="num">3,120</span> → Kenji · 台费 <span class="num">46</span></div>
+    <div class="wm">zchain · appchain texas v3.0.0 · rpc devnet</div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center">
+    <div class="hero">
+      <div class="hero-cd" style="border-style:dashed;background:transparent;text-align:center">
+        <div class="vac-l">SEAT 5 · 空置 Vacant</div>
+        <div style="font-size:11.5px;color:var(--ink-2);margin-top:5px">已登录钱包 <span class="num">0x7c1a…4a9f</span></div>
+      </div>
+    </div>
+    <div class="act">
+      <div class="bn" style="grid-template-columns:18px 1fr"><svg class="ic ic-s" style="color:var(--ink-3);margin-top:2px"><use href="#i-cu"/></svg><span>入座即按盲注结构锁定买入,<span class="num">1,000 – 5,000</span> 步进 <span class="num">1,000</span>;筹码由链上 vault 入账,余量与每一手结算都以等宽数字记账,可逐笔回查。</span></div>
+    </div>
+    <button class="btn btn-p" style="width:200px;flex:none">入座并买入 1,000</button>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>改了什么:</b>座位从「scale(.55) 圆形头像 + 名字胶囊」改成账目条目卡,空置位用虚线待填行 + 行内「入座」;桌号/手数/盲注提到票据抬头(原散在 TableInfoWrapper);街段从文字胶囊改成五节点状态轨;牌背统一为<b>密封信封</b>,把「未开牌 = 链上已锁定」讲成视觉事实;台面右侧新增座位表与牌局记录/ZK 事件/钱包入口。</div>
+</div>
+
+<!-- ═══════════════ T2 对局中·他人行动 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T2</span><b>对局中 · 他人行动(翻牌圈)</b><span class="grp">/play</span></div>
+  <div class="clip" id="t2">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Texas Hold'em · No Limit · 5 seats</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">HAND #1042 · 在座 5 / 5 · 你 = SEAT 5(大盲)</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">盲注 25 / 50</span>
+      <span class="net">最小加注增量 50</span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-shield"/></svg>0x4f2a…1c07</a>
+    </div>
+  </header>
+
+  <div class="tb-street">
+    <div class="rail">
+      <div class="rn done"><i></i><span>翻前</span></div><div class="rline done"></div>
+      <div class="rn cur"><i></i><span>翻牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>转牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>河牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>摊牌</span></div>
+    </div>
+    <div class="sbar-note">
+      <span class="ch ch-amb">roundState · flop</span>
+      <span class="ch">下注轮 2 / 4 仍在线</span>
+      <span class="net"><svg class="ic ic-xs"><use href="#i-clock"/></svg>行动时限 15s · 超时自动弃牌</span>
+    </div>
+  </div>
+
+  <div class="tb-body" style="position:relative;flex:1">
+    <div class="felt">
+      <span class="felt-tag">公共区 · COMMON</span>
+
+      <div class="board">
+        <div class="board-l"><svg class="ic ic-xs"><use href="#i-eye"/></svg>公共牌 3 / 5 · 已上链开牌</div>
+        <div class="board-row">
+          <div class="pc r"><span class="ix">A<i>♥</i></span><span class="pip">♥</span></div>
+          <div class="pc k"><span class="ix">K<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc r"><span class="ix">7<i>♦</i></span><span class="pip">♦</span></div>
+          <div class="pc pc--back"><span class="no">#4</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+          <div class="pc pc--back"><span class="no">#5</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        </div>
+      </div>
+
+      <div class="pot">
+        <div class="pot-l">彩池 TOTAL POT <span class="ch ch-xs">含当前下注轮</span></div>
+        <div class="pot-a">1,275 <span class="u">CHIPS</span></div>
+        <div class="pot-brk">
+          <div class="lr"><span class="lr-k">主池 MAIN</span><span class="lr-v">1,275</span></div>
+          <div class="lr"><span class="lr-k">待跟 CALL</span><span class="lr-v">300</span></div>
+          <div class="lr"><span class="lr-k">你已投入</span><span class="lr-v">200</span></div>
+          <div class="lr"><span class="lr-k">台费 RAKE</span><span class="lr-v dim">摊牌时收</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="seat seat--t is-turn" style="left:130px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 1 · 小盲</span>
+        <div class="av">AI</div>
+        <div class="seat-id"><b>Aria</b><span class="stk">3,780</span></div>
+        <span class="ch ch-amb">行动中</span>
+      </div>
+      <div class="seat-timer"><span class="num">T-09</span><div class="meter"><i class="warn" style="width:40%"></i></div></div>
+      <div class="bet"><span class="mono">需跟</span><span class="lead"></span><span class="amt">300</span></div>
+    </div>
+
+    <div class="seat seat--t" style="left:400px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 2</span>
+        <div class="av">小</div>
+        <div class="seat-id"><b>小鱼儿爱吃面</b><span class="stk">2,050</span></div>
+        <span class="ch ch-felt">已行动</span>
+      </div>
+      <div class="bet"><span class="mono">下注</span><span class="lead"></span><span class="amt">300</span></div>
+    </div>
+
+    <div class="seat seat--t" style="left:680px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 3 · 庄 BTN</span>
+        <div class="av">KE</div>
+        <div class="seat-id"><b>Kenji</b><span class="stk">4,100</span></div>
+        <span class="ch ch-felt">已行动</span>
+      </div>
+      <div class="bet"><span class="mono">跟注</span><span class="lead"></span><span class="amt">300</span></div>
+    </div>
+
+    <div class="seat seat--t is-fold" style="left:950px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 4</span>
+        <div class="av" style="background:var(--ink-3)">PO</div>
+        <div class="seat-id"><b>PO-7741</b><span class="stk">2,400</span></div>
+        <span class="ch ch-bad">已弃牌</span>
+      </div>
+      <div class="bet"><span class="mono">弃牌</span><span class="lead"></span><span class="amt" style="font-weight:400;color:var(--ink-3)">—</span></div>
+    </div>
+
+    <div class="tb-msg ok">小鱼儿爱吃面 <span class="num">下注 300</span> · Kenji <span class="num">跟注</span> · PO-7741 <span class="num">弃牌</span> · 轮到 Aria</div>
+    <div class="wm">zchain · appchain texas v3.0.0 · hand #1042</div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center">
+    <div class="hero">
+      <div class="hero-cd">
+        <div class="row"><span class="av" style="width:26px;height:26px;font-size:10px">你</span>
+          <div class="seat-id"><b>0x7c1a…4a9f</b><span class="stk">4,850</span></div>
+          <span class="ch">SEAT 5 · 大盲</span>
+        </div>
+        <div class="hand-over" style="justify-content:flex-start;margin-top:7px">
+          <div class="pc pc--sm k"><span class="ix">A<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc pc--sm r" style="margin-left:-11px"><span class="ix">A<i>♦</i></span><span class="pip">♦</span></div>
+          <span class="mono" style="font-size:10px;color:var(--ink-3);margin-left:9px;align-self:center">底池赔率 5.3 : 1</span>
+        </div>
+      </div>
+    </div>
+    <div class="act">
+      <div class="bn" style="grid-template-columns:18px 1fr"><svg class="ic ic-s" style="color:var(--amb);margin-top:2px"><use href="#i-clock"/></svg><span>等待 Aria 行动。你已投入 <b class="num">200</b>,当前需跟 <b class="num">300</b>;超时不会替你决定,但 <b class="num">15s</b> 后自动弃牌。</span></div>
+    </div>
+    <div class="row" style="flex:none"><button class="btn btn-s btn-sm">离桌</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>质感关键点:</b>①所有金额等宽右对齐,四张座位卡的余量能对齐成一列 —— 现在做不到。②轮动标记从「旋转绿环」改成 <span class="mono">3px 琥珀左条 + 线性 .meter + T-09 等宽读数</span>,倒计时与真实剩余时间绑定。③弃牌位保留在账页上(划销线 + 虚线框),而不是从桌上消失,玩家才数得清还剩几人。④全下用 <span class="mono">--bad</span> 语义色标注,彩池即时拆成主池 / 边池 / 待跟 / 台费四行。</div>
+</div>
+
+<!-- ═══════════════ T3 轮到我行动 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T3</span><b>轮到我行动 · 加注滑轨</b><span class="grp new">核心屏</span></div>
+  <div class="clip" id="t3">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Texas Hold'em · No Limit · 5 seats</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">HAND #1042 · 转牌圈 · 你 = SEAT 5(大盲)</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">盲注 25 / 50</span>
+      <span class="net">最小加注增量 50</span>
+      <span class="net">你的余量 4,450</span>
+    </div>
+  </header>
+
+  <div class="tb-street">
+    <div class="rail">
+      <div class="rn done"><i></i><span>翻前</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>翻牌</span></div><div class="rline done"></div>
+      <div class="rn cur"><i></i><span>转牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>河牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>摊牌</span></div>
+    </div>
+    <div class="sbar-note">
+      <span class="ch ch-amb">轮到你 YOUR TURN · T-12</span>
+      <span class="net">底池赔率 <b class="num" style="color:var(--ink)">4.7 : 1</b></span>
+      <span class="net">跟注占余量 <b class="num" style="color:var(--ink)">12.5%</b></span>
+      <span class="net">加注 2,033 占余量 <b class="num" style="color:var(--ink)">36.7%</b></span>
+      <span class="net"><svg class="ic ic-xs"><use href="#i-clock"/></svg>超时自动弃牌</span>
+    </div>
+  </div>
+
+  <div class="tb-body" style="position:relative;flex:1">
+    <div class="felt">
+      <span class="felt-tag">公共区 · COMMON</span>
+
+      <div class="board">
+        <div class="board-l"><svg class="ic ic-xs"><use href="#i-eye"/></svg>公共牌 4 / 5 · 已上链开牌</div>
+        <div class="board-row">
+          <div class="pc r"><span class="ix">A<i>♥</i></span><span class="pip">♥</span></div>
+          <div class="pc k"><span class="ix">K<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc r"><span class="ix">7<i>♦</i></span><span class="pip">♦</span></div>
+          <div class="pc k"><span class="ix">2<i>♣</i></span><span class="pip">♣</span></div>
+          <div class="pc pc--back"><span class="no">#5</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        </div>
+      </div>
+
+      <div class="pot">
+        <div class="pot-l">彩池 TOTAL POT</div>
+        <div class="pot-a">2,065 <span class="u">CHIPS</span></div>
+        <div class="pot-brk">
+          <div class="lr"><span class="lr-k">主池(小鱼儿可争)</span><span class="lr-v">1,910</span></div>
+          <div class="lr"><span class="lr-k">边池 1(Kenji/你)</span><span class="lr-v">155</span></div>
+          <div class="lr"><span class="lr-k">你已投入</span><span class="lr-v">400</span></div>
+          <div class="lr"><span class="lr-k">待跟 CALL</span><span class="lr-v">555</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="seat seat--t is-fold" style="left:130px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 1 · 小盲</span>
+        <div class="av" style="background:var(--ink-3)">AI</div>
+        <div class="seat-id"><b>Aria</b><span class="stk">3,780</span></div>
+        <span class="ch ch-bad">已弃牌</span>
+      </div>
+      <div class="bet"><span class="mono">弃牌</span><span class="lead"></span><span class="amt" style="font-weight:400;color:var(--ink-3)">—</span></div>
+    </div>
+
+    <div class="seat seat--t" style="left:400px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 2</span>
+        <div class="av">小</div>
+        <div class="seat-id"><b>小鱼儿爱吃面</b><span class="stk">0</span></div>
+        <span class="ch ch-bad">全下</span>
+      </div>
+      <div class="bet"><span class="mono">全下</span><span class="lead"></span><span class="amt allin">955</span></div>
+    </div>
+
+    <div class="seat seat--t" style="left:680px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 3 · 庄 BTN</span>
+        <div class="av">KE</div>
+        <div class="seat-id"><b>Kenji</b><span class="stk">1,495</span></div>
+        <span class="ch ch-felt">已行动</span>
+      </div>
+      <div class="bet"><span class="mono">跟注</span><span class="lead"></span><span class="amt">555</span></div>
+    </div>
+
+    <div class="seat seat--t is-fold" style="left:950px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 4</span>
+        <div class="av" style="background:var(--ink-3)">PO</div>
+        <div class="seat-id"><b>PO-7741</b><span class="stk">2,400</span></div>
+        <span class="ch ch-bad">已弃牌</span>
+      </div>
+      <div class="bet"><span class="mono">弃牌</span><span class="lead"></span><span class="amt" style="font-weight:400;color:var(--ink-3)">—</span></div>
+    </div>
+
+    <div class="tb-msg">河牌未出 · 在线 <span class="num">3 / 5</span> · 小鱼儿 <span class="num">全下 955</span> · Kenji <span class="num">跟注 555</span></div>
+    <div class="wm">zchain · appchain texas v3.0.0 · hand #1042</div>
+  </div>
+
+  <footer class="tb-ft">
+    <div class="hero">
+      <div class="hero-cd" style="border-color:var(--ink)">
+        <div class="row" style="margin-bottom:7px"><span class="av" style="width:26px;height:26px;font-size:10px">你</span>
+          <div class="seat-id"><b>0x7c1a…4a9f</b><span class="stk">4,450</span></div>
+          <span class="ch ch-amb">SEAT 5 · 大盲</span>
+        </div>
+        <div class="hand-over" style="justify-content:flex-start">
+          <div class="pc pc--sm k"><span class="ix">A<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc pc--sm r" style="margin-left:-11px"><span class="ix">A<i>♦</i></span><span class="pip">♦</span></div>
+          <span class="mono" style="font-size:10px;color:var(--felt);margin-left:9px;align-self:center;font-weight:600">三条 A · 顶三条</span>
+        </div>
+        <div class="seat-timer" style="margin-top:8px"><span class="num">T-12</span><div class="meter"><i style="width:80%"></i></div></div>
+      </div>
+    </div>
+
+    <div class="act">
+      <div class="act-ctl">
+        <div>
+          <div class="row" style="justify-content:space-between;margin-bottom:2px">
+            <span class="sec-t" style="margin:0">加注额 RAISE TO</span>
+            <div class="seg" style="margin:0;width:auto;grid-template-columns:repeat(4,66px)">
+              <button>最小 1,510</button><button class="on">半池 2,033</button><button>底池 3,075</button><button>全下 4,450</button>
+            </div>
+          </div>
+          <div class="scale">
+            <div class="scale-rail"></div>
+            <div class="scale-fill" style="width:16.4%"></div>
+            <span class="scale-tick key l" style="left:0"><em>1,510 最小加注</em></span>
+            <span class="scale-tick" style="left:16.4%"><em>2,033</em></span>
+            <span class="scale-tick" style="left:40.5%"><em>3,075 底池</em></span>
+            <span class="scale-tick key r" style="left:100%"><em>4,450 全下</em></span>
+            <div class="scale-knob" style="left:16.4%"></div>
+            <div class="scale-val" style="left:16.4%">RAISE TO 2,033</div>
+          </div>
+        </div>
+        <div class="act-read">
+          <div class="l">需投入 TO CALL</div>
+          <div class="v">555</div>
+          <div style="font-size:9.5px;color:var(--ink-3);font-family:var(--mono);letter-spacing:.04em">赔率 4.7 : 1</div>
+        </div>
+      </div>
+      <div class="act-btns">
+        <button class="btn btn-o">弃牌 FOLD</button>
+        <button class="btn btn-s" disabled>过牌 CHECK</button>
+        <button class="btn btn-s">跟注 CALL <span class="amt">555</span></button>
+        <button class="btn btn-p">加注 RAISE <span class="amt">2,033</span></button>
+      </div>
+    </div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>质感关键点:</b>①下注滑杆从「无刻度圆轨 + Input」改成<b>印刷刻度尺</b>:最小加注 / 半池 / 底池 / 全下四个刻度有标注,推到哪里一目了然。②金额层级固定三档:<span class="mono">弃牌=红描边 · 过牌=墨描边 · 跟注=墨描边带额 · 加注=翡翠实底</span>,主操作永远只有一个翡翠按钮。③「底池赔率 / 跟注占余量」是现桌完全没有的决策信息,放上来才是「质感升级」而不只是换皮。④CHECK 在有待跟额时按 <span class="mono">.btn[disabled]</span> 的虚线灰态呈现,而不是隐藏。</div>
+</div>
+
+<!-- ═══════════════ T4 摊牌与派彩 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T4</span><b>摊牌与派彩 · 赢家落章</b><span class="grp">/play</span></div>
+  <div class="clip" id="t4">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Texas Hold'em · No Limit · 5 seats</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">HAND #1042 · 摊牌 · 你 = SEAT 5(大盲)</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">盲注 25 / 50</span>
+      <span class="net">在线 2 / 5</span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-shield"/></svg>0x4f2a…1c07</a>
+    </div>
+  </header>
+
+  <div class="tb-street">
+    <div class="rail">
+      <div class="rn done"><i></i><span>翻前</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>翻牌</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>转牌</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>河牌</span></div><div class="rline done"></div>
+      <div class="rn cur"><i></i><span>摊牌</span></div>
+    </div>
+    <div class="sbar-note">
+      <span class="ch ch-amb">roundState · showdown</span>
+      <span class="net">开牌 3 家 · 弃牌 2 家底牌不公开</span>
+      <span class="net"><svg class="ic ic-xs"><use href="#i-clock"/></svg>下一手 #1043 · 4s</span>
+    </div>
+  </div>
+
+  <div class="tb-body" style="position:relative;flex:1">
+    <div class="felt">
+      <span class="felt-tag">公共区 · COMMON</span>
+      <div class="board">
+        <div class="board-l"><svg class="ic ic-xs"><use href="#i-eye"/></svg>公共牌 5 / 5 · 已全部上链开牌</div>
+        <div class="board-row">
+          <div class="pc r"><span class="ix">A<i>♥</i></span><span class="pip">♥</span></div>
+          <div class="pc k"><span class="ix">K<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc r"><span class="ix">7<i>♦</i></span><span class="pip">♦</span></div>
+          <div class="pc k"><span class="ix">2<i>♣</i></span><span class="pip">♣</span></div>
+          <div class="pc k"><span class="ix">5<i>♠</i></span><span class="pip">♠</span></div>
+        </div>
+      </div>
+      <div class="pot pot--cleared">
+        <div class="pot-l">彩池 TOTAL POT · 已结转</div>
+        <div class="pot-a">3,040 <span class="u">CHIPS</span></div>
+        <div class="pot-brk">
+          <div class="lr"><span class="lr-k">主池 MAIN</span><span class="lr-v">3,040</span></div>
+          <div class="lr"><span class="lr-k">台费 RAKE</span><span class="lr-v bad">46</span></div>
+        </div>
+        <div class="pot-settle"><svg class="ic ic-s"><use href="#i-chk"/></svg>派彩 → 你 <span class="num">2,994</span></div>
+      </div>
+    </div>
+
+    <div class="seat seat--t is-fold" style="left:130px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 1 · 小盲</span>
+        <div class="av" style="background:var(--ink-3)">AI</div>
+        <div class="seat-id"><b>Aria</b><span class="stk">3,780</span></div>
+        <span class="ch ch-bad">已弃牌</span>
+      </div>
+    </div>
+
+    <div class="seat seat--t" style="left:400px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 2 · 已开牌</span>
+        <div class="av">小</div>
+        <div class="seat-id"><b>小鱼儿爱吃面</b><span class="stk">0</span></div>
+        <span class="ch ch-bad">全下</span>
+      </div>
+      <div class="seat-hand" style="margin-top:5px"><div class="pc pc--sm k"><span class="ix">K<i>♣</i></span><span class="pip">♣</span></div><div class="pc pc--sm r" style="margin-left:-11px"><span class="ix">K<i>♥</i></span><span class="pip">♥</span></div></div>
+      <div class="bet"><span class="mono">三条 K</span><span class="lead"></span><span class="amt">955</span></div>
+    </div>
+
+    <div class="seat seat--t" style="left:680px;top:10px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 3 · 庄 BTN · 已开牌</span>
+        <div class="av">KE</div>
+        <div class="seat-id"><b>Kenji</b><span class="stk">1,095</span></div>
+        <span class="ch">已跟注</span>
+      </div>
+      <div class="seat-hand" style="margin-top:5px"><div class="pc pc--sm k"><span class="ix">7<i>♠</i></span><span class="pip">♠</span></div><div class="pc pc--sm k" style="margin-left:-11px"><span class="ix">7<i>♣</i></span><span class="pip">♣</span></div></div>
+      <div class="bet"><span class="mono">三条 7</span><span class="lead"></span><span class="amt">955</span></div>
+    </div>
+
+    <div class="seat seat--t is-fold" style="left:950px;top:44px">
+      <div class="seat-cd"><span class="seat-tag">SEAT 4</span>
+        <div class="av" style="background:var(--ink-3)">PO</div>
+        <div class="seat-id"><b>PO-7741</b><span class="stk">2,400</span></div>
+        <span class="ch ch-bad">已弃牌</span>
+      </div>
+    </div>
+
+    <div class="tb-msg ok"><b>你</b> 以 <span class="num">三条 A</span> 毛派彩 <span class="num">2,994</span>(净增 <span class="num">2,039</span>) · 台费 <span class="num">46</span> 已入链上金库 · 本手凭证已生成</div>
+    <div class="wm">zchain · appchain texas v3.0.0 · hand #1042 · settled</div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center">
+    <div class="hero">
+      <div class="hero-cd" style="border-color:var(--felt);background:var(--felt-w)">
+        <div class="row"><span class="av" style="width:26px;height:26px;font-size:10px">你</span>
+          <div class="seat-id"><b>0x7c1a…4a9f</b><span class="stk" style="color:var(--felt)">6,889</span></div>
+          <span class="seal seal-ok"><svg class="ic ic-xs"><use href="#i-chk"/></svg>已结算</span>
+        </div>
+        <div class="hand-over" style="justify-content:flex-start;margin-top:7px">
+          <div class="pc pc--sm k"><span class="ix">A<i>♠</i></span><span class="pip">♠</span></div>
+          <div class="pc pc--sm r" style="margin-left:-11px"><span class="ix">A<i>♦</i></span><span class="pip">♦</span></div>
+          <span class="mono" style="font-size:10px;color:var(--felt);margin-left:9px;align-self:center;font-weight:600">+2,994 · 三条 A</span>
+        </div>
+      </div>
+    </div>
+    <div class="act">
+      <div class="bn bn-ok" style="grid-template-columns:18px 1fr"><svg class="ic ic-s" style="color:var(--felt);margin-top:2px"><use href="#i-shield"/></svg><span>本手结算事实已写入 appchain,派彩与台费逐笔可回查。<b>弃牌两家的底牌不公开</b> —— 这是牌桌协议,不是实现遗漏。</span></div>
+    </div>
+    <div class="row" style="flex:none"><button class="btn btn-s btn-sm">本手凭证</button><button class="btn btn-p btn-sm">继续 #1043</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>质感关键点:</b>①赢家不用金色爆炸动效,而是<b>落一枚印章</b> + 彩池合计行划销 + 「派彩 →」结转行,和账簿改账的动作一致。②弃牌位不画底牌(现桌同样不画,但会把已弃牌玩家整个从桌上摘掉,导致数不清还剩几人)。③开牌的两家在座位卡下直接摊出底牌并标注牌型,不用悬停。④台费用 <span class="mono">--bad</span> 而不是藏在角落 —— 玩家有权一眼看到自己交了多少钱。</div>
+</div>
+
+<!-- ═══════════════ T5 买入弹窗 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T5</span><b>买入弹窗 · 链上入账单据</b><span class="grp">/play</span></div>
+  <div class="clip" id="t5">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Texas Hold'em · No Limit · 5 seats</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">下一手 #1042 · 等待开盘</span></div>
+    </div>
+    <div class="tb-hd-r"><span class="net">盲注 25 / 50</span><span class="net">最小买入 1,000</span><span class="net">上限 5,000</span></div>
+  </header>
+  <div class="tb-body" style="position:relative;flex:1">
+    <div class="felt"><span class="felt-tag">公共区 · COMMON</span></div>
+    <div class="seat seat--vacant seat--t" style="left:130px;top:44px"><div class="seat-cd"><span class="seat-tag">SEAT 1</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:400px;top:10px"><div class="seat-cd"><span class="seat-tag">SEAT 2</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:680px;top:10px"><div class="seat-cd"><span class="seat-tag">SEAT 3</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    <div class="seat seat--vacant seat--t" style="left:950px;top:44px"><div class="seat-cd"><span class="seat-tag">SEAT 4</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+  </div>
+
+  <div class="ovl">
+    <div class="ovl-bg"></div>
+    <div class="ovl-in">
+      <div class="mdl">
+        <div class="mdl-hd perf">
+          <div class="k">Buy-in · 链上入账</div>
+          <div class="t">入座并买入 · SEAT 5</div>
+          <button class="ib x"><svg class="ic ic-s"><use href="#i-x"/></svg></button>
+        </div>
+        <div class="mdl-bd">
+          <div class="lr"><span class="lr-k">钱包地址</span><span class="lr-v">0x7c1a…4a9f</span></div>
+          <div class="lr"><span class="lr-k">STRK 余额</span><span class="lr-v">4.8500 STRK</span></div>
+          <div class="lr"><span class="lr-k">可兑换筹码</span><span class="lr-v">4,850</span></div>
+          <div class="lr"><span class="lr-k">汇率</span><span class="lr-v dim">1 STRK = 1,000 筹码</span></div>
+
+          <div class="fld" style="margin-top:14px">
+            <div class="fl">买入额 BUY IN <span class="aux">1,000 – 4,850 · 步进 1,000</span></div>
+            <div class="iw">
+              <input class="inp-amt" id="amount" type="text" value="2,000">
+              <span class="unit">CHIPS</span>
+            </div>
+          </div>
+          <div class="seg" style="grid-template-columns:repeat(4,1fr);margin-bottom:13px">
+            <button>1,000</button><button class="on">2,000</button><button>3,000</button><button>4,000</button>
+          </div>
+
+          <div class="lr" style="border-top:1px solid var(--rl-2);padding-top:8px"><span class="lr-k">本次转换成本</span><span class="lr-v">2.0000 STRK</span></div>
+          <div class="lr"><span class="lr-k">转换后余额</span><span class="lr-v">2,850 筹码</span></div>
+
+          <div class="bn bn-info" style="margin:13px 0 0"><svg class="ic ic-s" style="color:var(--play);margin-top:2px"><use href="#i-alert"/></svg><span>筹码由链上 vault 入账后才算买入完成;未成交不扣款。此金额为<b>真实资产</b>,请核对后再确认。</span></div>
+
+          <div class="btn-row" style="margin-top:14px">
+            <button class="btn btn-s" style="width:104px;flex:none">取消</button>
+            <button class="btn btn-p">确认买入 2,000 筹码</button>
+          </div>
+          <div class="foot" style="padding-top:10px">SEAT 5 · A-2231 · 1 STRK = 1,000 CHIPS · DEVNET</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+  </div>
+  <div class="note"><b>改了什么:</b>现桌买入是「紫色渐变确认钮 + 一个裸 number input」,四行余额信息挤在蓝色提示块里、无对齐。改成<b>单据形态</b>:齿孔抬头 + <span class="mono">.lr</span> 账目行(等宽右对齐)+ 大额输入 + 档位 + 成本复核两行,最后一枚 <span class="mono">.bn-info</span> 说明「链上入账后才算买入」。字段与 <span class="mono">Seat.tsx</span> 一一对应:钱包地址 / STRK 余额 / 可兑换筹码 / 汇率 / 买入额 / 转换成本,校验规则 <span class="mono">minBuyIn=max(minBet*2*10,1000)</span>、步进 <span class="mono">1,000</span>、上限 <span class="mono">5,000</span>。</div>
+</div>
+
+<!-- ═══════════════ T6 手牌凭证 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">T6</span><b>本手凭证 · 结算可证</b><span class="grp new">差异化主屏</span></div>
+  <div class="clip" id="t6">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Hand Receipt · 牌局凭证 · 不可篡改</div>
+      <div class="tb-hd-t">牌桌 A-2231 · 第 1042 手 <span class="hand">2026-09-19 20:41:07 · 5 家 · 摊牌</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">凭证号 <b class="num" style="color:var(--ink)">R-1042-2231</b></span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-ext"/></svg>在 starkscan 查看</a>
+      <span class="seal seal-ok"><svg class="ic ic-xs"><use href="#i-shield"/></svg>已上链结算</span>
+    </div>
+  </header>
+
+  <div class="doc-bd">
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">牌局流水 · ACTION LOG</div>
+      <div class="bn bn-info" style="margin-bottom:11px"><svg class="ic ic-s" style="color:var(--play);margin-top:2px"><use href="#i-eye"/></svg><span><b>底牌</b> 你 <span class="mono">A♠ A♦</span> · <b>公共牌</b> <span class="mono">A♥ K♠ 7♦ 2♣ 5♠</span></span></div>
+      <div class="cd" style="padding:2px 12px 6px">
+        <div class="ar"><div class="tk">1</div><div class="ar-m"><div class="ar-n">小鱼儿爱吃面</div><div class="ar-s">加注到 150 · 跟注 955 累计</div></div><div class="ar-r"><div class="ar-amt">955</div></div></div>
+        <div class="ar"><div class="tk">2</div><div class="ar-m"><div class="ar-n">Kenji</div><div class="ar-s">跟注 · 转牌再加注</div></div><div class="ar-r"><div class="ar-amt">955</div></div></div>
+        <div class="ar"><div class="tk">3</div><div class="ar-m"><div class="ar-n">你</div><div class="ar-s">大盲起手 · 河牌跟足</div></div><div class="ar-r"><div class="ar-amt">955</div></div></div>
+        <div class="ar"><div class="tk">4</div><div class="ar-m"><div class="ar-n">PO-7741</div><div class="ar-s">翻前弃牌 · 死钱 150</div></div><div class="ar-r"><div class="ar-amt dim">150</div></div></div>
+        <div class="ar"><div class="tk">5</div><div class="ar-m"><div class="ar-n">Aria</div><div class="ar-s">转牌弃牌 · 死钱 25</div></div><div class="ar-r"><div class="ar-amt dim">25</div></div></div>
+      </div>
+      <div class="sec-t" style="margin:13px 0 9px">街段 · STREETS</div>
+      <div class="rail" style="margin-bottom:8px">
+        <div class="rn done"><i></i><span>翻前</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>翻牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>转牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>河牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>摊牌</span></div>
+      </div>
+      <div class="lr"><span class="lr-k">行动总数</span><span class="lr-v">21 次 · 4 轮下注</span></div>
+      <div class="lr"><span class="lr-k">用时</span><span class="lr-v">3 分 12 秒</span></div>
+      <div class="lr"><span class="lr-k">超时自动弃牌</span><span class="lr-v dim">0 次</span></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">彩池结算 · SETTLEMENT</div>
+      <div class="pot" style="position:static;transform:none;width:auto;display:block">
+        <div class="pot-l">本手总彩池 GROSS POT</div>
+        <div class="pot-a">3,040 <span class="u">CHIPS</span></div>
+      </div>
+      <div class="cd" style="padding:2px 12px 6px;margin-top:11px">
+        <div class="ar"><div class="tk tk-felt">你</div><div class="ar-m"><div class="ar-n">0x7c1a…4a9f <span class="ch ch-felt ch-xs">赢家</span></div><div class="ar-s">三条 A · 主池全额</div></div><div class="ar-r"><div class="ar-amt pos">+2,039</div></div></div>
+        <div class="ar"><div class="tk">KE</div><div class="ar-m"><div class="ar-n">Kenji</div><div class="ar-s">三条 7 · 摊牌负</div></div><div class="ar-r"><div class="ar-amt bad">−955</div></div></div>
+        <div class="ar"><div class="tk">小</div><div class="ar-m"><div class="ar-n">小鱼儿爱吃面</div><div class="ar-s">三条 K · 全下负</div></div><div class="ar-r"><div class="ar-amt bad">−955</div></div></div>
+        <div class="ar"><div class="tk">PO</div><div class="ar-m"><div class="ar-n">PO-7741</div><div class="ar-s">翻前弃牌</div></div><div class="ar-r"><div class="ar-amt bad">−150</div></div></div>
+        <div class="ar"><div class="tk">AI</div><div class="ar-m"><div class="ar-n">Aria</div><div class="ar-s">转牌弃牌</div></div><div class="ar-r"><div class="ar-amt bad">−25</div></div></div>
+      </div>
+      <div style="margin-top:11px">
+        <div class="lr"><span class="lr-k">主池 MAIN</span><span class="lr-v">3,040</span></div>
+        <div class="lr"><span class="lr-k">边池 SIDE</span><span class="lr-v dim">无(无人被盖过)</span></div>
+        <div class="lr"><span class="lr-k">台费 RAKE(1.5%,上限 50)</span><span class="lr-v bad">46</span></div>
+        <div class="lr"><span class="lr-k">毛派彩 GROSS PAID(含本金 955)</span><span class="lr-v ok">2,994</span></div>
+        <div class="lr"><span class="lr-k">净增 NET</span><span class="lr-v ok">2,039</span></div>
+        <div class="lr"><span class="lr-k">借贷平衡 &#931;(五家 + 金库)</span><span class="lr-v ok">0</span></div>
+        <div class="lr"><span class="lr-k">你 结算前 → 后</span><span class="lr-v">3,895 → 6,889</span></div>
+      </div>
+      <div class="bn bn-real" style="margin-top:11px"><svg class="ic ic-s" style="color:var(--real);margin-top:2px"><use href="#i-cu"/></svg><span><b>托管提示</b> 台费进入链上金库合约,非运营账户;每手可独立核验入账地址。</span></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">公平性证明 · PROOF</div>
+      <div class="rail" style="margin-bottom:11px">
+        <div class="rn done"><i></i><span>洗牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>上链</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>开牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>结算</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>确认</span></div>
+      </div>
+      <div class="bn bn-ok" style="margin-bottom:11px"><svg class="ic ic-s" style="color:var(--felt);margin-top:2px"><use href="#i-shield"/></svg><span><b>5 / 5 家洗牌证明均已通过链上验证</b>,任何一家拒绝提交则本手不开局。</span></div>
+      <div class="cd" style="padding:2px 12px 6px">
+        <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>shuffle</b><span>0x7c1a…4a9f · 层 1 / 5</span></div><div class="es-t">20:38:02</div></div>
+        <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0x4f2a…1c07 · 层 2 / 5</span></div><div class="es-t">20:38:19</div></div>
+        <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0x9b3d…77e2 · 层 3 / 5</span></div><div class="es-t">20:38:41</div></div>
+        <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0x2e80…c5a1 · 层 4 / 5</span></div><div class="es-t">20:39:04</div></div>
+        <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0xd147…30bf · 层 5 / 5</span></div><div class="es-t">20:39:26</div></div>
+        <div class="es sel"><div class="es-ic blue"><svg class="ic ic-xs"><use href="#i-eye"/></svg></div><div class="es-m"><b>reveal_token</b><span>card #3 · 已开牌 A♥</span></div><div class="es-t">20:41:03</div></div>
+      </div>
+      <div class="sec-t" style="margin:13px 0 8px">承诺值 · COMMITMENTS</div>
+      <div class="lr"><span class="lr-k">sum_c1_commit</span><span class="lr-v">0x1a4f…9c2e</span></div>
+      <div class="lr"><span class="lr-k">sum_c2_commit</span><span class="lr-v">0x7d02…b417</span></div>
+      <div class="lr"><span class="lr-k">global_challenge</span><span class="lr-v">0xc3e8…5a60</span></div>
+      <div class="lr"><span class="lr-k">nonce</span><span class="lr-v">0x00f4…1d7b</span></div>
+      <div class="raw" style="margin-top:9px">tx 0x4f2a7c09d3e1b85a6f2c4d90ae7b13c5f8d2a640e9b3c17fd5a208e4c6b91f37</div>
+    </div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center;padding:9px 22px">
+    <span class="mono" style="font-size:9.5px;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase">生成于 2026-09-19 20:41:07 · 数据源 appchain client_view · 本凭证内容不可被服务端单方修改</span>
+    <div class="row" style="margin-left:auto;flex:none"><button class="btn btn-s btn-sm">导出 PDF</button><button class="btn btn-s btn-sm">复制凭证号</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>为什么这是主屏:</b>牌桌本身是行业标配,真正没人能抄的是「这一手的每一张牌都可被独立复算」。所以凭证不是二级页面,而是牌桌的一等产物 —— 摊牌后每一手都生成,流水 / 结算 / 证明三段同页对齐,和账簿的「借方=贷方」结构同构。三段全部用同一套 <span class="mono">.ar</span> / <span class="mono">.lr</span> / <span class="mono">.rail</span> 原语,不新增任何视觉语言。字段对齐 <span class="mono">HandHistoryPanel</span> 与 <span class="mono">CryptoEvent</span>,并补上现桌<b>声明了却没渲染</b>的 <span class="mono">sidePots[]</span> 与 <span class="mono">streets[]</span>。</div>
+</div>
+
+<div class="grp-h"><h2>B · ZK 展示桌 /game/:gameId</h2><span class="en">Verifiable-fairness spectator table</span><span class="no">2 屏</span></div>
+<p class="grp-d">现桌是「卡片网格 + 右侧抽屉」,数据契约:<span class="mono">game.phase / pot / community_cards_revealed / players&#123;name, chips, current_bet, folded, player_pk&#125; / cryptoEvents&#123;event_type, player_pk, card_index, tx_digest, verified, timestamp&#125;</span>。它没有操作按钮,是<b>观战与叙事</b>屏 —— 所以设计目标不是「更好操作」,而是「让外行看懂公平性是怎么成立的」。</p>
+
+<!-- ═══════════════ G1 展示桌主视图 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">G1</span><b>展示桌主视图 · 牌桌与证据同页</b><span class="grp">/game/:gameId</span></div>
+  <div class="clip" id="g1">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Spectator · Verifiable Fair Gaming · Starknet Sepolia</div>
+      <div class="tb-hd-t">牌桌 A-2231 <span class="hand">GAME #a2231 · 6 家 · 观战 42 人</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="net">盲注 25 / 50</span>
+      <span class="ch ch-play">PHASE · FLOP</span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-book"/></svg>牌局记录</a>
+      <button class="ib"><svg class="ic ic-s"><use href="#i-ref"/></svg></button>
+    </div>
+  </header>
+
+  <div class="tb-street">
+    <div class="rail">
+      <div class="rn done"><i></i><span>洗牌</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>上链</span></div><div class="rline done"></div>
+      <div class="rn done"><i></i><span>发牌</span></div><div class="rline done"></div>
+      <div class="rn cur"><i></i><span>翻牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>转牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>河牌</span></div><div class="rline"></div>
+      <div class="rn"><i></i><span>摊牌</span></div>
+    </div>
+    <div class="sbar-note">
+      <span class="net"><svg class="ic ic-xs"><use href="#i-shield"/></svg>已验证 <b class="num" style="color:var(--felt)">12</b> 次密码学操作</span>
+      <span class="net">洗牌参与 <b class="num" style="color:var(--ink)">6 / 6</b></span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-ext"/></svg>verify tx</a>
+    </div>
+  </div>
+
+  <div class="doc-bd" style="grid-template-columns:1.62fr 1fr">
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:10px">玩家 · PLAYERS(余量与注单等宽右对齐)</div>
+      <div class="grid-seats">
+        <div class="seat"><div class="seat-cd"><span class="seat-tag">P1 · 你</span><div class="av">你</div><div class="seat-id"><b>0x7c1a…4a9f</b><span class="stk">4,850</span></div><span class="ch ch-felt">在线</span></div><div class="bet"><span class="mono">跟注</span><span class="lead"></span><span class="amt">300</span></div></div>
+        <div class="seat is-turn"><div class="seat-cd"><span class="seat-tag">P2 · 庄 BTN</span><div class="av">KE</div><div class="seat-id"><b>Kenji</b><span class="stk">1,095</span></div><span class="ch ch-amb">行动中</span></div><div class="seat-timer"><span class="num">T-11</span><div class="meter"><i style="width:73%"></i></div></div><div class="bet"><span class="mono">加注到</span><span class="lead"></span><span class="amt">600</span></div></div>
+        <div class="seat"><div class="seat-cd"><span class="seat-tag">P3</span><div class="av">小</div><div class="seat-id"><b>小鱼儿爱吃面</b><span class="stk">1,200</span></div><span class="ch ch-felt">在线</span></div><div class="bet"><span class="mono">跟注</span><span class="lead"></span><span class="amt">300</span></div></div>
+        <div class="seat is-fold"><div class="seat-cd"><span class="seat-tag">P4</span><div class="av" style="background:var(--ink-3)">AI</div><div class="seat-id"><b>Aria</b><span class="stk">3,780</span></div><span class="ch ch-bad">已弃牌</span></div></div>
+        <div class="seat is-fold"><div class="seat-cd"><span class="seat-tag">P5</span><div class="av" style="background:var(--ink-3)">PO</div><div class="seat-id"><b>PO-7741</b><span class="stk">2,400</span></div><span class="ch ch-bad">已弃牌</span></div></div>
+        <div class="seat"><div class="seat-cd"><span class="seat-tag">P6</span><div class="av">NO</div><div class="seat-id"><b>Nova</b><span class="stk">5,000</span></div><span class="ch">未行动</span></div><div class="bet"><span class="mono">需跟</span><span class="lead"></span><span class="amt">300</span></div></div>
+      </div>
+
+      <div class="sec-t" style="margin:15px 0 10px">公共牌 · COMMON <span class="ch ch-xs" style="margin-left:6px">3 / 5</span></div>
+      <div class="row" style="gap:8px;align-items:flex-start">
+        <div class="pc r"><span class="ix">A<i>♥</i></span><span class="pip">♥</span></div>
+        <div class="pc k"><span class="ix">K<i>♠</i></span><span class="pip">♠</span></div>
+        <div class="pc r"><span class="ix">7<i>♦</i></span><span class="pip">♦</span></div>
+        <div class="pc pc--back"><span class="no">#4</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        <div class="pc pc--back"><span class="no">#5</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        <div class="pot" style="position:static;transform:none;width:auto;flex:1;margin-left:14px;display:block">
+          <div class="pot-l">彩池 TOTAL POT</div>
+          <div class="pot-a" style="font-size:24px">1,875 <span class="u">CHIPS</span></div>
+          <div class="pot-brk" style="grid-template-columns:1fr">
+            <div class="lr"><span class="lr-k">主池 MAIN</span><span class="lr-v">1,875</span></div>
+            <div class="lr"><span class="lr-k">待跟 CALL</span><span class="lr-v">300</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="two" style="margin-top:15px">
+        <div>
+          <div class="sec-t" style="margin-bottom:4px">各街投入 · PER-STREET</div>
+          <div class="lr"><span class="lr-k">翻前 PRE-FLOP</span><span class="lr-v">975</span></div>
+          <div class="lr"><span class="lr-k">翻牌 FLOP</span><span class="lr-v">900</span></div>
+          <div class="lr"><span class="lr-k">转牌 TURN</span><span class="lr-v dim">0</span></div>
+          <div class="lr"><span class="lr-k">河牌 RIVER</span><span class="lr-v dim">0</span></div>
+        </div>
+        <div>
+          <div class="sec-t" style="margin-bottom:4px">牌堆状态 · DECK</div>
+          <div class="lr"><span class="lr-k">已承诺</span><span class="lr-v">52 / 52</span></div>
+          <div class="lr"><span class="lr-k">已开牌</span><span class="lr-v">9 张</span></div>
+          <div class="lr"><span class="lr-k">仍密封</span><span class="lr-v">43 张</span></div>
+          <div class="lr"><span class="lr-k">重加密层</span><span class="lr-v ok">6 / 6</span></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:10px">现在发生了什么 · NARRATION</div>
+      <div class="bn bn-info" style="margin-bottom:12px"><svg class="ic ic-s" style="color:var(--play);margin-top:2px"><use href="#i-alert"/></svg><span><b>翻牌圈</b> 三家底池已锁定,公共牌第 1–3 张由各家依次提交开牌令牌后解密上链;第 4–5 张仍是密文,任何人都无法提前看到。</span></div>
+
+      <div class="sec-t" style="margin-bottom:4px">密封牌 · ENCRYPTED CARDS</div>
+      <div class="row" style="gap:8px;align-items:flex-start;margin-bottom:12px">
+        <div class="pc pc--back" style="width:56px;height:80px"><span class="no">#3</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+        <div style="flex:1;min-width:0">
+          <div class="lr"><span class="lr-k">c1</span><span class="lr-v">0x1234abcd..</span></div>
+          <div class="lr"><span class="lr-k">c2</span><span class="lr-v">0x9f7e21c0..</span></div>
+          <div class="lr"><span class="lr-k">持有层</span><span class="lr-v">6 家复合密文</span></div>
+          <div class="lr"><span class="lr-k">状态</span><span class="lr-v dim">待开牌令牌</span></div>
+        </div>
+      </div>
+
+      <div class="sec-t" style="margin-bottom:4px">密码学事件 · EVENTS</div>
+      <div class="es sel"><div class="es-ic blue"><svg class="ic ic-xs"><use href="#i-eye"/></svg></div><div class="es-m"><b>reveal_token</b><span>0x4f2a…1c07 · card #3</span></div><div class="es-t">20:41:03</div></div>
+      <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0xd147…30bf · 层 6 / 6</span></div><div class="es-t">20:39:26</div></div>
+      <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>remask</b><span>0x2e80…c5a1 · 层 5 / 6</span></div><div class="es-t">20:39:04</div></div>
+      <div class="es"><div class="es-ic ok"><svg class="ic ic-xs"><use href="#i-shuf"/></svg></div><div class="es-m"><b>shuffle</b><span>0x7c1a…4a9f · 层 1 / 6</span></div><div class="es-t">20:38:02</div></div>
+      <div class="es"><div class="es-ic warn"><svg class="ic ic-xs"><use href="#i-clock"/></svg></div><div class="es-m"><b>pending</b><span>等待上链确认</span></div><div class="es-t">—</div></div>
+    </div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center;padding:9px 22px">
+    <span class="mono" style="font-size:9.5px;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase">原始日志 20 条 · websocket 已连接 · 状态每 250ms 增量同步</span>
+    <div class="row" style="margin-left:auto;flex:none"><button class="btn btn-s btn-sm">返回大厅</button><button class="btn btn-p btn-sm">展开证明面板</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>改了什么:</b>现桌左 60% 是普通卡片网格、右 40% 是抽屉,两块视觉上毫无关系,「公平性」像贴上去的广告。改成<b>同一张账页的左右两栏</b>:左栏是牌局事实,右栏是支撑这些事实的密码学证据,中间一根细线 —— 读法变成「结论 ← 依据」。牌背统一为密封信封并直接标出 <span class="mono">c1/c2</span> 密文与持有层,这是现桌只在抽屉里才看得到的东西。14 个 phase 收敛成一条 7 节点轨(洗牌/上链/发牌/翻牌/转牌/河牌/摊牌),不再用 <span class="mono">phase.replace(/([A-Z])/g,' $1')</span> 把 <span class="mono">preFlopReveal</span> 直接甩给用户。</div>
+</div>
+
+<!-- ═══════════════ G2 证明面板 ═══════════════ -->
+<div class="shot">
+  <div class="shot-l"><span class="no">G2</span><b>证明面板 · 洗牌证明结构</b><span class="grp">/game/:gameId</span></div>
+  <div class="clip" id="g2">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">ZK Proof Panel · Shuffle Proof Structure</div>
+      <div class="tb-hd-t">第 1042 手 · 洗牌证明 <span class="hand">3 层 Schnorr · 抗置换映射攻击 · 防重放 nonce</span></div>
+    </div>
+    <div class="tb-hd-r">
+      <span class="seal seal-ok"><svg class="ic ic-xs"><use href="#i-chk"/></svg>链上已验证</span>
+      <a class="net"><svg class="ic ic-xs"><use href="#i-ext"/></svg>0x4f2a…1c07</a>
+      <button class="ib"><svg class="ic ic-s"><use href="#i-x"/></svg></button>
+    </div>
+  </header>
+
+  <div class="doc-bd" style="grid-template-columns:1fr 1.1fr 1fr">
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">① 承诺层 · COMMITMENT</div>
+      <div class="bn bn-info" style="margin-bottom:11px"><svg class="ic ic-s" style="color:var(--play);margin-top:2px"><use href="#i-lock"/></svg><span>牌序在开局前就被承诺锁死,之后任何人都无法换牌 —— 这一步<b>先于</b>任何一家看到自己的底牌。</span></div>
+      <div class="lr"><span class="lr-k">sum_c1_commit</span><span class="lr-v">0x1a4f…9c2e</span></div>
+      <div class="lr"><span class="lr-k">sum_c2_commit</span><span class="lr-v">0x7d02…b417</span></div>
+      <div class="lr"><span class="lr-k">aggregate_pk</span><span class="lr-v">0xb60e…22da</span></div>
+      <div class="lr"><span class="lr-k">deck_size</span><span class="lr-v">52</span></div>
+      <div class="sec-t" style="margin:15px 0 9px">② 证明层 · PROOF</div>
+      <div class="lr"><span class="lr-k">combined_schnorr_proof</span><span class="lr-v">0x3c71…a05f</span></div>
+      <div class="lr"><span class="lr-k">sum_c1_schnorr_proof</span><span class="lr-v">0x88d2…4e19</span></div>
+      <div class="lr"><span class="lr-k">sum_c2_schnorr_proof</span><span class="lr-v">0x5a06…cb73</span></div>
+      <div class="lr"><span class="lr-k">global_challenge</span><span class="lr-v">0xc3e8…5a60</span></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">③ 防重放 · NONCE</div>
+      <div class="two" style="margin-bottom:12px">
+        <div class="cfm" style="background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);padding:11px;text-align:center;position:relative;overflow:hidden">
+          <div class="l" style="font-family:var(--mono);font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3);position:relative">本手 nonce</div>
+          <div class="v mono" style="font-size:15px;font-weight:600;margin:4px 0;position:relative">0x00f4…1d7b</div>
+          <div class="s" style="font-size:9.5px;color:var(--ink-2);font-family:var(--mono);position:relative">换一手即失效</div>
+        </div>
+        <div class="cfm" style="background:var(--cd);border:1px solid var(--rl-2);border-radius:var(--r);padding:11px;text-align:center">
+          <div class="l" style="font-family:var(--mono);font-size:9px;letter-spacing:.15em;text-transform:uppercase;color:var(--ink-3)">重加密轮次</div>
+          <div class="v mono" style="font-size:15px;font-weight:600;margin:4px 0">6 / 6</div>
+          <div class="s" style="font-size:9.5px;color:var(--ink-2);font-family:var(--mono)">每家各加一层</div>
+        </div>
+      </div>
+
+      <div class="sec-t" style="margin-bottom:4px">参与家 · PARTICIPANTS</div>
+      <div class="cd" style="padding:2px 12px 6px">
+        <div class="ar"><div class="tk tk-felt">1</div><div class="ar-m"><div class="ar-n">0x7c1a…4a9f <span class="ch ch-felt ch-xs">你</span></div><div class="ar-s">shuffle · 层 1</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+        <div class="ar"><div class="tk">2</div><div class="ar-m"><div class="ar-n">0x4f2a…1c07</div><div class="ar-s">remask · 层 2</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+        <div class="ar"><div class="tk">3</div><div class="ar-m"><div class="ar-n">0x9b3d…77e2</div><div class="ar-s">remask · 层 3</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+        <div class="ar"><div class="tk">4</div><div class="ar-m"><div class="ar-n">0x2e80…c5a1</div><div class="ar-s">remask · 层 4</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+        <div class="ar"><div class="tk">5</div><div class="ar-m"><div class="ar-n">0xd147…30bf</div><div class="ar-s">remask · 层 5</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+        <div class="ar"><div class="tk">6</div><div class="ar-m"><div class="ar-n">0x6a95…e218</div><div class="ar-s">remask · 层 6</div></div><div class="ar-r"><div class="ar-amt pos">✓</div></div></div>
+      </div>
+      <div class="bn bn-ok" style="margin-top:11px"><svg class="ic ic-s" style="color:var(--felt);margin-top:2px"><use href="#i-chk"/></svg><span><b>缺任何一层,本手不开局。</b>这是「没有人能控制牌序」的构造性证明,不是承诺。</span></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">④ 链上验证 · ONCHAIN</div>
+      <div class="cd" style="padding:11px 12px;margin-bottom:11px">
+        <div class="lr"><span class="lr-k">状态</span><span class="lr-v ok">已验证 VERIFIED</span></div>
+        <div class="lr"><span class="lr-k">验证者</span><span class="lr-v">starknet verifier</span></div>
+        <div class="lr"><span class="lr-k">合约</span><span class="lr-v">0x049c…d2f1</span></div>
+        <div class="lr"><span class="lr-k">区块</span><span class="lr-v">#842,119</span></div>
+        <div class="lr"><span class="lr-k">交易</span><span class="lr-v">0x4f2a…1c07</span></div>
+        <div class="lr"><span class="lr-k">Gas</span><span class="lr-v dim">0.0031 STRK</span></div>
+        <div class="lr"><span class="lr-k">时间</span><span class="lr-v">20:38:02 → 20:39:41</span></div>
+        <a class="net" style="width:100%;justify-content:center;margin-top:9px"><svg class="ic ic-xs"><use href="#i-ext"/></svg>在 starkscan 打开</a>
+      </div>
+
+      <div class="sec-t" style="margin-bottom:9px">徽章三态 · STATES</div>
+      <div style="display:flex;flex-direction:column;gap:7px">
+        <div class="net" style="justify-content:flex-start"><svg class="ic ic-xs" style="color:var(--ink-3)"><use href="#i-clock"/></svg>等待上链 PENDING ONCHAIN · 0x—</div>
+        <div class="net" style="justify-content:flex-start;border-color:var(--felt-rl);background:var(--felt-w);color:var(--felt)"><svg class="ic ic-xs"><use href="#i-shield"/></svg>已验证 VERIFIED · 0x4f2a…1c07</div>
+        <div class="net" style="justify-content:flex-start;border-color:var(--bad-rl);background:var(--bad-w);color:var(--bad)"><svg class="ic ic-xs"><use href="#i-alert"/></svg>验证失败 FAILED · 0x9b3d…77e2</div>
+      </div>
+
+      <div class="sec-t" style="margin:15px 0 8px">原始数据 · RAW</div>
+      <div class="raw">{"event_type":"shuffle","player_pk":"0x7c1a…4a9f","card_index":null,"tx_digest":"0x4f2a…1c07","verified":true,"timestamp":1789128_042}</div>
+      <div class="bn" style="margin-top:11px"><svg class="ic ic-s" style="color:var(--ink-3);margin-top:2px"><use href="#i-alert"/></svg><span><b>诚实标注:</b>现桌 <span class="mono">ShuffleProofVisualizer</span> 的 <span class="mono">proof</span> 被硬编码为 <span class="mono">null</span>,所以永远显示「暂无数据」。本屏需要后端把 <span class="mono">ShuffleProofJson</span> 真正接上才能落地 —— 字段名以服务端为准,不是本稿可以臆造的。</span></div>
+    </div>
+  </div>
+
+  <footer class="tb-ft" style="align-items:center;padding:9px 22px">
+    <span class="mono" style="font-size:9.5px;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase">证明面板在 ≥1024px 为固定右栏,窄屏转为抽屉 · Esc / 遮罩 / ✕ 均可关闭</span>
+    <div class="row" style="margin-left:auto;flex:none"><button class="btn btn-s btn-sm">复制证明</button><button class="btn btn-s btn-sm">收起</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>刻意保守:</b>承诺值 / 证明字段名沿用现桌 <span class="mono">ShuffleProofVisualizer</span> 已写出的 <span class="mono">sum_c1_commit · sum_c2_commit · combined_schnorr_proof · global_challenge · nonce</span>,没有编造新字段。区块号、合约地址、Gas 三项是现桌<b>缺失</b>的(徽章只有 tx hash + 外链),本稿补进「链上验证」卡内 —— 落地时以 RPC 实际返回为准。<b>验证失败</b>态一并画出:一个只展示成功态的可证系统,本身就不值得被信任。</div>
+</div>
+
+<div class="grp-h"><h2>C · 牌桌组件板</h2><span class="en">Table design system</span><span class="no">1 屏</span></div>
+<div class="shot">
+  <div class="shot-l"><span class="no">DS</span><b>令牌 · 座位状态 · 牌 · 彩池 · 操作 · 印章</b><span class="grp">设计系统</span></div>
+  <div class="clip" id="ds">
+<div class="tb">
+  <header class="tb-hd">
+    <div class="grow">
+      <div class="tb-hd-kind">Table Design System · 与钱包方向 B 同源令牌</div>
+      <div class="tb-hd-t">牌桌组件板 <span class="hand">1280×800 · 纸白底 · 实测对比度见 DS-1</span></div>
+    </div>
+    <div class="tb-hd-r"><span class="net">零 webfont</span><span class="net">零 text-shadow</span><span class="net">圆角仅 3 / 6px</span></div>
+  </header>
+  <div class="doc-bd" style="grid-template-columns:1fr 1fr 1fr">
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">DS-1 色彩令牌 · 对 --cd 底实测</div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#14130f;vertical-align:-1px;margin-right:6px"></i>ink</span><span class="lr-v">18.27 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#4b4840;vertical-align:-1px;margin-right:6px"></i>ink-2</span><span class="lr-v">8.98 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#666256;vertical-align:-1px;margin-right:6px"></i>ink-3</span><span class="lr-v">5.99 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#0b6b45;vertical-align:-1px;margin-right:6px"></i>felt 确认</span><span class="lr-v">6.45 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#15507f;vertical-align:-1px;margin-right:6px"></i>play 进行中</span><span class="lr-v">8.31 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#7d5308;vertical-align:-1px;margin-right:6px"></i>real 托管</span><span class="lr-v">6.63 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#a83226;vertical-align:-1px;margin-right:6px"></i>bad 弃牌/台费</span><span class="lr-v">6.56 : 1</span></div>
+      <div class="lr"><span class="lr-k"><i style="display:inline-block;width:11px;height:11px;background:#8a5a12;vertical-align:-1px;margin-right:6px"></i>amb 轮动</span><span class="lr-v">5.81 : 1</span></div>
+      <div class="bn bn-ok" style="margin-top:10px"><svg class="ic ic-s" style="color:var(--felt);margin-top:2px"><use href="#i-chk"/></svg><span>最低 <b class="num">5.81 : 1</b>,全部满足方向 B 声明的 ≥ 5.2 : 1。夜场底实测 <b class="num">8.19 – 16.08 : 1</b>。</span></div>
+      <div class="sec-t" style="margin:13px 0 9px">DS-5 操作层级 · 一屏只允许一个实底</div>
+      <div class="two" style="gap:7px">
+        <button class="btn btn-p" style="font-size:12px">加注 RAISE</button>
+        <button class="btn btn-s" style="font-size:12px">跟注 CALL</button>
+        <button class="btn btn-o" style="font-size:12px">弃牌 FOLD</button>
+        <button class="btn btn-s" style="font-size:12px" disabled>过牌 CHECK</button>
+      </div>
+      <div class="seg" style="grid-template-columns:repeat(4,1fr);margin-top:9px"><button>最小</button><button class="on">半池</button><button>底池</button><button>全下</button></div>
+      <div class="sec-t" style="margin:13px 0 6px">计时器 · 线性,不转圈</div>
+      <div class="seat-timer" style="margin-bottom:6px"><span class="num">T-12</span><div class="meter"><i style="width:80%"></i></div></div>
+      <div class="seat-timer" style="margin-bottom:6px"><span class="num">T-06</span><div class="meter"><i class="warn" style="width:40%"></i></div></div>
+      <div class="seat-timer"><span class="num">T-02</span><div class="meter"><i class="crit" style="width:13%"></i></div></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">DS-2 座位状态矩阵</div>
+      <div class="seat" style="position:static;width:auto;margin-bottom:9px"><div class="seat-cd"><span class="seat-tag">在座 IDLE</span><div class="av">KE</div><div class="seat-id"><b>Kenji</b><span class="stk">4,100</span></div><span class="ch">在线</span></div></div>
+      <div class="seat is-turn" style="position:static;width:auto;margin-bottom:9px"><div class="seat-cd"><span class="seat-tag">行动中 ACTING</span><div class="av">AI</div><div class="seat-id"><b>Aria</b><span class="stk">3,780</span></div><span class="ch ch-amb">行动中</span></div><div class="seat-timer"><span class="num">T-09</span><div class="meter"><i class="warn" style="width:40%"></i></div></div></div>
+      <div class="seat is-fold" style="position:static;width:auto;margin-bottom:9px"><div class="seat-cd"><span class="seat-tag">已弃牌 FOLDED</span><div class="av" style="background:var(--ink-3)">PO</div><div class="seat-id"><b>PO-7741</b><span class="stk">2,400</span></div><span class="ch ch-bad">已弃牌</span></div></div>
+      <div class="seat" style="position:static;width:auto;margin-bottom:9px"><div class="seat-cd"><span class="seat-tag">全下 ALL-IN</span><div class="av">小</div><div class="seat-id"><b>小鱼儿爱吃面</b><span class="stk">0</span></div><span class="ch ch-bad">全下</span></div><div class="bet"><span class="mono">全下</span><span class="lead"></span><span class="amt allin">955</span></div></div>
+      <div class="seat" style="position:static;width:auto;margin-bottom:9px"><div class="seat-cd" style="border-color:var(--felt);background:var(--felt-w)"><span class="seat-tag">赢家 WON</span><div class="av">你</div><div class="seat-id"><b>0x7c1a…4a9f</b><span class="stk" style="color:var(--felt)">6,889</span></div><span class="seal seal-ok">已结算</span></div></div>
+      <div class="seat seat--vacant" style="position:static;width:auto"><div class="seat-cd"><span class="seat-tag">空置 VACANT</span><div class="vac-l">空置 Vacant</div><div class="vac-b"><button class="btn btn-s btn-sm">入座</button></div></div></div>
+    </div>
+
+    <div class="doc-col">
+      <div class="sec-t" style="margin-bottom:9px">DS-3 牌面 · 纸卡 + 等宽角标</div>
+      <div class="row" style="gap:8px;align-items:flex-start">
+        <div class="pc k"><span class="ix">A<i>♠</i></span><span class="pip">♠</span></div>
+        <div class="pc r"><span class="ix">K<i>♥</i></span><span class="pip">♥</span></div>
+        <div class="pc r"><span class="ix">7<i>♦</i></span><span class="pip">♦</span></div>
+        <div class="pc k"><span class="ix">2<i>♣</i></span><span class="pip">♣</span></div>
+        <div class="pc pc--back"><span class="no">#47</span><div class="bk"><svg class="ic ic-s"><use href="#i-lock"/></svg><span>SEALED</span></div></div>
+      </div>
+      <div class="row" style="gap:8px;align-items:flex-start;margin-top:9px">
+        <div class="pc pc--sm k"><span class="ix">A<i>♠</i></span><span class="pip">♠</span></div>
+        <div class="pc pc--sm r" style="margin-left:-11px"><span class="ix">A<i>♦</i></span><span class="pip">♦</span></div>
+        <span class="mono" style="font-size:10px;color:var(--ink-3);align-self:center">座位底牌 36×52 · 公共牌 52×74</span>
+      </div>
+      <div class="sec-t" style="margin:13px 0 9px">DS-6 印章与标签</div>
+      <div class="row" style="gap:9px;flex-wrap:wrap">
+        <span class="seal seal-ok"><svg class="ic ic-xs"><use href="#i-chk"/></svg>已结算</span>
+        <span class="seal seal-bad">验证失败</span>
+        <span class="seal seal-real">已入金库</span>
+        <span class="seal seal-ink">庄 BTN</span>
+      </div>
+      <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:11px">
+        <span class="ch">在线</span><span class="ch ch-felt">已行动</span><span class="ch ch-amb">行动中</span>
+        <span class="ch ch-bad">已弃牌</span><span class="ch ch-play">PLAY</span><span class="ch ch-real">REAL</span>
+        <span class="ch ch-solid">SEAT 5</span><span class="ch ch-xs">MICRO</span>
+      </div>
+      <div class="sec-t" style="margin:13px 0 9px">DS-4 彩池写法 · 合计块 + 结转</div>
+      <div class="two" style="align-items:start">
+        <div class="pot" style="position:static;transform:none;width:auto;display:block">
+          <div class="pot-l">彩池 POT</div>
+          <div class="pot-a" style="font-size:20px">1,275 <span class="u">CH</span></div>
+          <div class="pot-brk" style="grid-template-columns:1fr"><div class="lr"><span class="lr-k">主池</span><span class="lr-v">940</span></div><div class="lr"><span class="lr-k">边池 1</span><span class="lr-v">335</span></div></div>
+        </div>
+        <div class="pot pot--cleared" style="position:static;transform:none;width:auto;display:block">
+          <div class="pot-l">已结转 CLEARED</div>
+          <div class="pot-a" style="font-size:20px">3,040 <span class="u">CH</span></div>
+          <div class="pot-settle"><svg class="ic ic-s"><use href="#i-chk"/></svg>派彩 <span class="num">2,994</span></div>
+        </div>
+      </div>
+
+      <div class="sec-t" style="margin:13px 0 9px">DS-7 状态轨 · 街段与证明同语言</div>
+      <div class="rail" style="margin-bottom:11px">
+        <div class="rn done"><i></i><span>翻前</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>翻牌</span></div><div class="rline done"></div>
+        <div class="rn cur"><i></i><span>转牌</span></div><div class="rline"></div>
+        <div class="rn"><i></i><span>河牌</span></div><div class="rline"></div>
+        <div class="rn"><i></i><span>摊牌</span></div>
+      </div>
+      <div class="rail">
+        <div class="rn done"><i></i><span>洗牌</span></div><div class="rline done"></div>
+        <div class="rn done"><i></i><span>上链</span></div><div class="rline done"></div>
+        <div class="rn bad"><i></i><span>开牌</span></div><div class="rline"></div>
+        <div class="rn"><i></i><span>结算</span></div><div class="rline"></div>
+        <div class="rn"><i></i><span>确认</span></div>
+      </div>
+    </div>
+  </div>
+  <footer class="tb-ft" style="align-items:center;padding:9px 22px">
+    <span class="mono" style="font-size:9.5px;letter-spacing:.08em;color:var(--ink-3);text-transform:uppercase">全部令牌逐字同源 design/figma/tokens.json 与 zchain-wallet-ui-b-ledger.html · 牌桌未新增任何色值</span>
+    <div class="row" style="margin-left:auto;flex:none"><button class="btn btn-s btn-sm">导出令牌</button></div>
+  </footer>
+</div>
+  </div>
+  <div class="note"><b>DS-7 的用意:</b>街段轨与证明轨共用同一套原语(方块节点、<span class="mono">1.5px</span> 描边、<span class="mono">9px</span> 见方),玩家才会把它们读成同一件事 —— 一局牌 = 一笔待核的账。<br><b>落地顺序建议:</b>牌桌不需要重写。把 <span class="mono">theme.ts</span> 换成 <span class="mono">tokens.json</span> 的 paper/night 两套(现桌 radius 2rem → 3px、primaryCta 紫 → felt 绿、surfaceGlass → cd 纸白),再把 <span class="mono">OccupiedSeat</span> 的旋转计时环换成线性 <span class="mono">.meter</span>、<span class="mono">NameTag</span> 胶囊换成 <span class="mono">.seat-cd</span> 条目卡、<span class="mono">GameStateInfo</span> 的胶囊组换成 <span class="mono">.pot</span> 合计块 —— 四步就能拿到本稿约八成的观感提升,且不动 socket 与状态层。</div>
+</div>
+
+</div>
+
+<script>
+/* 底色切换(纸白 / 夜场) */
+document.getElementById('ground').addEventListener('click', function (e) {
+  var b = e.target.closest('button'); if (!b) return;
+  document.documentElement.setAttribute('data-ground', b.dataset.g);
+  this.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
+});
+
+/* 截图模式:file://…zchain-table-ui.html?g=night#t3
+   —— 把目标屏克隆进固定 1280×800 画板,供 headless 精确出图 */
+(function () {
+  var q = new URLSearchParams(location.search);
+  if (q.get('g')) document.documentElement.setAttribute('data-ground', q.get('g'));
+  var id = decodeURIComponent(location.hash.replace(/^#/, ''));
+  if (!id) return;
+  var el = document.getElementById(id); if (!el) return;
+  document.body.classList.add('mode-shot');
+  var mount = document.getElementById('shot-mount');
+  var clone = el.cloneNode(true);
+  clone.style.display = '';
+  mount.appendChild(clone);
+  el.style.display = 'none';
+})();
+</script>
+</body>
+</html>

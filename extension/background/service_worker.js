@@ -82,6 +82,7 @@ import {
   inclusionView,
   markIncluded,
   openReceipt,
+  pendingSpendMap,
 } from '../common/receipts.js';
 import {
   admitOperation,
@@ -600,9 +601,9 @@ async function getReceipts() {
   return receipts ?? {};
 }
 
-async function recordReceipt(digest, kind, chainId) {
+async function recordReceipt(digest, kind, chainId, inputs = []) {
   const store = await getReceipts();
-  const r = openReceipt(store, { digest, kind, chainId, signedAtMs: Date.now() }, Date.now());
+  const r = openReceipt(store, { digest, kind, chainId, signedAtMs: Date.now(), inputs }, Date.now());
   if (!r.ok) return; // 重复 digest：幂等跳过（回执登记不影响签名结果）。
   await storage.local.set({ receipts: r.store });
 }
@@ -2006,7 +2007,12 @@ async function handlePopupMessage(m, { page = false } = {}) {
         await storage.session.set({ publicKey: res.public_key });
         results.zchain = true;
         unlockedCount += 1;
-      } catch { results.zchain = false; }
+      } catch (e) {
+        results.zchain = false;
+        // 只记错误码不记细节（keystore 内容不入日志）：一层解锁失败而其他层
+        // 成功 = 口令正确、该层 keystore 状态异常——留排查锚点。
+        logSafe('quick_unlock_layer_failed', { layer: 'zchain', code: e?.code ?? 'Unknown' });
+      }
     }
     // evm
     const evmV = await getEvmVault();
@@ -2150,10 +2156,22 @@ async function handlePopupMessage(m, { page = false } = {}) {
       if (!isUnlocked()) return { error: { code: 'SessionInvalid', reason: 'locked' } };
       // REAL/PLAY 物理分库视图（0.2）：余额分栏 + 分列 note 列表（脱敏）。
       const all = await callCore('wallet_get_all_notes');
+      // 在途支出软锁（防双花）：已签 transfer 回执的输入 note 在 inclusion 前
+      // 不可再花。展示与可选余额一并扣减（与 transferPreview 的选币口径同源）。
+      const pending = pendingSpendMap(await getReceipts());
+      const notes = sanitizeNotesForPage(all.play).map((n) => ({
+        ...n,
+        spendable: n.spendable !== false && !pending.has(n.commitment),
+      }));
+      const pendingSum = [...pending.values()].reduce((a, b) => a + (Number(b) || 0), 0);
+      const balances = { ...all.balances };
+      if (pendingSum > 0 && balances.play_free != null) {
+        balances.play_free = String(Math.max(0, Number(balances.play_free) - pendingSum));
+      }
       return {
-        notes: sanitizeNotesForPage(all.play),
+        notes,
         realNotes: sanitizeNotesForPage(all.real),
-        balances: all.balances,
+        balances,
       };
     }
     case 'popup:getDisplayViews': {
@@ -2410,11 +2428,15 @@ async function handlePopupMessage(m, { page = false } = {}) {
       const account = await getActiveAccount();
       const net = currentNetwork(account);
       const all = await callCore('wallet_get_all_notes');
+      // 在途支出软锁（防双花）：signed/seen 收据的输入 note 不参与选币——
+      // 与 getNotes 展示口径、签名闸三处同源（common/receipts.pendingSpendMap）。
+      const pending = pendingSpendMap(await getReceipts());
+      const spendablePlay = sanitizeNotesForPage(all.play).filter((n) => !pending.has(n.commitment));
       const res = buildTransferPreview({
         amount: m.amount,
         owner: m.owner,
         selfOwner: await publicKeyHex(),
-        playNotes: sanitizeNotesForPage(all.play),
+        playNotes: spendablePlay,
         chainId: net.chainId,
         nowSec: Math.floor(Date.now() / 1000),
         nonce: nextTransferNonce(),
@@ -2452,8 +2474,20 @@ async function handlePopupMessage(m, { page = false } = {}) {
       if (!v.ok) return { error: { code: v.code, reason: v.reason } };
       // (1b) 凭证门槛在**后台**复核：UI 那份 canSubmit 只是展示结论，签名前
       // 按当前库状态重算（绕过 UI 直发 RPC / 预览后状态变化都拒）。
+      const allNotes = sanitizeNotesForPage((await callCore('wallet_get_all_notes')).play);
+      // 在途支出软锁：signed/seen 收据已占用的输入 note 拒绝再签（防双花）。
+      const pending = pendingSpendMap(await getReceipts());
+      const inFlight = (op?.inputs ?? []).filter((c) => pending.has(String(c)));
+      if (inFlight.length > 0) {
+        return {
+          error: {
+            code: 'NoteNotSpendable',
+            reason: `输入 note ${String(inFlight[0]).slice(0, 12)}… 已被在途转账占用（回执未上链，防止双花）`,
+          },
+        };
+      }
       const gate = verifySpendProofs({
-        playNotes: sanitizeNotesForPage((await callCore('wallet_get_all_notes')).play),
+        playNotes: allNotes,
         inputs: op?.inputs ?? [],
         minProof: minProofForNetwork(net.kind),
       });
@@ -2473,7 +2507,15 @@ async function handlePopupMessage(m, { page = false } = {}) {
         logSafe('persist_failed', { code: e.code ?? 'Unknown' });
       }
       // (4) 回执登记（signed 状态位；链上提交通道未开放——仅展示协议状态）。
-      await recordReceipt(signed.digest, 'transfer', net.chainId);
+      // 携带输入 note 明细：pendingSpendMap 据此软锁在途支出（防双花）。
+      const amountByCommitment = new Map(
+        allNotes.map((n) => [n.commitment, Number(n.amount)]),
+      );
+      await recordReceipt(signed.digest, 'transfer', net.chainId,
+        (op?.inputs ?? []).map((c) => ({
+          commitment: String(c),
+          amount: amountByCommitment.get(String(c)),
+        })));
       mem.transferNonce = Math.max(mem.transferNonce ?? 0, Number(op.nonce) ?? 0);
       logSafe('transfer_signed');
       return { digest: signed.digest, preview: signed.preview };

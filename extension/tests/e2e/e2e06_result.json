@@ -1,8 +1,8 @@
 {
-  "date": "2026-09-19T07:40:01.581Z",
+  "date": "2026-09-19T08:22:18.905Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "devchainUrl": "http://127.0.0.1:64033",
+  "devchainUrl": "http://127.0.0.1:52805",
   "total": 38,
   "pass": 38,
   "fail": 0,
@@ -20,7 +20,7 @@
     {
       "step": "S2 Starknet 面板 → 地址（ADDR_BOUND 内 + 校验和）+ 公钥展示",
       "ok": true,
-      "detail": "0x037E375f6e6e965F4780A9D406f60b85c7C58796130BeC83339CA6B67d7668b9 / 0x1c5511b5f3dd…"
+      "detail": "0x0527e8f994a7202813A5f716A4899AFdB25A31658B2312Dd416CA103Bf64915f / 0x7fd53fc7c088…"
     },
     {
       "step": "S2b SW 状态：hasWallet + unlocked + 网络 = starknet-devnet",
@@ -35,7 +35,7 @@
     {
       "step": "S3b 保存 RPC 覆盖 → 生效 URL = starkdevchain",
       "ok": true,
-      "detail": "http://127.0.0.1:64033"
+      "detail": "http://127.0.0.1:52805"
     },
     {
       "step": "F1 余额查询：注册 pubkey + 水龙头 100 DST → 余额展示",
@@ -45,7 +45,7 @@
     {
       "step": "F2 链状态卡：chainId=ZCDN + nonce 展示",
       "ok": true,
-      "detail": "chainIdZCDN · 校验通过nonce0账户地址0x037E375f…7d7668b9公钥0x1c5511b5f3ddc9b907644db2dd1ab1943c3fa59d1319bad555a7c8c27fb84bc"
+      "detail": "chainIdZCDN · 校验通过nonce0账户地址0x0527e8f9…Bf64915f公钥0x7fd53fc7c088e7c842fc3cc5e61650f8f635823fd41edaf40cd10e90e394b97"
     },
     {
       "step": "F3 SW 余额面：balanceWei=100e18 + nonce=0 + chainId 无误",
@@ -75,17 +75,17 @@
     {
       "step": "C3 invoke v1 预览卡：selector + calldata + max fee + chainId",
       "ok": true,
-      "detail": "invoke v1-0STARK curve ECDSA 签名后广播交易预览from0x037E375f…7d7668b9to0xc0de0000…0b19e6b9方法transfer(recipient, amount_u256)calldata0xbeef0000000000000000000000000000000000000000000000000000000000, 0x15af1d78"
+      "detail": "invoke v1-0STARK curve ECDSA 签名后广播交易预览from0x0527e8f9…Bf64915fto0xc0de0000…0b19e6b9方法transfer(recipient, amount_u256)calldata0xbeef0000000000000000000000000000000000000000000000000000000000, 0x15af1d78"
     },
     {
       "step": "C4 确认 → STARK curve 签名广播（[r, s] invoke v1）",
       "ok": true,
-      "detail": "0x175384d275ebe4b56fdd6c96b3787bce4699b1c0a7424399724d560fcd5badd"
+      "detail": "0x71d4c226c4e2ab3bafc13a1effa6f2b28917a3112cb93b35076bec32f13a334"
     },
     {
       "step": "C5 开发链核对：独立验签通过 + SUCCEEDED + sender = 钱包地址",
       "ok": true,
-      "detail": "{\"from\":\"0x37e375f6e6e965f4780a9d406f60b85c7c58796130bec83339ca6b67d7668b9\",\"st\":\"SUCCEEDED\"}"
+      "detail": "{\"from\":\"0x527e8f994a7202813a5f716a4899afdb25a31658b2312dd416ca103bf64915f\",\"st\":\"SUCCEEDED\"}"
     },
     {
       "step": "C6 链上效果核对：balance_of(OTHER) → 25e18（u256）",
@@ -130,7 +130,7 @@
     {
       "step": "M2 导出私钥：口令确认 → felt 私钥展示",
       "ok": true,
-      "detail": "0x5c808faa8c…"
+      "detail": "0x1da222a5fd…"
     },
     {
       "step": "M3 锁定 → 错口令解锁拒绝（fail-closed）",
@@ -150,7 +150,7 @@
     {
       "step": "M6a 导出私钥（锁定/解锁循环后仍可用）",
       "ok": true,
-      "detail": "{\"key\":\"0x5c808faa8c…\"}"
+      "detail": "{\"key\":\"0x1da222a5fd…\"}"
     },
     {
       "step": "M6b 删除当前账户（二次确认）→ 回到创建/导入入口",
@@ -160,12 +160,12 @@
     {
       "step": "M6 私钥再导入 → 同一地址（新随机盐 → 新地址但同私钥；校验和一致）",
       "ok": true,
-      "detail": "0x036Bd87018cfc8188BE09B176Bd59003487384b4b981C558C21E84a9e9d424d6"
+      "detail": "0x030E58A1F543c22308c31599131B3e06840AEc90B904ed4c48a2C7DeE7da2291"
     },
     {
       "step": "M6c 「创建本层」→ STARK curve 新账户（ADDR_BOUND + 校验和）",
       "ok": true,
-      "detail": "0x00dB1fcd96f74513fA480E67C4B67063923AA36fbB84cc8E499e44dd4Fe41c3b"
+      "detail": "0x05ec96abae8D2E31a9D774D262ff08775ccA20B64FB8c8c4EA8477D5F6E5f1Fd"
     },
     {
       "step": "M7 非法私钥导入拒绝（InvalidArgument）",

@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ZChain 站点 · 账簿 Ledger 体系板 v0.1</title>
+<link rel="stylesheet" href="ledger.css">
+<style>
+/* ↓↓↓ 仅体系板自身的外壳样式(评审用),不属于站点。站点样式全在 ledger.css ↓↓↓ */
+.board { max-width: 1188px; margin: 0 auto; padding: 0 24px 90px; }
+.ground-bar { position: sticky; top: 0; z-index: 900; display: flex; align-items: center; gap: 12px; padding: 9px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
+.ground-bar .ttl { font-weight: 700; font-size: 13.5px; }
+.ground-bar .ttl small { color: var(--muted-2); font-family: var(--mono); font-size: 11px; font-weight: 400; margin-left: 7px; }
+.seg-btn { display: flex; border: 1px solid var(--text); border-radius: var(--radius); overflow: hidden; margin-left: auto; }
+.seg-btn button { padding: 4px 13px; font-size: 12px; color: var(--muted); border-left: 1px solid var(--border); background: var(--surface); cursor: pointer; font-family: var(--mono); }
+.seg-btn button:first-child { border-left: 0; }
+.seg-btn button.on { background: var(--text); color: var(--nav-active-text); font-weight: 600; }
+.sec { margin-top: 42px; }
+.sec-h { display: flex; align-items: baseline; gap: 11px; padding-bottom: 6px; border-bottom: 2px solid var(--text); }
+.sec-h h2 { font-size: 16px; margin: 0; }
+.sec-h .en { color: var(--muted-2); font-size: 10px; letter-spacing: .16em; text-transform: uppercase; font-family: var(--mono); }
+.sec-h .no { margin-left: auto; font-family: var(--mono); font-size: 10.5px; color: var(--muted-2); }
+.sec-d { color: var(--muted); font-size: 13px; margin: 9px 0 15px; max-width: 88ch; }
+.sec-d code { font-family: var(--mono); font-size: 12px; color: var(--text); background: var(--code-bg); padding: 1px 4px; border-radius: 2px; }
+.demo { border: 1px solid var(--border-soft); border-radius: var(--radius); background: var(--bg); padding: 18px; }
+.demo > .hero, .demo > .stat-band, .demo > .entry-grid { margin-top: 0; }
+.lbl { font-family: var(--mono); font-size: 10px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted-2); margin: 0 0 8px; }
+.row-wrap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.sw { display: grid; grid-template-columns: repeat(auto-fill, minmax(158px, 1fr)); gap: 8px; }
+.sw-c { border: 1px solid var(--border-soft); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+.sw-c .box { height: 34px; border-bottom: 1px solid var(--border-soft); }
+.sw-c .t { padding: 6px 8px; }
+.sw-c .t b { display: block; font-size: 11.5px; font-weight: 600; }
+.sw-c .t span { font-family: var(--mono); font-size: 10px; color: var(--muted-2); }
+.cnt { font-family: var(--mono); font-size: 10px; color: var(--felt); }
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 820px) { .two-col { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+
+<div class="ground-bar">
+  <div class="ttl">ZChain 站点 · 账簿体系板 <small>v0.1 · 85 类名逐条演练 · 样式源 ledger.css</small></div>
+  <div class="seg-btn" id="ground">
+    <button data-g="paper" class="on">纸白 paper</button>
+    <button data-g="night">夜场 night</button>
+  </div>
+</div>
+
+<div class="board">
+
+<div class="sec" style="margin-top:26px">
+  <div class="sec-h"><h2>这是什么</h2><span class="en">Scope</span><span class="no">S0</span></div>
+  <p class="sec-d">本板是 <code>website/assets/css/main.css</code> 的替换件 <code>ledger.css</code> 的验收台：<strong>类名与现站点 1:1</strong>，所以 <code>build.py</code>、<code>templates/base.html</code> 与 13 个 <code>content/*.md</code> 一行都不用改。每节都用站点真实原文与真实类名渲染，不用占位文案。夜场底 14 个 token 逐字沿用 <code>media-kit/v0.1/brand.css</code>，即站点今天的颜色 —— 切到夜场就约等于今天的站，切回纸白是新默认。</p>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>令牌与实测对比度</h2><span class="en">Tokens</span><span class="no">S1</span></div>
+  <p class="sec-d">纸白底全部语义色对 <code>--surface #fffdf7</code> 实测 ≥ 5.81:1，满足方向 B 声明的 ≥ 5.2:1。圆角只有 2 / 3 / 6px 三档；阴影只有 <code>0 1px 0</code>；<code>--glow-felt</code> 变量保留但值为 <code>none</code>，防止未清理的引用重新发光。</p>
+  <div class="demo">
+    <div class="sw">
+      <div class="sw-c"><div class="box" style="background:#14130f"></div><div class="t"><b>--text</b><span>#14130f · <span class="cnt">18.27:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#4b4840"></div><div class="t"><b>--muted</b><span>#4b4840 · <span class="cnt">8.98:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#666256"></div><div class="t"><b>--muted-2</b><span>#666256 · <span class="cnt">5.99:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#0b6b45"></div><div class="t"><b>--felt 确认</b><span>#0b6b45 · <span class="cnt">6.45:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#15507f"></div><div class="t"><b>--play 进行中</b><span>#15507f · <span class="cnt">8.31:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#7d5308"></div><div class="t"><b>--real 托管</b><span>#7d5308 · <span class="cnt">6.63:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#a83226"></div><div class="t"><b>--danger</b><span>#a83226 · <span class="cnt">6.56:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#8a5a12"></div><div class="t"><b>--amb 警示</b><span>#8a5a12 · <span class="cnt">5.81:1</span></span></div></div>
+      <div class="sw-c"><div class="box" style="background:#f5f2ea"></div><div class="t"><b>--bg</b><span>#f5f2ea 页面底</span></div></div>
+      <div class="sw-c"><div class="box" style="background:#fffdf7"></div><div class="t"><b>--surface</b><span>#fffdf7 纸卡底</span></div></div>
+      <div class="sw-c"><div class="box" style="background:#f8f5ec"></div><div class="t"><b>--surface-2</b><span>#f8f5ec 台面/表头</span></div></div>
+      <div class="sw-c"><div class="box" style="background:#efeade"></div><div class="t"><b>--code-bg</b><span>#efeade 代码底</span></div></div>
+    </div>
+    <p class="lbl" style="margin:14px 0 6px">形状与光效对照（旧 → 账簿）</p>
+    <table style="margin:0">
+      <thead><tr><th>令牌</th><th>现站点</th><th>账簿体系</th></tr></thead>
+      <tbody>
+        <tr><td><code>--radius</code></td><td>12px</td><td>3px</td></tr>
+        <tr><td><code>--radius-lg</code></td><td>18px</td><td>6px</td></tr>
+        <tr><td><code>--radius-pill</code></td><td><span class="st st-bad">未定义</span> 引用即塌 0</td><td>2px（方角，补定义）</td></tr>
+        <tr><td><code>--shadow-pop</code></td><td>0 18px 48px rgba(0,0,0,.5)</td><td>0 1px 0 rgba(20,19,15,.04)</td></tr>
+        <tr><td><code>--glow-felt</code></td><td>0 0 24px rgba(55,227,156,.25)</td><td>none</td></tr>
+        <tr><td>标题字</td><td>渐变字 + background-clip:text</td><td>纯色 + 字重</td></tr>
+        <tr><td>卡片 hover</td><td>translateY(-3px) 浮起</td><td>仅描边转深</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>页头 · 导航 · 面包屑</h2><span class="en">Chrome</span><span class="no">S2</span></div>
+  <p class="sec-d">导航从「圆角胶囊 + 高亮块」改成<strong>等宽小字 + 竖细线分隔</strong>，当前页用 2px 底部翡翠线（账簿的"已勾"记号）。页头下方一根 2px 实线 —— 这是账页的题头线，全站唯一一处粗线。</p>
+  <div class="demo" style="padding:0;overflow:hidden">
+    <header class="site-header" style="position:static">
+      <div class="wrap header-row">
+        <p class="brand"><a href="#" class="brand-link"><svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square"><path d="M12 2 3 6.5v11L12 22l9-4.5v-11L12 2Z"/><path d="m7.5 14.5 9-5"/></svg><span>ZChain&nbsp;Poker</span></a></p>
+        <nav class="site-nav" aria-label="站点导航"><ul class="nav-list">
+          <li><a href="#">首页</a></li><li><a href="#" class="active">产品</a></li><li><a href="#">技术</a></li><li><a href="#">证明</a></li><li><a href="#">浏览器</a></li><li><a href="#">状态</a></li><li><a href="#">文档</a></li><li><a href="#">路线图</a></li>
+        </ul></nav>
+      </div>
+    </header>
+    <div class="env-strip">环境:devnet · zchain-poker-devnet · 非生产网络 · 无真实资金</div>
+    <div class="wrap page" style="padding-top:22px">
+      <p class="breadcrumb"><a href="#">文档</a><span>/</span><a href="#">协议</a><span>/</span><span aria-current="page">结算与终局性</span></p>
+      <p class="docs-kicker">Protocol · Settlement</p>
+      <h1 class="page-title">结算与终局性</h1>
+      <p class="page-lead">牌桌操作先被软确认，再进入 BFT 排序，最后由证明约束资金释放。三个层级在浏览器与凭证里始终分开标注，不合并成"成功"。</p>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>首页 Hero · 密封牌 · 统计带</h2><span class="en">Home</span><span class="no">S3</span></div>
+  <p class="sec-d">改动最大的一屏。旧 hero 是「径向渐变光晕 + 渐变字 + blur 过的虚线毡布椭圆 + 三张摊开的明牌」；账簿版是<strong>一张铺开的账页 + 三张密封牌</strong>。牌在未开牌前本来就是密文，用牌背比用明牌 K♠ 更诚实，也更贴产品卖点。统计带从四块发光卡改成<strong>一格一格账格</strong>（1px 分隔线，数字等宽）。</p>
+  <div class="demo">
+    <div class="hero">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <p class="tagline-en">Every hand. A verifiable settlement.</p>
+          <h1>让每一手牌，都有可验证的结算记录。</h1>
+          <p>ZChain Poker 是面向扑克场景的专用 Appchain：快速确认牌局操作，用可验证证明约束结算与 rake，并把最终资金释放交给明确的 Vault 与退出协议。</p>
+          <div class="cta-row">
+            <a class="btn btn-play" href="#">立即试玩 PLAY</a>
+            <a class="btn btn-ghost" href="#">阅读技术文档</a>
+            <a class="btn btn-ghost" href="#">验证一手牌</a>
+            <a class="btn btn-real" href="#">Network Status</a>
+          </div>
+        </div>
+        <div class="hero-visual" aria-hidden="true">
+          <div class="felt-oval"></div>
+          <div class="pcard pcard-1"><span class="pc-rank">Q</span><span class="pc-suit">♣</span><span class="pc-foot">Q♣</span></div>
+          <div class="pcard pcard-2 pcard-red"><span class="pc-rank">K</span><span class="pc-suit">♥</span><span class="pc-foot">K♥</span></div>
+          <div class="pcard pcard-3"><span class="pc-rank">A</span><span class="pc-suit">♠</span><span class="pc-foot">A♠</span></div>
+          <div class="hero-chips">
+            <span class="chip chip-net">devnet</span>
+            <span class="st st-ok">soft accepted</span>
+            <span class="st st-ok">proven</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="stat-band">
+      <div class="stat"><span class="stat-num">2.1 ms</span><span class="stat-label">软确认 p50（门槛 100ms）</span></div>
+      <div class="stat"><span class="stat-num">3,200</span><span class="stat-label">压测结算（64 桌 × 50 手）</span></div>
+      <div class="stat"><span class="stat-num">16,064</span><span class="stat-label">压测牌局操作</span></div>
+      <div class="stat"><span class="stat-num">2,350+</span><span class="stat-label">工作区测试通过</span></div>
+    </div>
+    <p class="lbl" style="margin:16px 0 6px">牌背变体 · 与牌桌稿同一语义（未开 = 链上已锁定）</p>
+    <div class="row-wrap">
+      <div class="pcard" style="position:static;transform:none;display:inline-flex;align-items:center;justify-content:center;background:repeating-linear-gradient(45deg,var(--felt-w) 0 3px,transparent 3px 6px),repeating-linear-gradient(-45deg,var(--felt-w) 0 3px,transparent 3px 6px),var(--surface);border-color:var(--felt-dim)"><span class="pc-rank" style="position:absolute;top:6px;right:7px;font-size:10px;color:var(--muted-2)">#47</span><span style="font-family:var(--mono);font-size:9.5px;letter-spacing:.1em;color:var(--felt);font-weight:700">SEALED</span></div>
+      <p class="sec-d" style="margin:0;flex:1;min-width:240px">牌桌稿里 52 张牌全部是这个密封形态，直到该张牌的开牌令牌上链。首页沿用同一记号，站点与产品才是<strong>一件事的两种说法</strong>。</p>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>卡片与栅格</h2><span class="en">Cards</span><span class="no">S4</span></div>
+  <p class="sec-d"><code>.card-play</code> / <code>.card-real</code> 的 3px 色条从<strong>顶边改到左边</strong> —— 账簿的强调是页边注，不是横幅。<code>.entry-grid</code> 用 1px 分隔线拼成一张表，而不是四张各自浮起的卡。</p>
+  <div class="demo">
+    <p class="lbl">entry-grid（首页三入口）</p>
+    <div class="entry-grid">
+      <div class="card card-play"><p class="card-kicker">01 / PLAY NOW</p><h2>立即试玩</h2><p>只进入 PLAY 测试/娱乐环境，不涉及真实资金，也不默认触发充值。devnet 环境由本地 devnet 配置启动。</p></div>
+      <div class="card card-play"><p class="card-kicker">02 / VERIFY A HAND</p><h2>验证一手牌</h2><p>输入 hand id 或 proof digest 跳转到独立验证入口；同时提供独立 verifier 命令，不依赖运营方私有服务。</p></div>
+      <div class="card"><p class="card-kicker">03 / READ THE DOCS</p><h2>阅读文档</h2><p>协议、ABI、证明格式、节点运维与威胁模型。所有性能数字标注测量条件与日期。</p></div>
+      <div class="card card-real"><p class="card-kicker">04 / REAL FUNDS</p><h2>真实资金</h2><p>v1 阶段不开放真实资金桌。资金释放由 Vault 与退出协议约束，见托管说明。</p></div>
+    </div>
+    <p class="lbl" style="margin-top:18px">grid-2 / grid-3（独立卡，带细线与 3px 阴影）</p>
+    <div class="grid-2">
+      <div class="card"><h3 class="card-h">软确认 soft accepted</h3><p>操作已被排序节点接收并回显，但尚未进入 BFT 证书。牌桌可继续，界面必须显式区分。</p></div>
+      <div class="card"><h3 class="card-h">已证明 proven</h3><p>该手牌的结算已被证明约束，任何后续分歧都可被独立复算。这是"可验证"三个字的确切含义。</p></div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>状态丸 · 提示条 · 托管</h2><span class="en">Status &amp; Notices</span><span class="no">S5</span></div>
+  <p class="sec-d"><code>.st</code> 是站点用得最多的构件（explorer / status / proofs / docs 全靠它），改成方角 + 等宽 + 大写字距，与钱包 <code>.ch</code>、牌桌 <code>.ch</code> 完全同一形态。<strong>金色 <code>--real</code> 只出现在托管语义上</strong>，不作通用强调。</p>
+  <div class="demo">
+    <p class="lbl">状态五态 + 标签</p>
+    <div class="row-wrap" style="margin-bottom:16px">
+      <span class="st st-ok">proven</span><span class="st st-info">soft accepted</span><span class="st st-warn">finalized / claimable</span><span class="st st-bad">failed</span><span class="st st-muted">BFT ordered</span><span class="chip chip-net">devnet</span><span class="chip chip-assets">REAL</span>
+    </div>
+    <p class="lbl">banner 三型</p>
+    <div class="banner banner-sample"><span class="banner-tag">示例</span><strong>本页数据为 devnet 回放样本。</strong><p>真实网络上线后由 <code>explorer_gateway</code> 提供实时源，字段结构不变。</p></div>
+    <div class="banner banner-custody"><span class="banner-tag">托管</span><strong>真实资金不进入本环境。</strong><p>PLAY 环境筹码无对价；充值与提现路径在 v1 阶段关闭。</p></div>
+    <div class="banner"><span class="banner-tag">注意</span><strong>未达门槛的能力会显式标注为未上线。</strong></div>
+    <p class="lbl" style="margin-top:16px">trust-note（金色专用位）</p>
+    <div class="trust-note"><strong>资金释放不依赖运营方在线。</strong><p>退出协议允许持有人在证明成立后自行领取，无需运营方签名配合。</p></div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>表格</h2><span class="en">Tables</span><span class="no">S6</span></div>
+  <p class="sec-d">explorer / status / proofs 三页的主体就是表格。改动四条：<strong>去掉斑马纹</strong>（账簿靠细线分行，不靠底色）、<strong>表头改等宽大写小字 + 2px 实线压底</strong>、<strong>去掉单元格间竖线</strong>、<strong>全表 <code>tabular-nums</code></strong> 让数字与哈希纵向对齐。</p>
+  <div class="demo">
+    <p class="lbl">explorer · 结算记录（真实字段）</p>
+    <table>
+      <thead><tr><th>hand id</th><th>桌</th><th>pot</th><th>rake</th><th>payout root</th><th>结算层级</th><th>proof</th></tr></thead>
+      <tbody>
+        <tr><td>1042</td><td>7</td><td>1,840</td><td>92</td><td><code>0x77ab…39d1</code></td><td><span class="st st-ok">proven</span></td><td><a href="#">下载 / 验证</a></td></tr>
+        <tr><td>1041</td><td>7</td><td>620</td><td>31</td><td><code>0x0cdd…a2f4</code></td><td><span class="st st-ok">proven</span></td><td><a href="#">下载 / 验证</a></td></tr>
+        <tr><td>1040</td><td>3</td><td>0</td><td>0</td><td><code>0x51bd…07aa</code></td><td><span class="st st-info">soft accepted</span></td><td>待批次出证</td></tr>
+        <tr><td>1039</td><td>3</td><td>2,065</td><td>46</td><td><code>0xe4c2…8f10</code></td><td><span class="st st-bad">failed</span></td><td>见缺口说明</td></tr>
+      </tbody>
+    </table>
+    <p class="lbl" style="margin-top:16px">blocks 表</p>
+    <table>
+      <thead><tr><th>高度</th><th>时间 (UTC)</th><th>操作数</th><th>状态根</th><th>层级</th></tr></thead>
+      <tbody>
+        <tr><td>18204</td><td>2026-09-12 08:31:04</td><td>12</td><td><code>0x9a3f…c21e</code></td><td><span class="st st-ok">proven</span></td></tr>
+        <tr><td>18203</td><td>2026-09-12 08:30:52</td><td>7</td><td><code>0x51bd…07aa</code></td><td><span class="st st-info">soft accepted</span></td></tr>
+        <tr><td>18202</td><td>2026-09-12 08:30:41</td><td>9</td><td><code>0xe4c2…8f10</code></td><td><span class="st st-ok">proven</span></td></tr>
+      </tbody>
+    </table>
+    <p class="sec-d" style="margin:12px 0 0"><strong>一处需要 build.py 配合：</strong>Markdown 表格无法携带类名，所以"数字列右对齐"目前只能靠 <code>tabular-nums</code> 做到<strong>等宽对齐</strong>而非<strong>贴右</strong>。要真正右对齐，需在 <code>build.py</code> 的表格渲染里给纯数字列加一个 <code>class="num"</code>（约 6 行改动）。本板未擅自改生成器。</p>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>文档布局与长文</h2><span class="en">Docs</span><span class="no">S7</span></div>
+  <p class="sec-d">侧栏从「三块圆角卡」改成<strong>账簿目录</strong>：分组标题是等宽小字 + 细线，条目无边框、左侧 2px 透明槽，当前项填翡翠底 + 左条。正文行长收在 <code>74em</code> 内，H2 用细线分隔（账页换页记号）。</p>
+  <div class="demo" style="padding:0">
+    <div class="wrap" style="padding:0 22px">
+      <div class="docs-layout">
+        <aside class="docs-side">
+          <div class="docs-side-group"><h3 class="docs-side-h">开始</h3><a href="#">概览</a><a href="#" class="active">15 分钟 quickstart</a><a href="#">环境与网络</a></div>
+          <div class="docs-side-group"><h3 class="docs-side-h">协议</h3><a href="#">牌桌操作</a><a href="#">结算与终局性</a><a href="#">证明格式</a><a href="#">ABI</a></div>
+          <div class="docs-side-group"><h3 class="docs-side-h">运维</h3><a href="#">节点</a><a href="#">监控与告警</a><a href="#">密钥与托管</a></div>
+        </aside>
+        <div class="docs-main page-body">
+          <h1 class="page-title" style="font-size:26px">结算与终局性</h1>
+          <p>牌桌操作先被软确认，再进入 BFT 排序，最后由证明约束资金释放。三个层级在浏览器与凭证里始终分开标注，<strong>不合并成"成功"</strong>。</p>
+          <h2>为什么要分三层</h2>
+          <p>扑克结算的错误成本是资金性的。把"已接收"与"已证明"合并展示，会让玩家与运营方对同一件事有两种理解，分歧发生在事后。分层的代价是界面更啰嗦，收益是<strong>没有任何一个状态可以说谎</strong>。</p>
+          <ul><li>soft accepted —— 已排序回显，可回滚</li><li>BFT ordered —— 进入证书，不可回滚但未被证明约束</li><li>proven —— 结算被证明约束，可独立复算</li></ul>
+          <h2>门槛与实测</h2>
+          <p>软确认门槛 p50 ≤ 100ms。devnet 实测 2.1ms（64 桌 × 50 手，2026-09-12）。<strong>该数字不代表生产网络。</strong></p>
+          <p class="docs-footer-note">本页对应 docs v1.3.0-alpha（ABI v1.3）· 与 content/docs 同步构建</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>公式 · 键值 · 图例 · 清单</h2><span class="en">Data primitives</span><span class="no">S8</span></div>
+  <p class="sec-d"><code>.kv</code> 直接采用钱包 <code>.lr</code> 账目行（左标签右等宽值 + 细线）；<code>.formula</code> 走 <code>--code-bg</code>；<code>.task</code> 是方角勾选格，完成态填翡翠、未开始态走虚线框 —— <strong>虚线在账簿里始终表示"尚未成立"</strong>，与牌桌的空位、刻度尺的未选档同一语义。</p>
+  <div class="demo">
+    <div class="two-col">
+      <div>
+        <p class="lbl">kv 键值行</p>
+        <div class="kv"><span class="k">proven watermark</span><span class="v">18196 / 18204</span></div>
+        <div class="kv"><span class="k">缺口</span><span class="v">无</span></div>
+        <div class="kv"><span class="k">rake 口径</span><span class="v">1.5% · 上限 50</span></div>
+        <div class="kv"><span class="k">金库合约</span><span class="v">0x049c…d2f1</span></div>
+        <p class="lbl" style="margin-top:14px">formula 公式块</p>
+        <code class="formula">payout = Σ seat_bet − rake,  rake = min(0.015 × pot, 50)
+claimable(hand) ⇔ verify(proof_hand) = true ∧ BFT_ordered(hand)</code>
+      </div>
+      <div>
+        <p class="lbl">fin-legend 图例</p>
+        <div class="fin-legend"><strong>终局性图例</strong><div class="fin-legend-body"><span class="st st-info">soft accepted</span> → <span class="st st-muted">BFT ordered</span> → <span class="st st-ok">proven</span> → <span class="st st-warn">finalized / claimable</span></div></div>
+        <p class="lbl" style="margin-top:14px">task 清单</p>
+        <div class="task task-done">牌桌操作与软确认回显</div>
+        <div class="task task-done">结算证明约束 rake</div>
+        <div class="task task-open">生产网络与真实资金</div>
+        <div class="task task-open">多桌锦标赛与延迟结算</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>页脚</h2><span class="en">Footer</span><span class="no">S9</span></div>
+  <div class="demo" style="padding:0">
+    <footer class="site-footer" style="margin-top:0">
+      <div class="wrap footer-grid">
+        <div>
+          <p class="footer-brand"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="square"><path d="M12 2 3 6.5v11L12 22l9-4.5v-11L12 2Z"/><path d="m7.5 14.5 9-5"/></svg> ZChain Poker</p>
+          <p style="color:var(--muted);font-size:12.5px;margin:0">面向扑克场景的专用 Appchain。当前网络 devnet，不涉及真实资金。</p>
+        </div>
+        <div class="footer-links"><h2 class="footer-h">站点</h2><a href="#">产品</a><a href="#">技术</a><a href="#">证明</a><a href="#">浏览器</a><a href="#">状态</a><a href="#">文档</a><a href="#">路线图</a><a href="#">透明度</a><a href="#">社区</a><a href="#">法务</a></div>
+        <div class="footer-meta"><h2 class="footer-h">版本与仓库</h2>site v0.1 · docs v1.3.0-alpha (ABI v1.3)<br>样式源 ledger.css · 令牌同源 media-kit/v0.1</div>
+      </div>
+    </footer>
+  </div>
+</div>
+
+<div class="sec">
+  <div class="sec-h"><h2>三处表面同源对照</h2><span class="en">One system, three surfaces</span><span class="no">S10</span></div>
+  <p class="sec-d">站点、钱包、牌桌现在共用同一份令牌与同一批原语。<strong>同一个"proven"记号在三处出现三次</strong>，用户才学得会它是什么意思。</p>
+  <div class="demo">
+    <div class="grid-3">
+      <div class="card"><p class="card-kicker">站点 · explorer</p><div class="kv" style="font-size:13px"><span class="k">hand 1042</span><span class="v"><span class="st st-ok">proven</span></span></div><div class="kv"><span class="k">payout root</span><span class="v">0x77ab…39d1</span></div></div>
+      <div class="card"><p class="card-kicker">钱包 · 凭证</p><div class="kv" style="font-size:13px"><span class="k">结算状态</span><span class="v"><span class="st st-ok">proven</span></span></div><div class="kv"><span class="k">金额</span><span class="v">2,994 CH</span></div></div>
+      <div class="card" style="border-left:3px solid var(--felt)"><p class="card-kicker">牌桌 · 本手凭证</p><div class="kv" style="font-size:13px"><span class="k">第 1042 手</span><span class="v"><span class="st st-ok">proven</span></span></div><div class="kv"><span class="k">派彩</span><span class="v">2,994 CH</span></div></div>
+    </div>
+    <p class="sec-d" style="margin:14px 0 0">牌桌稿的 <code>.st</code> 等价物是 <code>.ch</code>、<code>.kv</code> 等价物是 <code>.lr</code>、<code>.banner</code> 等价物是 <code>.bn</code>、<code>.task</code> 等价物是 <code>.stp</code>、印章 <code>.seal</code> 三处通用。逐页铺开时建议把 <code>ledger.css</code> 提为唯一样式源，牌桌与钱包反向 import 它。</p>
+  </div>
+</div>
+
+</div>
+
+<script>
+document.getElementById('ground').addEventListener('click', function (e) {
+  var b = e.target.closest('button'); if (!b) { return; }
+  document.documentElement.setAttribute('data-ground', b.dataset.g);
+  this.querySelectorAll('button').forEach(function (x) { x.classList.toggle('on', x === b); });
+});
+</script>
+</body>
+</html>
