@@ -30,17 +30,27 @@
 // =============================================================================
 
 import { groupBalances, assetBadge } from '../common/assets.js';
+import { FORBIDDEN_SCOPES, SESSION_SCOPES } from '../common/sessions.js';
+
+/** scope 的中文可读标签（提交值恒等于 `SESSION_SCOPES` 里的原词）。 */
+const SCOPE_LABEL = { play: '对局', buyin: '买入', bet: '下注', settle: '结算', transfer: '转账' };
+import { CAPABILITY_ROWS, overBudgetNote } from '../common/capability_matrix.js';
+import { computeMetrics, createTelemetry, portalStepProps, summarize } from '../common/telemetry.js';
 import {
-  parseBinding, fetchSettlement, fetchProof, verifyStarkProof, verifyLocally, verdictRows,
+  receiptAmount, receiptEvidenceText, receiptKindLabel,
+} from '../common/receipts.js';
+import {
+  parseBinding, fetchSettlement, fetchProof, verifyStarkProof, verifyLocally, verdictRows, fetchAssetSummary,
 } from '../common/portal.js';
 import { callCore } from '../common/wallet_core.js';
 import { verifyCanonicalArchive } from '../common/stwo_verify.js';
 import {
-  CHAIN_LABEL, ERROR_TEXT, PRICE_SOURCE_CONNECTED,
-  backTarget, chainOf, errorText, fmtAmount, fmtSigned, historyBuckets,
-  ladderSteps, nextGround, proofLadder, receiptBuckets, receiptChip,
-  relTime, remainText, resolveScreen, sessionStatusChip, sessionUsage,
-  shortAddr, tabOf, txDirection, txStatusChip, validityRemain,
+  CAPACITY, CHAIN_LABEL, DAILY_RESET_TEXT, ERROR_TEXT, PRICE_SOURCE_CONNECTED,
+  backTarget, capacityNotice, chainOf, errorText, fmtAmount, fmtDisplay, fmtSigned,
+  historyBuckets, idText, ladderOutcome, ladderSteps, limitReasonText, nextGround,
+  fmtFiat, normalizeProof, proofLadder, proofLogSummary, receiptBuckets, receiptChip, relTime,
+  remainText, requiredProofText, resolveScreen, sessionStatusChip, sessionUsage,
+  shortAddr, sumDecimals, tabOf, txDirection, txStatusChip, utcDayIndex, validityRemain,
 } from '../common/ui_ledger.js';
 
 const $view = document.getElementById('view');
@@ -58,6 +68,12 @@ const rt = {
   ground: 'paper',        // 纸白 / 夜场
   hideAmount: false,      // 总额显隐（公共场所）
   overview: null,         // popup:overview 快照（每次 render 刷新）
+  enterAnim: false,       // 本次渲染是否属于"真的换屏"（T-02）
+  filterAnim: false,      // 本次渲染是否只是换链筛选（T-03，更快、抬头不动）
+  sealAnim: false,        // 本次渲染是否有新结论需要盖章（T-10，不得预置）
+  portalStatus: null,     // R-43：网关 /api/v1/status 探测结果（30s 内复用）
+  portalStartedAtMs: null,
+  telemetryCounted: false, // popup_open 每次打开只记一次
   evmInfo: null,          // 最近一次 evmRefresh（跨渲染保留，避免"刷新完就没了"）
   stkInfo: null,          // 最近一次 stkRefresh
   created: null,          // 一键创建结果（成功页显示一次口令，之后即丢）
@@ -185,7 +201,8 @@ function btn(label, { cls = 'btn-p', id, disabled, attrs = {}, icon = null } = {
 }
 
 function banner(kind, title, body) {
-  const iconName = kind === 'bad' ? 'warn' : kind === 'real' ? 'warn' : kind === 'ok' ? 'shield' : kind === 'amb' ? 'lock' : 'info';
+  // AC-34：本界面不得出现盾牌类徽章——`ok` 用勾，不用 shield。
+  const iconName = kind === 'bad' ? 'warn' : kind === 'real' ? 'warn' : kind === 'ok' ? 'check' : kind === 'amb' ? 'lock' : 'info';
   return h('div', { class: `bn bn-${kind}` }, [
     ic(iconName),
     h('div', {}, [h('b', { text: title }), body ? h('p', { text: body }) : null]),
@@ -269,6 +286,8 @@ function setErr(scope, err, extra = '') {
   errApply(n, err);
   const code = typeof err === 'string' ? err : err.code;
   lastErrMemo = { screen: rt.screen, text: errorText(err), code: code && ERROR_TEXT[code] ? code : null };
+  // error_shown：~35 个码的命中率，用来发现"没有文案的兜底码"（§6.4）。
+  track('error_shown', { code: code ?? 'Unknown', screenId: rt.screen });
 }
 function clearErr(scope) {
   const n = nodeErr(scope);
@@ -343,10 +362,12 @@ function chk(text, { on = false, gate = null, style = '', id = null } = {}) {
 }
 
 /** 完整地址 + 复制（二维码编码器未接入 → 不画假码）。 */
-function passBox(id, text, { copyTitle = '复制' } = {}) {
+/** `copyKind`：'password' / 'privatekey' 时复制提示升级为常驻风险警示（R-08）。 */
+function passBox(id, text, { copyTitle = '复制', copyKind = 'text', warn = null } = {}) {
   return h('div', { class: 'pass' }, [
     h('span', { class: 'grow', id, text: String(text ?? '—') }),
-    iconBtn('copy', { attrs: { 'data-copy': `#${id}`, id: `${id}-copy`, title: copyTitle } }),
+    iconBtn('copy', { attrs: { 'data-copy': `#${id}`, id: `${id}-copy`, title: copyTitle, 'data-copy-kind': copyKind } }),
+    warn ? h('p', { class: 'hint-s', style: 'text-align:left', text: warn }) : null,
   ]);
 }
 
@@ -355,11 +376,20 @@ function passBox(id, text, { copyTitle = '复制' } = {}) {
 // ---------------------------------------------------------------------------
 
 let toastTimer = null;
-function toast(msg, ms = 2600) {
+/**
+ * toast 呈现（T-08 / F-22）。
+ * 常规 2400ms；**破坏性结果 4000ms**；错误类不自动消失（需读到底 + 手动关）。
+ * 稿面的 1900ms 对中文短句偏短。同一时刻只允许一条，后来者替换前者
+ * （不排队，避免重渲染后积压）。
+ */
+function toast(msg, ms = 2400, { sticky = false } = {}) {
   if (!$toast) return;
   $toast.textContent = String(msg);
   $toast.classList.add('on');
   clearTimeout(toastTimer);
+  // 错误类 toast 不自动消失（要能读到底），点一下即关。
+  if (sticky) { $toast.dataset.sticky = '1'; return; }
+  delete $toast.dataset.sticky;
   toastTimer = setTimeout(() => $toast.classList.remove('on'), ms);
 }
 
@@ -381,15 +411,93 @@ function applyOvl() {
   else rt.ovl = null; // 目标节点不在本屏：状态随之作废
 }
 
+/**
+ * 离场（T-05）。**离场一律比进入快（约 0.7×）**：主观上"等界面"的时间
+ * 主要来自收尾，而不是入场。遮罩节点在动画期间不得提前销毁，否则 `rt.ovl`
+ * 与视觉不一致（A-4），所以先挂 `.leaving` 再摘 `.on`。
+ */
+function leaveOverlay(o) {
+  if (!o || !o.classList.contains('on')) return;
+  o.classList.add('leaving');
+  const done = () => { o.classList.remove('on', 'leaving', 'anim-enter'); };
+  if (prefersReducedMotion()) done();
+  else setTimeout(done, LEAVE_MS);
+}
+
+/** storage 键：开关 + 环形缓冲（本地聚合，无任何网络出口）。 */
+const TELEMETRY_ENABLED_KEY = 'zchain.telemetry.enabled';
+const TELEMETRY_BUFFER_KEY = 'zchain.telemetry.events';
+
+const telemetry = createTelemetry({ enabled: false, capacity: 200, now: () => Date.now() });
+let telemetryReady = false;
+let telemetryFlushTimer = null;
+
+/**
+ * 载入遥测开关与缓冲（PRD §6.4：全部本地聚合 + 用户可关闭）。
+ * 默认**关闭**：未获同意不记录，popup 生命周期短，缓冲必须落 storage
+ * 否则"上线 4 周后 ≥X%"这类指标根本取不到数。
+ */
+async function loadTelemetry() {
+  if (telemetryReady) return;
+  telemetryReady = true;
+  try {
+    const got = await chrome.storage.local.get([TELEMETRY_ENABLED_KEY, TELEMETRY_BUFFER_KEY]);
+    telemetry.setEnabled(got?.[TELEMETRY_ENABLED_KEY] === true);
+    if (Array.isArray(got?.[TELEMETRY_BUFFER_KEY])) telemetry.restore(got[TELEMETRY_BUFFER_KEY]);
+  } catch { /* 取不到就当关闭：宁可不记，不可误记 */ }
+}
+
+/**
+ * 记录一个事件。未启用时 createTelemetry 直接 no-op；
+ * `dropped` 非空说明有属性被 schema 丢弃（不静默）。
+ */
+function track(id, props = {}) {
+  if (!telemetry.isEnabled()) return;
+  const r = telemetry.record(id, props);
+  if (r?.ok === false) return;
+  clearTimeout(telemetryFlushTimer);
+  telemetryFlushTimer = setTimeout(() => {
+    chrome.storage.local.set({ [TELEMETRY_BUFFER_KEY]: telemetry.list() }).catch(() => {});
+  }, 400);
+}
+
+/**
+ * R-18 词汇漂移监测：`proofLadder` 对未知值与别名命中（如 verifier 侧的
+ * `local`）都记进 `mismatches`，这里把它变成可见事件。
+ * 静默回落 pending 会让等级信息无声丢失——AC-11 要求"回落 + 上报"两件事
+ * 同时成立，只做前者等于把 bug 藏进兜底分支。
+ */
+function trackLadderMismatch(ladder, position) {
+  for (const raw of ladder?.mismatches ?? []) {
+    track('proof_ladder_mismatch', { rawValue: raw });
+  }
+  if (ladder) {
+    track('proof_rail_view', {
+      weakest: ladder.weakest ?? '', required: '', outcome: '', position,
+    });
+  }
+}
+
+/** 离场时长（T-05：一律比进入快）。 */
+const LEAVE_MS = 160;
+
+/** A-5：减弱动效是**唯一**降级开关（不做设备能力探测，见 §7.4）。 */
+function prefersReducedMotion() {
+  try {
+    return typeof matchMedia === 'function'
+      && matchMedia('(prefers-reduced-motion: reduce)').matches === true;
+  } catch { return false; }
+}
+
 function closeOvl(target) {
   const o = target.closest('.ovl, .mdl-bg');
   if (!o) return;
-  o.classList.remove('on');
+  leaveOverlay(o);
   if (o.id === rt.ovl) rt.ovl = null;
 }
 
 function closeAllSheets() {
-  for (const o of $view.querySelectorAll('.ovl.on, .mdl-bg.on')) o.classList.remove('on');
+  for (const o of $view.querySelectorAll('.ovl.on, .mdl-bg.on')) leaveOverlay(o);
   rt.ovl = null;
 }
 
@@ -397,7 +505,7 @@ function closeAllSheets() {
 let sheetSeq = 0;
 function openSheetNode(title, kids) {
   const id = `ovl-dyn-${++sheetSeq}`;
-  const ovl = h('div', { class: 'ovl on', id }, [
+  const ovl = h('div', { class: 'ovl on anim-enter', id }, [
     h('div', { class: 'ovl-bg', 'data-close': '1' }),
     h('div', { class: 'sheet' }, [
       h('div', { class: 'grab' }),
@@ -416,7 +524,7 @@ function openSheetNode(title, kids) {
 /** 注入式模态（危险区二次确认）。 */
 function openModalNode(title, kids) {
   const id = `mdl-dyn-${++sheetSeq}`;
-  const m = h('div', { class: 'mdl-bg on', id }, [
+  const m = h('div', { class: 'mdl-bg on anim-enter', id }, [
     h('div', { class: 'mdl' }, [h('h3', { text: title }), ...kids]),
   ]);
   currentScr().appendChild(m);
@@ -432,14 +540,28 @@ async function copyText(text) {
   }
 }
 
-/** data-copy 值：`#elementId` 取该节点文本，否则按字面量。 */
-async function doCopy(spec) {
+/**
+ * data-copy 值：`#elementId` 取该节点文本，否则按字面量。
+ *
+ * R-08：把**口令**写进剪贴板是可被其他读取剪贴板的扩展拿到的暴露面。
+ * 稿面只有一个可点复制按钮而无风险说明，与 DS-13 的诚实纪律不自洽——
+ * 故此处按字段类型分流：口令类用常驻警示文案 + 不自动消失的提示。
+ */
+const CLIPBOARD_WARNING = '注意：剪贴板内容可被其他扩展与本机应用读取。口令 / 私钥请勿长期留在剪贴板，用完请立即清空。';
+async function doCopy(spec, node = null) {
   let text = spec;
   if (typeof spec === 'string' && spec.startsWith('#')) {
     text = (document.getElementById(spec.slice(1))?.textContent ?? '').trim();
   }
   const okc = await copyText(text);
-  toast(okc ? '已复制到剪贴板' : '复制失败：请手动选择文本');
+  const kind = node?.getAttribute?.('data-copy-kind') ?? 'text';
+  track('copy_action', { fieldKind: kind, layer: rt.chain ?? '' });
+  if (!okc) { toast('复制失败：请手动选择文本', 2400, { sticky: false }); return; }
+  if (kind === 'password' || kind === 'privatekey') {
+    toast(`已复制${kind === 'password' ? '口令' : '私钥'} · ${CLIPBOARD_WARNING}`, 4000);
+  } else {
+    toast('已复制到剪贴板');
+  }
 }
 
 /** 导航（屏幕注册表是唯一权威；未知屏幕如实提示，不静默回落）。 */
@@ -450,6 +572,7 @@ function go(target) {
     return;
   }
   if (r.chain) rt.chain = r.chain;
+  if (rt.screen !== r.id) rt.enterAnim = true; // T-02：换屏才淡入，重渲染不重复
   rt.screen = r.id;
   render();
 }
@@ -494,6 +617,12 @@ $view.addEventListener('click', async (e) => {
   const cs = t.closest('[data-cs]');
   if (cs) {
     const c = chainOf(cs.getAttribute('data-cs'));
+    if (c && c !== rt.chain) {
+      track('chain_switch', { fromChain: rt.chain, toChain: c });
+      // T-03：换链不换屏 id，因此换屏动画不会自动触发——数据面用更快的
+      // 120ms 淡入（快 = "这只是过滤条件"），且抬头 kind/net/addr 不参与动画。
+      rt.filterAnim = true;
+    }
     if (!c) return;
     rt.chain = c;
     go({ id: 'acct', chain: c });
@@ -514,7 +643,7 @@ $view.addEventListener('click', async (e) => {
   }
 
   const copy = t.closest('[data-copy]');
-  if (copy) { await doCopy(copy.getAttribute('data-copy')); return; }
+  if (copy) { await doCopy(copy.getAttribute('data-copy'), copy); return; }
 
   const actNode = t.closest('[data-act]');
   if (actNode) {
@@ -535,6 +664,44 @@ $view.addEventListener('click', async (e) => {
 });
 
 // 表单回车 = 该屏主操作（与各自主按钮同一个 data-act）。
+/**
+ * 键入式门槛（AC-33 / F-21 的"高摩擦"落点）。
+ *
+ * 撤销会话密钥必须**键入常量 `REVOKE`** 才解禁确认按钮：撤销是权限收缩，
+ * 误点的代价是该 origin 后续每次签名都要口令。故意不用 checkbox——
+ * 勾选框可以被无脑点掉，逐字键入才能制造"我在做不可逆决定"的意识（D-09）。
+ *
+ * 事件走委托而非内联 `oninput`（MV3 `script-src 'self'`）。解禁瞬间按钮由
+ * 虚线禁用态转实线（T-07），让"门槛被跨过"是可看见的。
+ */
+$view.addEventListener('input', (e) => {
+  const t = e.target;
+  const spec = typeof t?.getAttribute === 'function' ? t.getAttribute('data-typegate') : null;
+  if (!spec) return;
+  const [sel, token = ''] = spec.split(':');
+  const target = document.querySelector(sel);
+  if (!target) return;
+  const value = String(t.value ?? '').trim();
+  const ok = token ? value.toUpperCase() === token.toUpperCase() : value.length > 0;
+  target.disabled = !ok;
+  target.classList.toggle('ungated', ok);
+});
+
+/** 带键入门槛的输入框（`gateSel` 指向需解禁的按钮选择器）。 */
+function gatedInput(id, { placeholder, token, mask = false }) {
+  return input(id, {
+    type: mask ? 'password' : 'text',
+    placeholder,
+    cls: 'mono',
+    attrs: { 'data-typegate': `#${id}-btn:${token}`, autocomplete: 'off' },
+  });
+}
+
+/** 被键入门槛禁住的按钮（虚线禁用态 = `fail-closed` 笔触）。 */
+function gatedBtn(id, label, { cls = 'btn-d' } = {}) {
+  return btn(label, { cls: `${cls} gated`, id: `${id}-btn`, disabled: true, attrs: { id: `${id}-btn` } });
+}
+
 $view.addEventListener('keydown', (e) => {
   if (e.key !== 'Enter') return;
   const n = e.target;
@@ -582,7 +749,11 @@ function docHeader({ kind, netText, netAct, addrText, sub, copySpec, lockAct = '
   const top = h('div', { class: 'dh-top' }, [
     h('span', { class: 'dh-kind', text: kind }),
     netText
-      ? h('button', { class: 'net', type: 'button', id: 'net-badge', 'data-act': netAct ?? '' }, [h('span', { class: 'dot' }), netText])
+      ? (netAct
+        ? h('button', { class: 'net', type: 'button', id: 'net-badge', 'data-act': netAct }, [h('span', { class: 'dot' }), netText])
+        // 无动作的网络标识必须是**静态标签**：挂空 data-act 的可点按钮会让用户
+        // 点了得到「未实现的动作：」，把只读信息伪装成可用控件（§7.3 禁止项）。
+        : h('span', { class: 'net', id: 'net-badge' }, [h('span', { class: 'dot' }), netText]))
       : h('span', { class: 'grow' }),
     h('span', { class: 'dh-r' }, [
       iconBtn(rt.hideAmount ? 'eye-off' : 'eye', { bare: true, attrs: { 'data-act': 'toggle-amount', id: 'toggle-amount', title: rt.hideAmount ? '显示金额' : '隐藏金额' } }),
@@ -623,7 +794,8 @@ function tabsBar() {
   return h('nav', { class: 'tabs' }, [
     b('home', 'home', 'home', '总账'),
     b('acct', `acct:${rt.chain}`, 'book', '账簿'),
-    b('proofs', 'proofs', 'shield', '证明'),
+    // AC-34：本界面不得出现盾牌类徽章——tab 图标改用单据形状。
+    b('proofs', 'proofs', 'file', '证明'),
   ]);
 }
 
@@ -663,8 +835,30 @@ function recvSheet(id, title, addr, subText) {
   ]);
 }
 
+/**
+ * 挂载屏幕（A-4：本应用状态变化会**整体重渲染** DOM，节点被替换，
+ * 所以进入动画不能依赖元素跨状态持续存在，只能在"确实换屏/确实出结论"
+ * 时挂一次性 class，播完即撤）。
+ */
 function mount(node) {
   $view.replaceChildren(node);
+  // 动画只加在 `.body` 上：抬头承载"这是谁的账户"，跳动会被读成"账户变了"
+  // （T-03 明确要求抬头 kind/net/addr 不动）。换屏走 140ms、换链走 120ms。
+  const animTarget = node.querySelector?.('.body');
+  if ((rt.enterAnim || rt.filterAnim) && animTarget && !prefersReducedMotion()) {
+    animTarget.classList.add(rt.filterAnim ? 'anim-filter' : 'anim-enter');
+    // 阶梯只在换屏时生长一次（T-09：回退不做动画，直接重绘）。
+    node.querySelectorAll?.('.rail').forEach((el) => el.classList.add('anim-enter'));
+  }
+  if (rt.sealAnim && !prefersReducedMotion()) {
+    // T-10：印章"落下"必须在验证真正返回之后，不得预置（A-1②）。
+    node.querySelectorAll?.('.seal').forEach((el) => el.classList.add('anim-enter'));
+  }
+  rt.enterAnim = false;
+  rt.filterAnim = false;
+  rt.sealAnim = false;
+  // screen_view：屏幕热度，用于验证"链=筛选器"是否真的减少跳转（§1.3）。
+  track('screen_view', { screenId: rt.screen, chain: rt.chain, tab: tabOf(rt.screen) ?? '' });
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +879,12 @@ async function render() {
       return;
     }
     rt.overview = ov;
+    // popup_open：一次打开只记一条（未解锁层数用于评估"统一解锁"的真实收益）。
+    if (!rt.telemetryCounted) {
+      rt.telemetryCounted = true;
+      const { unlocked } = unlockCount(ov);
+      track('popup_open', { unlockedLayers: unlocked, ground: rt.ground });
+    }
 
     // 首屏路由：未 onboarding → 欢迎；三层全锁 → 统一解锁屏。
     if (!ov.onboarded && !['welcome', 'success', 'import'].includes(rt.screen)) rt.screen = 'welcome';
@@ -780,7 +980,11 @@ RENDERERS.success = async () => {
       ? banner('bad', '解锁口令只显示这一次', '钱包不存储口令；丢失后仅能通过加密备份恢复。')
       : banner('info', '已使用你的自定义口令', '三层共用同一口令，但会话彼此独立、密钥各自派生。'),
     res.generated && res.password
-      ? passBox('welcome-generated-password', res.password, { copyTitle: '复制口令' })
+      ? passBox('welcome-generated-password', res.password, {
+        copyTitle: '复制口令',
+        copyKind: 'password',
+        warn: '复制到剪贴板后，其他可读剪贴板的扩展与本机应用都可能拿到这串口令。请立即保存并清空剪贴板——钱包不存储口令，丢失只能靠加密备份恢复。',
+      })
       : null,
     cd('三层地址', [
       lr('ZChain', shortAddr(L.zchain?.publicKey ?? '—'), { vKids: [h('span', { id: 'success-zc-addr', text: L.zchain?.publicKey ?? '—' }), iconBtn('copy', { bare: true, attrs: { 'data-copy': '#success-zc-addr' } })] }),
@@ -822,7 +1026,11 @@ RENDERERS.import = async () => {
           h('option', { value: 'evm', text: 'EVM · secp256k1' }),
           h('option', { value: 'stk', text: 'Starknet · STARK curve' }),
         ])),
-        field('私钥（hex）', input('import-key', { cls: 'mono', placeholder: '0x… 或裸 hex' })),
+        field('私钥（hex）', input('import-key', { cls: 'mono', type: 'password', placeholder: '0x… 或裸 hex', attrs: { autocomplete: 'off', 'data-mask-blur': '1', id: 'import-key' } }), {
+          aux: '默认掩码显示 · ',
+          auxBtn: { text: '显示', attrs: { 'data-act': 'toggle-import-key', id: 'import-key-reveal' } },
+        }),
+        h('p', { class: 'hint-s', style: 'text-align:left', text: '私钥以明文经表单交给后台解锁会话，不落 storage；失焦即回到掩码。肩窥与截屏风险由你自己承担——这是导入私钥固有的暴露面。' }),
         field('加密口令', input('import-pw', { type: 'password', placeholder: '用于本地 keystore 加密（≥ 8 位）' })),
         btn('导入到所选层', { id: 'import-key-btn', attrs: { 'data-act': 'import-key' } }),
         h('p', { class: 'hint-s', style: 'text-align:left;margin-top:12px', text: 'ZChain note 层不支持私钥导入：note 库由 wallet-core 派生，只能经 .zcbk 备份恢复。' }),
@@ -863,7 +1071,7 @@ RENDERERS.lock = async (ov) => {
         btn('解锁三层', { id: 'home-unlock-btn', attrs: { 'data-act': 'quick-unlock', 'data-enter': '1', style: 'margin-top:10px' } }),
         pending.length > 0
           ? btn(`查看 ${pending.length} 项待确认`, { cls: 'btn-s', id: 'lock-pending', attrs: { 'data-nav': 'zc-confirm', style: 'margin-top:4px' } })
-          : btn('忘记口令？使用备份恢复', { cls: 'btn-g', id: 'lock-import', attrs: { 'data-nav': 'import', style: 'margin-top:4px' } }),
+          : btn('忘记口令？使用备份恢复（需备份口令）', { cls: 'btn-g', id: 'lock-import', attrs: { 'data-nav': 'import', style: 'margin-top:4px' } }),
         errLine('lock-err'),
       ]),
     ]),
@@ -878,6 +1086,8 @@ RENDERERS.lock = async (ov) => {
 RENDERERS.home = async (ov) => {
   const L = ov.layers ?? {};
   const { held, unlocked } = unlockCount(ov);
+  // R-01：主数字退化为 `—` 的曝光次数（接入价格源后应恒为 0，用于回归）。
+  if (!PRICE_SOURCE_CONNECTED) track('fiat_unavailable_view', {});
   const [notesRes, receiptsRes, pendingRes] = await Promise.all([
     L.zchain?.unlocked ? send({ type: 'popup:getNotes' }) : Promise.resolve(null),
     send({ type: 'popup:receipts' }),
@@ -888,24 +1098,29 @@ RENDERERS.home = async (ov) => {
   const receipts = receiptsRes?.receipts ?? [];
   const pending = pendingRes?.pending ?? [];
   const realLadder = notes ? proofLadder(notes.realNotes ?? []) : null;
+  trackLadderMismatch(realLadder, 'home');
 
   const hero = h('div', { class: 'tot' }, [
     h('div', { class: 'tot-l' }, ['三链总资产', PRICE_SOURCE_CONNECTED ? null : chip('价格源未接入', 'ch-xs')]),
-    h('div', { class: 'tot-a' }, [PRICE_SOURCE_CONNECTED ? '$0.00' : '—']),
+    // 源码里不留任何法币金额字面量：价格源接入时这条分支必须改为由
+    // **单一价格快照**计算的出口（§13 C-02），而不是有人顺手填一个数字串。
+    h('div', { class: 'tot-a' }, [PRICE_SOURCE_CONNECTED ? fmtFiat('0') : '—']),
     h('div', { class: 'tot-s' }, [
       chip(`已解锁 ${unlocked} / ${held}`, 'ch-felt'),
       h('span', { text: 'PLAY 为测试筹码不计价；REAL 为托管映射' }),
     ]),
   ]);
 
-  const layerRow = (chain, { iconName, tkCls, name, desc, address, unlockedFlag }) => h('button', {
+  const layerRow = (chain, { iconName, tkCls, name, desc, descKids, desc2Kids, address, unlockedFlag }) => h('button', {
     class: 'ar', type: 'button', 'data-nav': `acct:${chain}`, id: `home-${chain}`,
     style: 'border:none;cursor:pointer;background:none;width:100%',
   }, [
     h('span', { class: `tk ${tkCls}`.trim() }, [ic(iconName, 'ic ic-s')]),
     h('div', { class: 'ar-m' }, [
       h('div', { class: 'ar-n' }, [name, chip(unlockedFlag ? '已解锁' : '已锁定', unlockedFlag ? 'ch-felt ch-xs' : 'ch-amb ch-xs')]),
-      h('div', { class: 'ar-s', text: desc }),
+      h('div', { class: 'ar-s' }, descKids ?? [desc]),
+      // R-41：第二域另起一行，并沿用各自的域配色。
+      desc2Kids ? h('div', { class: 'ar-s' }, desc2Kids) : null,
     ]),
     h('div', { class: 'ar-r' }, [
       h('div', { class: 'ar-amt dim', text: unlockedFlag ? '进入账簿' : '需解锁' }),
@@ -914,7 +1129,8 @@ RENDERERS.home = async (ov) => {
   ]);
 
   const weakest = realLadder?.weakest ?? null;
-  const steps = ladderSteps({ current: weakest, outcome: weakest && weakest !== 'finalized' ? 'wait' : 'ok' });
+  const outcome = ladderOutcome({ weakest, required: 'finalized' });
+  const steps = ladderSteps({ current: weakest, outcome, required: 'finalized' });
 
   mount(scr([
     docHeader({
@@ -930,17 +1146,21 @@ RENDERERS.home = async (ov) => {
       cd(null, [
         layerRow('zc', {
           iconName: 'spade', tkCls: 'tk-felt', name: 'ZChain 隐私层',
-          desc: g ? amt(`PLAY ${fmtAmount(g.game.play.free)} · NATIVE ${fmtAmount(g.real.native.free)}`) : '解锁后显示分库余额',
+          // R-41：GAME 筹码与 REAL 托管映射虽未相加，但并排进**同一个**视觉
+          // 单元仍会被读成一个数。拆成两行并沿用域配色（蓝墨 / 金墨）。
+          desc: g ? '分库余额（跨域不轧差）' : '解锁后显示分库余额',
+          descKids: g ? [chip('GAME', 'ch-xs ch-play'), ` ${amt(fmtDisplay(g.game.play.free, 'play'))} PLAY`] : null,
+          desc2Kids: g ? [chip('REAL', 'ch-xs ch-real'), ` ${amt(fmtDisplay(g.real.native.free, 'native'))} NATIVE`] : null,
           address: L.zchain?.address, unlockedFlag: L.zchain?.unlocked,
         }),
         layerRow('evm', {
           iconName: 'ether', tkCls: '', name: 'EVM 多链',
-          desc: rt.evmInfo ? amt(`${fmtAmount(rt.evmInfo.balanceHuman)} ETH · chainId ${rt.evmInfo.chainIdHex}`) : '解锁后可查询链上余额',
+          desc: rt.evmInfo ? amt(`${fmtDisplay(rt.evmInfo.balanceHuman, 'eth')} ETH · chainId ${rt.evmInfo.chainIdHex}`) : '解锁后可查询链上余额',
           address: L.evm?.address, unlockedFlag: L.evm?.unlocked,
         }),
         layerRow('stk', {
           iconName: 'layers', tkCls: '', name: 'Starknet',
-          desc: rt.stkInfo ? amt(`${fmtAmount(rt.stkInfo.balanceHuman)} ${rt.stkInfo.tokenSymbol ?? ''}`) : '解锁后可查询链上余额',
+          desc: rt.stkInfo ? amt(`${fmtDisplay(rt.stkInfo.balanceHuman, 'strk')} ${rt.stkInfo.tokenSymbol || '—'}`) : '解锁后可查询链上余额',
           address: L.stk?.address, unlockedFlag: L.stk?.unlocked,
         }),
       ], { cls: 'rows', id: 'home-card' }),
@@ -1006,6 +1226,7 @@ act('quick-create', async () => {
   const res = await send({ type: 'popup:quickCreate' });
   if (res?.error) { setErr(document.getElementById('welcome-advanced')?.closest('.scr'), res.error); toast(errorText(res.error)); return; }
   rt.created = res;
+  rt.sealAnim = true; // T-10：「已创建」是本次动作的结论，只在结论出现时落章
   rt.screen = 'success';
   render();
 });
@@ -1020,6 +1241,7 @@ act('quick-create-custom', async () => {
   document.getElementById('welcome-pw2').value = '';
   if (res?.error) { toast(errorText(res.error)); return; }
   rt.created = { ...res, generated: false };
+  rt.sealAnim = true;
   rt.screen = 'success';
   render();
 });
@@ -1279,7 +1501,8 @@ async function zcPane(ov) {
     h('button', { class: 'play', type: 'button', 'data-open': 'ovl-zc-recv', id: 'zc-recv' }, [ic('qr'), '收款']),
     h('button', { type: 'button', 'data-nav': 'zc-send', id: 'zc-send' }, [ic('send'), '转账']),
     h('button', { class: 'real', type: 'button', 'data-nav': 'zc-withdraw', id: 'zc-withdraw' }, [ic('out'), '提现']),
-    h('button', { type: 'button', 'data-nav': 'zc-portal', id: 'zc-portal' }, [ic('shield'), 'Portal']),
+    // AC-34：证明/验证类入口不得借用盾牌图形（盾牌=安全保证的视觉暗示）。
+    h('button', { type: 'button', 'data-nav': 'zc-portal', id: 'zc-portal' }, [ic('search'), 'Portal']),
   ]);
 
   const assetCard = cd('资产', [
@@ -1436,10 +1659,25 @@ async function evmPane(ov) {
 }
 
 /** Starknet 层数据面。 */
+/**
+ * R-19 / AC-47：测试网资产必须显示测试网自己的符号。
+ * SN DevNet 的 native 是 `DST`（Dev Stark Token，水龙头所铸、无价值），把它
+ * 印成 `ETH`/`Ξ` 会让用户按错误的资产性质决策——这与 D-06「符号撒谎即误导」
+ * 是同一族问题。三级取不到即 `—`，**绝不回落 'ETH'**（fail-closed）。
+ */
+function stkUnit(net, info) {
+  return info?.tokenSymbol || net?.tokenSymbol || '—';
+}
+
+function stkNetwork(st) {
+  return (st?.networks ?? []).find((n) => n.id === st?.networkId) ?? null;
+}
+
 async function stkPane(ov) {
   const st = await send({ type: 'popup:stkGetState' });
   if (st?.error) return { netText: 'Starknet', nodes: [errLine('stk-err')], sheets: null };
   const net = (st.networks ?? []).find((n) => n.id === st.networkId);
+  const unit = stkUnit(net, rt.stkInfo);
   const info = rt.stkInfo;
   if (!st.unlocked) return chainAccessPane('stk', st, net);
   const hist = await send({ type: 'popup:stkHistory', includeExplorer: false });
@@ -1447,7 +1685,7 @@ async function stkPane(ov) {
   return {
     netText: `${net?.name ?? 'Starknet'} · ${net?.chainId ?? ''}`,
     nodes: [
-      chainBalanceTot('stk', info ? fmtAmount(info.balanceHuman) : '—', info?.tokenSymbol ?? 'ETH', st.address, []),
+      chainBalanceTot('stk', info ? fmtDisplay(info.balanceHuman, 'strk') : '—', unit, st.address, []),
       chainActs('stk'),
       cd('网络', [
         h('div', { id: 'stk-chain-info' }, [
@@ -1461,14 +1699,24 @@ async function stkPane(ov) {
         ]),
       ]),
       cd('资产', [
-        assetRow({ tk: 'Ξ', name: info?.tokenSymbol ?? 'ETH', sub: 'ERC-20 形状 · u256 金额', amount: info ? amt(fmtAmount(info.balanceHuman)) : '—', amountCls: info ? '' : 'dim' }),
+        assetRow({
+          tk: unit.slice(0, 1),
+          name: unit,
+          sub: net?.kind === 'mainnet' ? 'Starknet native · u256 金额' : `Starknet native · u256 金额 · ${net?.kind ?? '测试网'} 代币`,
+          amount: info ? amt(fmtDisplay(info.balanceHuman, 'strk')) : '—',
+          amountCls: info ? '' : 'dim',
+          // assetRow 对 nameKids 做展开，必须传**数组**（传单节点会 throw，
+          // 整屏渲染失败 → Starknet pane 消失）。
+          nameKids: net?.kind === 'mainnet' ? null : [chip('dev', 'ch-play')],
+        }),
       ]),
       cd('最新动态', txs.length === 0 ? [emptyBox(hist?.error ? errorText(hist.error) : '暂无交易记录')] : txs.map(chainTxRow),
         { more: '查看全部', moreAttrs: { 'data-nav': 'history:stk', id: 'stk-news-more' } }),
       net?.faucet ? cd('devnet 水龙头', [
-        field('领取金额（ETH）', input('stk-faucet-amount', { type: 'text', value: '10', cls: 'mono' })),
+        field(`领取金额（${unit}）`, input('stk-faucet-amount', { type: 'text', value: '10', cls: 'mono' })),
         btn('注册账户 + 领取测试币', { cls: 'btn-s', id: 'stk-faucet-btn', attrs: { 'data-act': 'stk-faucet' } }),
         h('p', { class: 'hint-s', style: 'text-align:left', text: '开发链内置：先 UDC 部署账户合约，再出资。' }),
+        h('p', { class: 'hint-s', style: 'text-align:left', text: `${unit} 是 devnet 测试代币，无价值、不可上主网。` }),
       ]) : null,
       chainManageCard('stk', st),
     ],
@@ -1559,7 +1807,24 @@ RENDERERS['zc-send'] = async () => {
   const st = await send({ type: 'popup:getState' });
   const p = rt.transfer;
   const avail = st?.unlocked ? await availablePlay() : 0;
-  const steps = p ? ladderSteps({ current: p.finality.worstProof, outcome: p.finality.reached ? 'ok' : 'blocked', required: p.finality.requiredProof }) : ladderSteps({});
+  // outcome 由 `ladderOutcome` 统一判定：`canSubmit:false` 时必须画朱红 bad
+  // 而不是琥珀 cur——后者会被读成"仍在推进、等一会儿就好"（R-07 同族事故）。
+  track('note_select_result', {
+    noteCount: p?.inputs?.length ?? 0,
+    hasChange: (p?.change ?? '0') !== '0',
+    weakest: p?.finality?.worstProof ?? '',
+    required: p?.finality?.requiredProof ?? '',
+    canSubmit: p?.canSubmit === true,
+    blockedReasons: p?.cannotSubmitReasons ?? [],
+  });
+  if ((p?.inputs?.length ?? 0) > CAPACITY.noteInputs) {
+    track('note_count_over_limit', { noteCount: p.inputs.length, limit: CAPACITY.noteInputs });
+  }
+  const steps = p ? ladderSteps({
+    current: p.finality.worstProof,
+    outcome: ladderOutcome({ weakest: p.finality.worstProof, required: p.finality.requiredProof, canSubmit: p.canSubmit }),
+    required: p.finality.requiredProof,
+  }) : ladderSteps({});
   mount(scr([
     subHeader('转账', { right: chip('GAME', 'ch-play ch-xs') }),
     body([
@@ -1596,7 +1861,7 @@ RENDERERS['zc-send'] = async () => {
           p.finality.reached ? ' · 满足 GAME 域要求' : ` · 未达 ${p.finality.requiredProof}`,
         ]),
       })]) : null,
-      p?.cannotSubmitReasons?.length ? cd('暂不可提交 · 原因', p.cannotSubmitReasons.map((r) => h('div', { class: 'rsn' }, [ic('x', 'ic ic-s'), h('span', { text: r })]))) : null,
+      p?.cannotSubmitReasons?.length ? cd('暂不可提交 · 原因', reasonRows(p.cannotSubmitReasonDetails, p.cannotSubmitReasons)) : null,
       btn('生成预览', { cls: 'btn-s', id: 'zc-send-preview', attrs: { 'data-act': 'zc-send-preview', style: 'margin-bottom:9px' } }),
       btn('确认转账', { id: 'zc-send-confirm', disabled: !p?.canSubmit, attrs: { 'data-act': 'zc-send-confirm', 'data-enter': '1' } }),
       errLine('zc-send-err'),
@@ -1675,7 +1940,13 @@ act('zc-send-confirm', async () => {
 RENDERERS['zc-withdraw'] = async () => {
   const p = rt.withdraw;
   const avail = await availableReal();
-  const steps = p ? ladderSteps({ current: p.finality.worstProof, outcome: p.finality.reached ? 'ok' : 'blocked', required: p.finality.requiredProof }) : ladderSteps({});
+  // outcome 由 `ladderOutcome` 统一判定：`canSubmit:false` 时必须画朱红 bad
+  // 而不是琥珀 cur——后者会被读成"仍在推进、等一会儿就好"（R-07 同族事故）。
+  const steps = p ? ladderSteps({
+    current: p.finality.worstProof,
+    outcome: ladderOutcome({ weakest: p.finality.worstProof, required: p.finality.requiredProof, canSubmit: p.canSubmit }),
+    required: p.finality.requiredProof,
+  }) : ladderSteps({});
   mount(scr([
     subHeader('提现（预览）', { right: chip('REAL', 'ch-real ch-xs') }),
     body([
@@ -1696,7 +1967,7 @@ RENDERERS['zc-withdraw'] = async () => {
       ]),
       cd('暂不可提交 · 原因', p
         ? [
-          ...p.cannotSubmitReasons.map((r) => h('div', { class: 'rsn' }, [ic('x', 'ic ic-s'), h('span', { text: r })])),
+          ...reasonRows(p.cannotSubmitReasonDetails, p.cannotSubmitReasons),
           h('div', { class: 'rsn real' }, [ic('lock', 'ic ic-s'), h('span', { text: `托管：${p.custodyRisk ?? 'real_is_custodial'}` })]),
         ]
         : [emptyBox('尚未生成预览')]),
@@ -1803,7 +2074,7 @@ function confirmCard(p, sessionKeys) {
       lr('amount_out', fmtAmount(pv.amount_out ?? '0')),
       lr('rake', fmtAmount(pv.rake ?? '0')),
       (pv.proof_states ?? []).length ? lr('proof 层级', (pv.proof_states ?? []).join(' / ')) : null,
-      lr('过期', `${Math.max(0, Math.round(((p.expiresAt ?? 0) - Date.now()) / 1000))}s`, { vKids: [h('span', { text: '倒计时 ' }), chip(remainText((p.expiresAt ?? 0) - Date.now()), 'ch-amb ch-xs')] }),
+      lr('过期', remainText((p.expiresAt ?? 0) - Date.now()), { vKids: [h('span', { text: '倒计时 ' }), chip(remainText((p.expiresAt ?? 0) - Date.now()), 'ch-amb ch-xs')] }),
     ]),
     cd('授权对象', [
       ...(pv.outputs ?? []).map((o, i) => lr(`输出#${i} owner`, `${shortAddr(o.owner ?? '', 8, 6)} · ${fmtAmount(o.amount ?? '0')}`)),
@@ -1870,6 +2141,10 @@ RENDERERS['zc-sessions'] = async () => {
       errLine('sessions-err'),
       h('p', { class: 'hint-s', style: 'text-align:left;margin-top:8px', text: '授权簿按 origin 记账；撤销只影响该 origin 的委托密钥，不动主密钥。delegated key 私钥只活在 wasm 会话，锁定即毁。' }),
     ]),
+    // R-42 / D-13：本页的"会话"是 SNIP-12 委托授权（默认 1 天），与"三层共用
+    // 口令的解锁会话"（15 分钟）是两个不相干的概念。不写这一行，用户会以为
+    // 撤销授权 = 锁定钱包，或反过来以为锁定钱包就收回了授权。
+    banner('info', '两个"会话"不是一回事', '本页管理的是 dapp 的 SNIP-12 委托授权（默认 1 天有效，按 origin 记账）；与 15 分钟无操作自动锁定的**解锁会话**彼此独立——锁定钱包不会撤销这里的授权，撤销授权也不会锁定钱包。'),
   ], { aria: '会话密钥' }));
 };
 
@@ -1888,6 +2163,12 @@ function sessionCard(b) {
     lr('scope', '', { vKids: (b.allowedScopes ?? []).map((s) => chip(s, 'ch-xs')) }),
     lr('单笔限额', b.perTxLimit ? `≤ ${fmtAmount(b.perTxLimit)}` : '不限'),
     lr('日累计', `${fmtAmount(u.usedText)} / ${fmtAmount(u.limitText)}`),
+    // R-31 / AC-31：分窗按 UTC 日（`Math.floor(nowSec/86_400)`），不写出来
+    // 用户会以为本地零点重置而提前用满限额。
+    h('p', { class: 'hint-s', style: 'text-align:left', text: `${DAILY_RESET_TEXT}（当前 UTC 日序号 ${utcDayIndex()}）。` }),
+    // AC-32 / R-03：限额是客户端记账，清 storage 或重装即可绕过。
+    // 在此之前它不是安全保证，界面不得把它写成"最多只能花 X"。
+    h('p', { class: 'hint-s', style: 'text-align:left', text: '限额由本机登记与后台执行，不是安全保证：清除浏览器存储即可绕过。链上 admission 未接线前，请勿据此认为资金受限额保护。' }),
     u.percent !== null ? meter(u.percent, { warn: u.exhausted, style: 'margin:7px 0' }) : null,
     lr('桌白名单', b.tableAllowlist == null ? '不限桌' : b.tableAllowlist.join(' · ')),
     lr('有效期', validityRemain(b.validUntil)),
@@ -1896,7 +2177,7 @@ function sessionCard(b) {
       ? btn(b.revoked ? '删除记录' : '撤销授权', {
         cls: b.revoked ? 'btn-g btn-sm' : 'btn-d btn-sm',
         id: `session-${b.revoked ? 'del' : 'revoke'}-${shortAddr(b.bindingId, 6, 4)}`,
-        attrs: { 'data-act': b.revoked ? 'session-delete' : 'session-revoke', 'data-id': b.bindingId, style: 'margin-top:11px;width:100%' },
+        attrs: { 'data-act': b.revoked ? 'session-delete' : 'session-revoke', 'data-id': b.bindingId, 'data-origin': b.origin ?? '—', style: 'margin-top:11px;width:100%' },
       })
       : btn('删除记录', { cls: 'btn-g btn-sm', attrs: { 'data-act': 'session-delete', 'data-id': b.bindingId, style: 'margin-top:11px;width:100%' } }),
     b.revoked ? h('p', { class: 'hint-s', style: 'margin-top:7px', text: '已撤销为粘滞态：该 origin 的签名一律拒绝，删除记录后回到常规路径。' }) : null,
@@ -1930,10 +2211,12 @@ function draftForm(draft, st) {
       field('授权方账户地址（felt hex）', input('draft-addr', { cls: 'mono', placeholder: st?.publicKey ? `当前公钥 ${shortAddr(st.publicKey, 8, 6)}` : '0x…', value: '', attrs: { style: 'font-size:11.5px' } })),
     ]),
     cd('scope 授权', [
-      chk('开桌 / 对局（play）', { on: true, gate: 'scope' }),
-      chk('买入（buyin）', { on: true, gate: 'scope' }),
-      chk('下注（bet）', { on: true, gate: 'scope' }),
-      chk('结算（settle）', { on: true, gate: 'scope' }),
+      // R-30：授权项必须与后台 `SESSION_SCOPES` 同一份常量。稿面此前是
+      // 「开桌 / 买入 / 结算」三项，与实现对不上——UI 勾的 scope 后台不认，
+      // 等于授权提交即失效。这里由常量驱动，界面不再自己数有几项。
+      ...SESSION_SCOPES.filter((sc) => !FORBIDDEN_SCOPES.includes(sc)).map((sc) =>
+        chk(`${SCOPE_LABEL[sc] ?? sc}（${sc}）`, { on: true, gate: 'scope' })),
+      h('p', { class: 'hint-s', style: 'text-align:left', text: '括号内是提交给后台的 SNIP-12 原词（不翻译，便于与链上/网关输出对照）。' }),
       chk('转账（transfer）', { gate: 'scope' }),
       h('p', { class: 'hint-s', style: 'text-align:left;margin-top:6px', text: 'withdraw 永不可选：提现签名面未开放。scope 全部取消勾选时，登记入口自动禁用。' }),
     ]),
@@ -1951,7 +2234,11 @@ act('draft-generate', async () => {
   clearErr(scope);
   const checked = [...scope.querySelectorAll('[data-check="[data-gated=scope]"]')]
     .filter((n) => n.querySelector('.cb.on'))
-    .map((n) => ({ play: 'play', buyin: 'buyin', bet: 'bet', settle: 'settle', transfer: 'transfer' }[n.textContent.trim().match(/（([a-z]+)）/)?.[1]] ?? null))
+    .map((n) => {
+      const raw = n.textContent.trim().match(/（([a-z_]+)）/)?.[1] ?? null;
+      // 只接受常量里的值：拿不到就 null，由下面的 filter 拒掉（不猜 scope）。
+      return raw && SESSION_SCOPES.includes(raw) && !FORBIDDEN_SCOPES.includes(raw) ? raw : null;
+    })
     .filter(Boolean);
   const res = await send({
     type: 'popup:sessionDraft',
@@ -1999,10 +2286,37 @@ act('draft-register', async () => {
   render();
 });
 
-act('session-revoke', async (node) => {
+/**
+ * 撤销会话密钥 = 粘滞操作，必须先过模态（F-21 / AC-33）。
+ * 三条后果必须逐条写全，缺一条就是把不可逆决定藏起来。
+ */
+act('session-revoke', (node) => {
+  const bindingId = node.getAttribute('data-id');
+  const origin = node.getAttribute('data-origin') ?? '—';
+  openModalNode('撤销该 origin 的会话密钥？', [
+    h('p', { text: `目标 origin：${origin}` }),
+    banner('bad', '撤销立即生效，且不可在本会话恢复', '该委托密钥立即失效；该 origin 本会话永久失效；此后它的每次签名都需重新输入口令。'),
+    h('p', { text: '只影响该 origin 的委托密钥，不动主密钥，也不影响其他站点的授权。' }),
+    gatedInput('revoke-confirm', { placeholder: '键入 REVOKE 以确认', token: 'REVOKE' }),
+    errLine('revoke-err'),
+    h('div', { class: 'btn-row', style: 'margin-top:12px' }, [
+      btn('取消', { cls: 'btn-g', attrs: { 'data-close': '1' } }),
+      gatedBtn('revoke-confirm', '确认撤销'),
+    ]),
+    h('p', { class: 'hint-s', style: 'text-align:left;margin-top:8px', text: '注：当前授权为本机登记（evidence=devnet_local_entry），链上 admission 未接线；撤销同样只作用于本机登记表。' }),
+  ]);
+  document.getElementById('revoke-confirm')?.focus();
+});
+
+act('session-revoke-confirm', async (node) => {
+  const err = document.getElementById('revoke-err');
+  if (err) err.textContent = '';
+  const typed = String(document.getElementById('revoke-confirm')?.value ?? '').trim().toUpperCase();
+  if (typed !== 'REVOKE') { if (err) err.textContent = '请键入 REVOKE 后确认'; return; }
   const res = await send({ type: 'popup:sessionRevoke', bindingId: node.getAttribute('data-id') });
-  if (res?.error) { toast(errorText(res.error)); return; }
-  toast('撤销为粘滞操作：该 origin 的签名一律拒绝');
+  if (res?.error) { if (err) err.textContent = errorText(res.error); return; }
+  closeAllSheets();
+  toast('撤销为粘滞操作：该 origin 的签名一律拒绝', 4000);
   render();
 });
 
@@ -2024,6 +2338,9 @@ act('revoke-origin', async (node) => {
 // 11 Proof Portal（弹窗内四步验证；stw○ wasm 耗时如实展示）
 // ---------------------------------------------------------------------------
 
+/** T-19 已耗时读数的定时器（运行中才存在；结束即停，不播完一圈）。 */
+let portalElapsedTimer = null;
+
 const PORTAL_STEPS = [
   { title: '拉取结算明细', hint: '网关 settlement 端点' },
   { title: '下载 STARK 证明', hint: 'proof 归档 payload' },
@@ -2035,6 +2352,24 @@ RENDERERS['zc-portal'] = async () => {
   const st = await send({ type: 'popup:getState' });
   const p = rt.portal;
   const running = p?.running === true;
+  // R-43：网关可用性改由 `GET /api/v1/status` 首屏主动探测，不再"靠请求
+  // 失败才发现不可用"。只读、失败不影响本页其余功能。
+  const gw = st?.gatewayUrl;
+  if (gw && !rt.portalStatus) rt.portalStatus = await fetchAssetSummary(gw).then((r) => ({ ...r, atMs: Date.now() })).catch((e) => ({ ok: false, code: 'GatewayUnreachable', error: e }));
+  const gwView = !gw
+    ? { ok: false, code: 'GatewayNotConfigured' }
+    : (rt.portalStatus && Date.now() - rt.portalStatus.atMs < 30_000 ? rt.portalStatus : null);
+  // T-19：>500ms 的长任务无法给真实分母（wasm 同步阻塞），因此用**已耗时读数**
+  // 替代进度条——进度条若无真实分母就是撒谎。100ms 递增，请求结束立即停。
+  clearInterval(portalElapsedTimer);
+  if (running) {
+    const t0 = rt.portalStartedAtMs ?? Date.now();
+    portalElapsedTimer = setInterval(() => {
+      const b = document.getElementById('portal-verify');
+      if (!b || rt.portal?.running !== true) { clearInterval(portalElapsedTimer); return; }
+      b.textContent = `验证中… ${((Date.now() - t0) / 1000).toFixed(1)}s`;
+    }, 100);
+  }
   mount(scr([
     subHeader('Proof Portal', { right: chip('STARK', 'ch-felt ch-xs') }),
     body([
@@ -2042,17 +2377,29 @@ RENDERERS['zc-portal'] = async () => {
         cls: 'mono', value: p?.binding ?? '', placeholder: '64 位 hex（不带 0x）',
         attrs: { style: 'font-size:11.5px', disabled: running ? '' : null },
       }), { aux: `网关 ${st?.gatewayUrl ?? '未配置'}` }),
-      btn(running ? '验证中…' : '验证这一手牌', { id: 'portal-verify', icon: 'shield', attrs: { 'data-act': 'portal-verify', disabled: running ? '' : null } }),
+      // AC-34：证明入口不得用盾牌图形（盾牌=安全保证的视觉暗示）；改用搜索。
+      btn(running ? '验证中…' : '验证这一手牌', { id: 'portal-verify', icon: 'search', attrs: { 'data-act': 'portal-verify', disabled: running ? '' : null } }),
+      cd('网关可用性', [
+        lr('端点', gw ?? '—', { hash: false }),
+        lr('状态', gwView
+          ? (gwView.ok ? `可用 · 资产摘要 ${Array.isArray(gwView.assets) ? gwView.assets.length : '—'} 项` : `${gwView.code ?? 'Unavailable'}（未伪造结果）`)
+          : '检测中…'),
+        h('p', { class: 'hint-s', style: 'text-align:left', text: '可用性来自 `GET /api/v1/status` 主动探测（30 秒内复用）。水位与资产摘要按网关返回原样展示，不推进。' }),
+      ]),
       p ? cd('验证步骤', [h('div', { class: 'steps' }, p.steps.map((s, i) => h('div', { class: `stp ${s.state}`, id: `portal-step-${i}` }, [
-        h('i', {}, [s.state === 'done' ? ic('check', 'ic ic-xs') : s.state === 'run' ? ic('refresh', 'ic ic-xs') : s.state === 'bad' ? ic('x', 'ic ic-xs') : String(i + 1)]),
+        h('i', {}, [s.state === 'done' ? ic('check', 'ic ic-xs') : s.state === 'run' ? ic('refresh', 'ic ic-xs spin') : s.state === 'bad' ? ic('x', 'ic ic-xs') : String(i + 1)]),
         h('div', {}, [h('b', { text: s.title }), h('span', { text: s.sub ?? '' })]),
       ])))], { more: `${p.steps.filter((s) => s.state === 'done').length}/${PORTAL_STEPS.length}`, moreAttrs: {} }) : null,
       p?.settlement ? cd('结算摘要', [
-        lr('hand_binding', shortAddr(p.settlement.hand_binding ?? '', 10, 8)),
+        // R-29：tx / hb / req / rc 四类标识符在五个屏里反复出现且前缀互相
+        // 撞车，必须具名，否则跨屏核对不可能。
+        lr('hand_binding', idText('handBinding', p.settlement.hand_binding ?? ''), { hash: true }),
         lr('table_id', p.settlement.table_id ?? '—'),
         lr('底池', `${fmtAmount(p.settlement.pot ?? '0')}`),
         lr('rake', `${fmtAmount(p.settlement.rake?.total ?? '0')}（层级 ${p.settlement.level ?? '—'}）`),
-        lr('payout_root', shortAddr(p.settlement.payout_root ?? '', 10, 8)),
+        // R-16：复验会重算 payout_root（`payout_root_recomputed`），但**是否
+        // 回传展示字段未确认**——取不到就 `—`，禁止用占位 hash 填充。
+        lr('payout_root', p.settlement.payout_root ? idText('payoutRoot', p.settlement.payout_root) : '—（网关未回传该字段）', { hash: true }),
         lr('inputs / payouts', `${(p.settlement.inputs ?? []).length} / ${(p.settlement.payouts ?? []).length}`),
         h('p', { class: 'hint-s', style: 'text-align:left;margin-top:6px', text: '层级是网关水位声明：原样展示、不推进。' }),
       ]) : null,
@@ -2082,7 +2429,14 @@ RENDERERS['zc-portal'] = async () => {
         p.conclusion === 'verified' ? '验证通过' : `未达「已验证」：${p.conclusion === 'partial' ? '存在跳过/失败的阶段' : '结论不成立'}`,
         '两项验证相互独立：任一阶段被跳过或拒绝，整体结论就不是 fully verified（fail-closed，不合并成"看起来通过"）。',
       ) : null,
-      banner('info', '性能如实标注', '浏览器内完整验证约 1.7–2.0s，超出 500ms 交互预算：进度逐步展示，不伪装即时完成。'),
+      // AC-25：超预算标注必须由**实测耗时**推出，不是常驻文案。
+      banner('info', '性能如实标注', (() => {
+        const totalMs = (p?.stark?.elapsedMs ?? 0) + (p?.verdictElapsedMs ?? 0);
+        const note = overBudgetNote(totalMs);
+        return note
+          ? `${note}。基准 p50 1.70–1.80s / p95 1.98s：进度逐步展示，不伪装即时完成。`
+          : `本次复验 ${(totalMs / 1000).toFixed(2)}s，在 500ms 预算内（历史基准 p50 1.70–1.80s）。`;
+      })()),
       banner('info', '验证在本地完成', '证明文件与结算明细由网关拉取，复验在 wallet-core / stwo wasm 本地执行；不依赖服务端「已验证」结论。'),
       mi({ iconName: 'ext', title: '在独立页打开完整 Portal', sub: 'portal/portal.html · 支持权限授予与逐阶段明细', attrs: { 'data-act': 'portal-open' } }),
       errLine('portal-err'),
@@ -2106,6 +2460,8 @@ act('portal-open', () => {
 });
 
 act('portal-verify', async () => {
+  rt.portalStartedAtMs = Date.now();
+  track('portal_verify_start', { bindingPrefix: String(document.getElementById('portal-binding')?.value.trim().slice(0, 8) ?? ''), from: rt.screen });
   const binding = document.getElementById('portal-binding').value.trim();
   const st = await send({ type: 'popup:getState' });
   const gateway = st?.gatewayUrl;
@@ -2122,7 +2478,11 @@ act('portal-verify', async () => {
     if (!b.ok) throw { code: b.code, reason: b.reason };
     steps[0].state = 'run';
     bump({});
+    // 分步耗时必须**实测**（§1.3 的 p95 取数口径）；写成 `res.ms ?? 0` 会把
+    // 步骤耗时恒记为 0，等于制造一个看起来正常的空指标。
+    const t1 = Date.now();
     const s = await fetchSettlement(gateway, b.binding);
+    track('portal_verify_step', portalStepProps({ step: 1, ok: s.ok === true, ms: Date.now() - t1, gatewayStatus: s.ok ? '200' : (s.code ?? '—') }));
     if (!s.ok) throw { code: s.code, reason: s.reason };
     steps[0].state = 'done';
     steps[0].sub = `网关 ${new URL(gateway).host} · 水位 ${s.detail?.level ?? '—'}`;
@@ -2131,7 +2491,12 @@ act('portal-verify', async () => {
     steps[1].state = 'run';
     bump({});
     let proof = null;
+    const t2 = Date.now();
     const pf = await fetchProof(gateway, b.binding);
+    track('portal_verify_step', portalStepProps({
+      step: 2, ok: pf.ok === true, ms: Date.now() - t2,
+      payloadBytes: pf.ok ? pf.proof?.payloadLen : null, engine: pf.proof?.engine, gatewayStatus: pf.ok ? '200' : (pf.code ?? '—'),
+    }));
     if (pf.ok) proof = pf.proof;
     else if (pf.code !== 'ProofNotFound') throw { code: pf.code, reason: pf.reason };
     steps[1].state = 'done';
@@ -2145,6 +2510,14 @@ act('portal-verify', async () => {
     const raw = proof?.payloadB64
       ? await verifyStarkProof(proof.payloadB64, verifyCanonicalArchive)
       : { ok: false, skipped: true, code: 'ProofNotFound', reason: '无归档证明，STARK 阶段跳过' };
+    track('portal_verify_step', portalStepProps({
+      step: 3,
+      ok: raw.ok === true,
+      ms: raw.stark?.elapsedMs ?? raw.elapsedMs ?? 0,
+      engine: 'stwo',
+      // skipped（无归档证明）与 rejected 是两回事，都塞进 ok 就看不出差别。
+      gatewayStatus: raw.skipped ? 'skipped' : raw.ok ? 'ok' : (raw.code ?? 'rejected'),
+    }));
     const stark = {
       ok: raw.ok === true,
       skipped: raw.skipped === true,
@@ -2161,7 +2534,9 @@ act('portal-verify', async () => {
     bump({});
     // 复验语义全在 wasm：callCore 失败抛 WalletCoreError{code, detail}，
     // verifyLocally 归一为 {ok:false, code, reason}——不二次包装。
+    const t4 = Date.now();
     const v = await verifyLocally(s.detail, (json) => callCore('wallet_verify_settlement_detail', json));
+    track('portal_verify_step', portalStepProps({ step: 4, ok: v.ok === true, ms: v.elapsedMs ?? (Date.now() - t4), engine: 'wallet-core/verifier' }));
     if (!v.ok) throw { code: v.code, reason: v.reason, stark, v };
     steps[3].state = 'done';
     steps[3].sub = `复验 ${String(v.verdict?.verdict ?? '—')} · ${v.elapsedMs.toFixed(0)} ms`;
@@ -2170,6 +2545,13 @@ act('portal-verify', async () => {
       ? 'verified'
       : v.verdict?.verdict === 'verified' ? 'partial' : 'failed';
     Object.assign(rt.portal, { steps, verdict: v.verdict, verdictElapsedMs: v.elapsedMs, conclusion, running: false });
+    track('portal_verify_result', {
+      verdict: conclusion,
+      totalMs: (stark.elapsedMs ?? 0) + (v.elapsedMs ?? 0),
+      overBudget: (stark.elapsedMs ?? 0) + (v.elapsedMs ?? 0) > 500,
+      payoutRootPresent: Boolean(s.detail?.payout_root),
+    });
+    rt.sealAnim = true; // T-10：结论已返回，此刻才允许落章（A-1②）
     render();
     await appendProofLog({ binding: b.binding, conclusion, elapsedMs: v.elapsedMs, starkElapsedMs: stark.elapsedMs, atMs: Date.now() });
   } catch (e) {
@@ -2178,6 +2560,7 @@ act('portal-verify', async () => {
     if (e.stark) rt.portal.stark = e.stark;
     if (e.v?.verdict) { rt.portal.verdict = e.v.verdict; rt.portal.verdictElapsedMs = e.v.elapsedMs; }
     Object.assign(rt.portal, { running: false, conclusion: 'failed', error: { code: e.code ?? 'Error', reason: e.reason ?? String(e) } });
+    track('portal_verify_result', { verdict: 'failed', totalMs: 0, overBudget: false, payoutRootPresent: false });
     render();
     await appendProofLog({ binding: rt.portal.binding, conclusion: 'failed', elapsedMs: 0, atMs: Date.now() });
   }
@@ -2214,6 +2597,9 @@ RENDERERS['zc-receipts'] = async () => {
       h('div', { 'data-pane': 'all' }, pane(buckets.all)),
       h('div', { 'data-pane': 'pend', style: 'display:none' }, pane(buckets.pend)),
       h('div', { 'data-pane': 'done', style: 'display:none' }, pane(buckets.done)),
+      // R-11：上限 20 且**静默丢最旧**是"数据凭空消失"，必须常驻说明。
+      h('p', { class: 'hint-s', style: 'text-align:left;margin-top:2px', text: capacityNotice('receipts') }),
+      buckets.stale.length > 0 ? h('p', { class: 'hint-s', style: 'text-align:left', text: `超期未 included ${buckets.stale.length} 条：分桶不因超期改变，仅以红色芯片标出。` }) : null,
       h('p', {
         class: 'hint-s', style: 'text-align:left;margin-top:2px',
         text: '投递状态 signed → seen → included 单向推进，与凭证阶梯 pending → proven → finalized 是两套独立状态。超 deadline 存在 ForceInclude 协议路径，但当前版本只展示状态、不实现提交（按钮保持禁用）。',
@@ -2222,20 +2608,55 @@ RENDERERS['zc-receipts'] = async () => {
   ], { aria: '交易回执' }));
 };
 
+/**
+ * 不可提交原因的渲染（R-07 / AC-08）。
+ *
+ * 有性质标注时，策略型原因必须带「本版本不会开放」——三条原因同权重会让
+ * 用户把"等一会儿就能提"读进一个本版本永不开放的状态里。
+ */
+function reasonRows(details, reasons) {
+  const list = Array.isArray(reasons) ? reasons : [];
+  const meta = Array.isArray(details) ? details : [];
+  return list.map((text, i) => {
+    const d = meta[i];
+    const qualifier = d?.qualifier ?? (d?.kind === 'policy' ? '本版本不会开放' : null);
+    return h('div', { class: 'rsn' }, [
+      ic('x', 'ic ic-s'),
+      h('span', { text }),
+      qualifier ? chip(qualifier, `ch-xs ${d?.kind === 'policy' ? 'ch-bad' : 'ch-amb'}`) : null,
+    ]);
+  });
+}
+
 function receiptRow(r) {
   const c = receiptChip(r);
+  const kind = receiptKindLabel(r.kind);
+  // R-24 / AC-27：回执结构本身**没有 amount 字段**，金额只能由 inputs[].amount
+  // 经 BigInt 求和推导；任一输入非十进制即整体显示 `—`（不报半截合计、不报 0）。
+  const amount = receiptAmount(r);
+  const evidence = receiptEvidenceText(r.evidence ?? r.view?.evidence);
   return h('div', {}, [
     txRow({
       iconName: r.status === 'included' ? 'check' : r.status === 'seen' ? 'receipt' : r.view?.pastDeadline ? 'warn' : 'clock',
       ticCls: r.status === 'included' ? 'ok' : r.status === 'seen' ? 'blue' : r.view?.pastDeadline ? 'bad' : 'warn',
-      name: `${kindLabel(r.kind)} · ${shortAddr(r.digest, 10, 8)}`,
+      name: `${kind.text} · ${idText('digest', r.digest)}`,
       sub: `${r.chainId ?? '—'} · ${relTime(r.signedAtMs)}${r.view?.pastDeadline ? ' · 超出 deadline' : ''}`,
+      amount: amount.ok
+        ? amt(`${r.kind === 'transfer' ? '-' : ''}${fmtDisplay(amount.total, 'play')}`)
+        : '—',
+      amountCls: amount.ok ? '' : 'dim',
       chipNode: chip(c.text, `ch-xs ${c.cls}`),
     }),
+    // R-33：evidence 必须**常驻可见**。绿色 `included` 若不写"本机手工登记"，
+    // 就会被读成"链上已确认"——这是状态语义失守，不是文案瑕疵（AC-27）。
+    h('div', { class: 'hint-s', style: 'text-align:left;margin:0 0 4px', text: `证据：${evidence}` }),
+    r.tableId != null ? h('div', { class: 'hint-s', style: 'text-align:left;margin:0 0 4px', text: `桌号 ${r.tableId}（协议 table_id 为非负整数）` }) : null,
+    !kind.known ? h('div', { class: 'hint-s', style: 'text-align:left;margin:0 0 4px', text: `未知回执类型：原词 ${kind.raw ?? '—'}（不翻译、不猜测）` }) : null,
     r.view?.hint ? h('div', { class: 'errx', style: 'color:var(--amb);margin:0 0 6px', text: r.view.hint }) : null,
     r.view?.pastDeadline ? btn('ForceInclude 未开放', { cls: 'btn-g btn-sm', disabled: true, attrs: { title: '本版本仅展示协议状态，提交路径未实现', style: 'margin:2px 0 8px' } }) : null,
     h('details', {}, [
       h('summary', { text: '导入 SeenReceipt / 登记 included' }),
+      h('p', { class: 'hint-s', style: 'text-align:left', text: '「登记 included」是**本机手工标记**，不代表链上已证实：本扩展不实现提交路径、不验签。' }),
       input(`seen-${shortAddr(r.digest, 6, 4)}`, { placeholder: 'SeenReceipt JSON（chain_id/tx_hash/seen_at_ms/validator_pubkey/signature）', cls: 'mono', attrs: { style: 'font-size:10.5px;margin:7px 0' } }),
       errLine(`rc-err-${shortAddr(r.digest, 6, 4)}`),
       btn('标记 seen（回执未验签，如实标注）', { cls: 'btn-s btn-sm', attrs: { 'data-act': 'receipt-seen', 'data-id': r.digest, style: 'width:100%;margin-bottom:6px' } }),
@@ -2360,7 +2781,7 @@ RENDERERS.send = async () => {
       chain === 'evm' ? field('金额', amountInput('evm-tx-value', { value: formVal('evm-tx-value'), unit: 'ETH', tkCls: '' }), {
         aux: info ? `可用 ${fmtAmount(info.balanceHuman)} · ` : '未查询余额',
         auxBtn: info ? { text: 'MAX', attrs: { 'data-act': 'evm-max', id: 'evm-tx-max' } } : null,
-      }) : field('金额', amountInput('stk-tx-amount', { value: formVal('stk-tx-amount'), unit: rt.stkInfo?.tokenSymbol ?? 'ETH', tkCls: '' }), {
+      }) : field('金额', amountInput('stk-tx-amount', { value: formVal('stk-tx-amount'), unit: stkUnit(stkNetwork(st), rt.stkInfo), tkCls: '' }), {
         aux: info ? `可用 ${fmtAmount(info.balanceHuman)} · ` : '未查询余额',
       }),
       chain === 'evm'
@@ -2605,11 +3026,16 @@ RENDERERS.history = async () => {
     body([
       h('div', { class: 'row', style: 'margin-bottom:12px' }, [
         h('div', { class: 'grow' }, [
-          h('b', { style: 'font-size:12px;font-weight:600', text: '合并 Explorer 数据' }),
+          h('b', { style: 'font-size:12px;font-weight:600', text: '用第三方 Explorer 补充展示' }),
           h('div', { class: 'ar-s', text: '本地账本 + Etherscan 兼容 txlist' }),
         ]),
-        h('span', { class: `sw2 ${wantExplorer ? 'on' : ''}`, role: 'switch', 'aria-checked': wantExplorer ? 'true' : 'false', id: `${chain}-history-explorer`, 'data-act': `${chain}-history-explorer` }),
+        h('span', { class: `sw2 ${wantExplorer ? 'on' : ''}`, role: 'switch', 'aria-checked': wantExplorer ? 'true' : 'false', tabindex: '0', id: `${chain}-history-explorer`, 'data-act': `${chain}-history-explorer` }),
       ]),
+      // R-14：这不是"内部能力开关"——启用即把**本账户地址**发给第三方
+      // Explorer。隐私告知必须常显，不能藏在 title 里。
+      h('p', { class: 'hint-s', style: 'text-align:left', text: wantExplorer
+        ? '已启用：本账户地址将作为查询参数发送给第三方 Explorer API。两者结果冲突时以链上回执为准，差异原样列在详情里，不做静默合并。'
+        : '未启用：仅展示本机账本记录，不向第三方发送地址。启用需无 Explorer API key 时该项不可用（如实显示，不静默失败）。' }),
       h('div', { class: 'seg' }, [
         h('button', { class: 'on', type: 'button', 'data-seg': 'all', id: `h-seg-all`, text: `全部 ${buckets.all.length}` }),
         h('button', { type: 'button', 'data-seg': 'tx', id: `h-seg-tx`, text: `转账 ${buckets.tx.length}` }),
@@ -2895,7 +3321,8 @@ RENDERERS.proofs = async (ov) => {
   const buckets = receiptBuckets(receiptsRes?.receipts ?? []);
   const waitReverify = buckets.all.filter((r) => r.status !== 'included').slice(0, 5);
   const weakest = ladder?.weakest ?? null;
-  const steps = ladderSteps({ current: weakest, outcome: weakest && weakest !== 'finalized' ? 'wait' : 'ok' });
+  const outcome = ladderOutcome({ weakest, required: 'finalized' });
+  const steps = ladderSteps({ current: weakest, outcome, required: 'finalized' });
   const reachedFinalized = ladder?.counts?.finalized ?? 0;
 
   mount(scr([
@@ -2903,7 +3330,7 @@ RENDERERS.proofs = async (ov) => {
       kind: 'Proofs',
       netText: 'engine stwo',
       netAct: null,
-      addrText: `最近 ${log.length} 次本地复验 · ${ladder ? `${ladder.total} 张 note 带凭证` : '解锁后可见 note 级凭证'}`,
+      addrText: `${proofLogSummary(log).text} · ${ladder ? `${ladder.total} 张 note 带凭证` : '解锁后可见 note 级凭证'}`,
     }),
     body([
       cd('凭证分布', [
@@ -2918,7 +3345,7 @@ RENDERERS.proofs = async (ov) => {
       waitReverify.length === 0
         ? emptyBox('无待复验项：所有回执都已登记为 included')
         : cd(null, waitReverify.map((r) => mi({
-          iconName: r.view?.pastDeadline ? 'bolt' : 'shield',
+          iconName: r.view?.pastDeadline ? 'bolt' : 'receipt',
           icStyle: r.view?.pastDeadline ? 'color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)' : '',
           title: `${kindLabel(r.kind)} · ${shortAddr(r.digest, 8, 6)}`,
           sub: r.view?.pastDeadline ? '超出 deadline · ForceInclude 仅协议路径（未实现提交）' : `${r.status} 未 included · ${relTime(r.signedAtMs)}`,
@@ -2934,7 +3361,7 @@ RENDERERS.proofs = async (ov) => {
         )), { cls: 'rows' }),
       banner('info', '验证在本地完成', '证明文件与结算明细由网关拉取，复验在 wallet-core / stwo wasm 本地执行；不依赖服务端「已验证」结论。'),
       h('p', { class: 'hint-s', style: 'text-align:left', text: '阶梯是凭证状态（锚定在 note 上）；回执的 signed → seen → included 是投递状态。两者笔触刻意不同，不得混用。' }),
-      btn('打开 Proof Portal', { cls: 'btn-s', id: 'proofs-open-portal', attrs: { 'data-nav': 'zc-portal', style: 'margin-top:10px' }, icon: 'shield' }),
+      btn('打开 Proof Portal', { cls: 'btn-s', id: 'proofs-open-portal', attrs: { 'data-nav': 'zc-portal', style: 'margin-top:10px' }, icon: 'search' }),
     ]),
     tabsBar(),
   ], { aria: '凭证簿' }));
@@ -2964,6 +3391,8 @@ RENDERERS.settings = async (ov) => {
           h('span', { class: 'grow' }, [h('b', { text: '金额显示' }), h('span', { text: '公共场所隐藏余额数字（只影响展示）' })]),
           h('span', { class: `sw2 ${rt.hideAmount ? 'on' : ''}`, role: 'switch', 'aria-checked': rt.hideAmount ? 'true' : 'false', 'data-act': 'toggle-amount', id: 'set-hide' }),
         ]),
+        mi({ iconName: 'key', title: '本地诊断事件', sub: '默认关闭 · 仅存本机、可一键清空；禁采私钥 / 助记词 / nullifier / 口令 / 完整地址', right: chip(telemetry.isEnabled() ? '已开启' : '未开启', `ch-xs ${telemetry.isEnabled() ? 'ch-felt' : ''}`), attrs: { 'data-act': 'toggle-telemetry', id: 'set-telemetry' } }),
+        h('p', { class: 'hint-s', style: 'text-align:left', text: telemetry.isEnabled() ? `本机已缓冲 ${telemetry.stats().buffered} 条事件（容量 ${telemetry.stats().capacity}，超出丢最旧）。事件与属性名是封闭枚举，未登记字段一律丢弃。` : '关闭时不记录任何事件，且缓冲区立即清空。' }),
         mi({ iconName: 'wallet', title: '货币计价', sub: '无价格源 / 预言机接入：不做任何法币折算', right: chip('未接入', 'ch-xs ch-bad'), attrs: { 'data-toast': '价格源未接入：界面不显示折算值，避免给出看似精确的假数字' } }),
       ], { cls: 'rows' }),
       secT('网关'),
@@ -2990,7 +3419,7 @@ RENDERERS.settings = async (ov) => {
       cd(null, [
         h('div', { class: 'mi' }, [
           h('span', { class: 'mi-ic' }, [ic('info', 'ic ic-s')]),
-          h('span', { class: 'grow' }, [h('b', { text: '版本' }), h('span', { text: `MV3 · DevNet 形态 · provider ${ov.providerVersion ?? '—'}` })]),
+          h('span', { class: 'grow' }, [h('b', { text: '版本' }), h('span', { text: `MV3 · DevNet 形态 · 适配器版本 ${ov.providerVersion ?? '—'}` })]),
           chip(manifest.version, 'ch-xs mono'),
         ]),
         mi({ iconName: 'ext', title: 'Proof Portal 独立页', sub: '逐阶段明细 / 主机权限授予', attrs: { 'data-act': 'portal-open' } }),
@@ -3020,15 +3449,13 @@ $view.addEventListener('click', (e) => {
   if (e.target.closest('[data-open="mdl-cap"]')) ensureCapMatrix();
 });
 
-const CAP_RED_LINES = [
-  ['ZChain', 'GAME 域可签可转；REAL 仅隔离展示，提现预览 canSubmit 恒 false'],
-  ['EVM', '转账与合约写入可签名广播（EIP-155 + chainId 校验）；不签 note spend'],
-  ['Starknet', 'invoke v1 + devnet 水龙头；SNIP-12 授权面已备，链上 admission 未开放'],
-  ['网络', 'mainnet 刻意不注册 → NetworkUnsupported；devnet/testnet 才可选'],
-  ['边界', '盲签拒绝；私钥 / 助记词 / nullifier 不出边界；网关水位原样展示、不推进'],
-  ['会话', '三层共用口令、会话彼此独立；后台被回收即锁定（fail-closed）'],
-];
 
+/**
+ * 能力矩阵行（R-26 / AC-36）：来自 `common/capability_matrix.js` 的
+ * `CAPABILITY_ROWS` **单一常量**。此前 popup 内另写一份 `CAP_RED_LINES`，
+ * 其中"mainnet 刻意不注册"未限定层级——EVM 层实际已注册 Ethereum 0x1，
+ * 该表述会让 EVM 用户误判主网不可用。现在只有一处可改。
+ */
 async function ensureCapMatrix() {
   const bodyEl = document.getElementById('cap-body');
   if (!bodyEl || !bodyEl.querySelector('.empty') || capLoader.busy) return;
@@ -3050,7 +3477,13 @@ async function ensureCapMatrix() {
   }
   const m = capLoader.cache;
   bodyEl.replaceChildren();
-  for (const [k, v] of CAP_RED_LINES) bodyEl.appendChild(h('div', { class: 'rsn' }, [chip(k, 'ch-xs mono'), h('span', { text: v })]));
+  for (const row of CAPABILITY_ROWS) {
+    bodyEl.appendChild(h('div', { class: 'rsn', style: 'display:block' }, [
+      chip(row.layer, 'ch-xs mono'),
+      h('span', { text: ` ${row.can}` }),
+      h('div', { class: 'hint-s', style: 'text-align:left;margin-left:2px', text: `不具备 / 红线：${row.cannot}` }),
+    ]));
+  }
   for (const row of m.rows ?? []) {
     bodyEl.appendChild(h('div', { class: 'rsn', style: 'margin-top:6px' }, [
       ic('swap', 'ic ic-s'),
@@ -3060,8 +3493,20 @@ async function ensureCapMatrix() {
   capLoader.busy = false;
 }
 
+act('toggle-telemetry', async () => {
+  const next = !telemetry.isEnabled();
+  telemetry.setEnabled(next); // 关闭即清空（不留"先记着以后再看"的余地）
+  await chrome.storage.local.set({ [TELEMETRY_ENABLED_KEY]: next, [TELEMETRY_BUFFER_KEY]: next ? telemetry.list() : [] });
+  track('settings_change', { key: 'telemetry', from: String(!next), to: String(next) });
+  toast(next ? '已开启本地诊断记录（仅本机）' : '已关闭并清空本地诊断记录');
+  render();
+});
+
 act('toggle-ground', () => {
+  const from = rt.ground;
   rt.ground = nextGround(rt.ground);
+  track('ground_switch', { to: rt.ground });
+  track('settings_change', { key: 'ground', from, to: rt.ground });
   applyGround();
   persistPrefs();
   render();
@@ -3099,6 +3544,8 @@ act('backup-export', async () => {
 // ---------------------------------------------------------------------------
 
 loadPrefs();
+// 遥测：默认关闭，开启后才记录；popup_open 每次打开只记一次（§6.4）。
+loadTelemetry();
 render();
 
 

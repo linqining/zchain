@@ -151,6 +151,9 @@ export async function fetchSettlement(gateway, binding, fetchImpl = fetch, timeo
  * 字节；engine 优先取响应体字段，跨源下 X-Zchain-Engine 头仅在已授予主机权限
  * 时可读，读到则以响应头为准）。
  */
+/** 可验证归档体积上限（R-20）。5 MB 是 PRD 建议值，需评审确认。 */
+export const MAX_PROOF_BYTES = 5 * 1024 * 1024;
+
 export async function fetchProof(gateway, binding, fetchImpl = fetch, timeoutMs = DEFAULT_FETCH_TIMEOUT_MS) {
   if (!gateway) {
     return { ok: false, code: 'GatewayNotConfigured', reason: '当前网络未配置网关 URL（在下方设置）' };
@@ -172,6 +175,19 @@ export async function fetchProof(gateway, binding, fetchImpl = fetch, timeoutMs 
   }
   if (typeof body.payload_b64 !== 'string') {
     return { ok: false, code: 'GatewayHttpError', reason: 'proof payload missing' };
+  }
+  // R-20：网关侧只限时不限体积（`DEFAULT_FETCH_TIMEOUT_MS` 管不了大对象），
+  // 而这份 payload 要在**本进程内**解码 + 送进 wasm 验证。没有上限时，一个
+  // 畸形/超大归档会直接卡死 popup（380×600 的 MV3 文档没有恢复余地）。
+  // base64 → 字节：`len*3/4` 减去 padding，这里按上界估算即可（宁可早拒）。
+  const payloadBytes = Math.floor(body.payload_b64.length * 3 / 4);
+  if (payloadBytes > MAX_PROOF_BYTES) {
+    return {
+      ok: false,
+      code: 'ProofTooLarge',
+      reason: `证明体积 ${(payloadBytes / 1024).toFixed(1)} KB 超出可验证上限 ${(MAX_PROOF_BYTES / 1024 / 1024).toFixed(1)} MB`,
+      payloadBytes,
+    };
   }
   // X-Zchain-Engine 响应头：跨源可读性取决于 CORS expose / 主机权限；拿得到
   // 就用头（更权威），拿不到回落响应体 engine 字段。

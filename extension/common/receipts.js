@@ -26,9 +26,14 @@ export const MAX_RECEIPTS = 20;
 
 /**
  * 登记一条回执（签名成功后调用；digest 是确认摘要，chainId 参与展示）。
- * @returns {{ok:true, store}} | {ok:false, code, reason}
+ * @returns {{ok:true, store, dropped:number}} | {ok:false, code, reason}
+ *
+ * `dropped` = 本次因 `MAX_RECEIPTS` 滚动上限被丢弃的条数（R-11）。此前
+ * `capStore` 静默删最旧，用户看到的是"数据凭空消失"；现在上限可被界面
+ * 如实陈述（`capacityNotice('receipts')`），并作为 `receipt_capacity_hit`
+ * 埋点的触发依据。
  */
-export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadlineMs, inputs }, now) {
+export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadlineMs, inputs, tableId }, now) {
   if (typeof digest !== 'string' || digest.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(digest)) {
     return { ok: false, code: 'InvalidArgument', reason: 'digest must be 64 hex' };
   }
@@ -37,8 +42,13 @@ export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadline
     ...store,
     [digest]: {
       digest: digest.toLowerCase(),
+      // kind 白名单见 RECEIPT_KINDS；未列入者原样保留，由 receiptKindLabel
+      // 决定"中文标签"还是"未知操作 · 原词"（不造名称，R-25）。
       kind: typeof kind === 'string' ? kind : 'unknown',
       chainId: typeof chainId === 'string' ? chainId : null,
+      // 桌号（R-25）：只接受**非负整数**。稿面的 `8♠` / `#A3F2` 是装饰性
+      // 写法，不可作为可提交值——花名与 hex 都会在链上核对时失去意义。
+      tableId: normalizeTableId(tableId),
       signedAtMs,
       deadlineMs: Number.isSafeInteger(deadlineMs) && deadlineMs > 0 ? deadlineMs : DEFAULT_INCLUSION_DEADLINE_MS,
       status: 'signed',
@@ -52,18 +62,36 @@ export function openReceipt(store, { digest, kind, chainId, signedAtMs, deadline
       openedAt: now,
     },
   };
-  return { ok: true, store: capStore(next) };
+  const capped = capStore(next);
+  return { ok: true, store: capped.store, dropped: capped.dropped };
 }
 
-/** 收据输入 note 归一：只留 {commitment, amount}，其余丢弃（防脏字段入库）。 */
+/**
+ * 收据输入 note 归一：只留 `{commitment, amount}`，其余丢弃（防脏字段入库）。
+ *
+ * ⚠ amount 一律保留为**十进制字符串**，不做 `Number()` 转换（R-24 / §6.1）：
+ * note 金额是 u64（上限 18446744073709551615），超过 `Number.MAX_SAFE_INTEGER`
+ * 后浮点会**静默**丢精度——而这张表既驱动软锁金额，也驱动"可用余额"扣减。
+ * 非法值记 `null`（不猜 0），由 `pendingSpendMap` 在占用表里按 0 处理但
+ * `receiptAmount` 会如实返回 `AmountInvalid`。
+ */
 function normalizeReceiptInputs(inputs) {
   if (!Array.isArray(inputs)) return [];
   return inputs
     .filter((i) => i && typeof i.commitment === 'string' && i.commitment.length > 0)
-    .map((i) => ({
-      commitment: i.commitment,
-      amount: Number.isFinite(Number(i.amount)) ? Number(i.amount) : null,
-    }));
+    .map((i) => {
+      const raw = typeof i.amount === 'string' ? i.amount.trim() : String(i.amount ?? '');
+      return { commitment: i.commitment, amount: /^\d+$/.test(raw) ? raw : null };
+    });
+}
+
+/** 桌标识归一（R-25）：`tableAllowlist` 与协议 `table_id` 都是**非负整数**。 */
+function normalizeTableId(value) {
+  if (value == null || value === '') return null;
+  const s = String(value).trim();
+  if (!/^\d+$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 /**
@@ -73,7 +101,7 @@ function normalizeReceiptInputs(inputs) {
  * inclusion 回路，若不软锁，同一批 note 可被无限次签名转出（双花脚枪）。
  * included = 链上已结算：软锁退出（真实部署由 core 同步接管最终状态）。
  *
- * @returns {Map<string, number>} commitment -> 在途占用金额
+ * @returns {Map<string, string>} commitment -> 在途占用金额（十进制字符串；脏值为 '0'）
  */
 export function pendingSpendMap(store) {
   const map = new Map();
@@ -82,12 +110,97 @@ export function pendingSpendMap(store) {
     for (const inp of Array.isArray(entry.inputs) ? entry.inputs : []) {
       if (typeof inp?.commitment !== 'string' || inp.commitment.length === 0) continue;
       if (!map.has(inp.commitment)) {
-        map.set(inp.commitment, Number.isFinite(inp.amount) ? inp.amount : 0);
+        map.set(inp.commitment, /^\d+$/.test(String(inp.amount ?? '')) ? String(inp.amount) : '0');
       }
     }
   }
   return map;
 }
+
+/** 软锁占用合计（BigInt，返回十进制字符串）——R-24 的求和出口。 */
+export function pendingSpendSum(map) {
+  let total = 0n;
+  for (const v of (map ?? new Map()).values?.() ?? []) {
+    const s = String(v ?? '0');
+    if (/^\d+$/.test(s)) total += BigInt(s);
+  }
+  return total.toString();
+}
+
+/**
+ * 单条回执的支出金额（R-24 / AC-04）。
+ *
+ * 回执数据结构**本身没有 amount 字段**（`openReceipt` 只存 digest/kind/
+ * chainId/时间戳/inputs/evidence），因此账簿交易行的金额只能由
+ * `inputs[].amount` **求和推导**。求和必须走 BigInt：任一输入非十进制即
+ * 整体返回 `AmountInvalid`，界面据此显示 `—`，**不得**显示 0 或半截合计。
+ * @returns {{ok:true,total:string}|{ok:false,code:string,bad:string|null}}
+ */
+export function receiptAmount(receipt) {
+  const inputs = Array.isArray(receipt?.inputs) ? receipt.inputs : [];
+  if (inputs.length === 0) return { ok: false, code: 'NoInputs', bad: null };
+  let total = 0n;
+  for (const inp of inputs) {
+    const s = String(inp?.amount ?? '');
+    if (!/^\d+$/.test(s)) return { ok: false, code: 'AmountInvalid', bad: s || null };
+    total += BigInt(s);
+  }
+  return { ok: true, total: total.toString() };
+}
+
+/**
+ * `kind` 白名单（R-25）。**不做拒绝**：上游 `validation.js` 才是签名边界，
+ * 这里只负责"已知 kind 给中文标签、未知 kind 原样透出等宽原词"，
+ * 避免出现"界面无中生有地写『开桌』"这类无来源标题。
+ */
+export const RECEIPT_KINDS = ['transfer', 'buy_in', 'settle', 'withdraw'];
+
+const KIND_LABEL = {
+  transfer: '转账',
+  buy_in: '买入',
+  settle: '结算',
+  withdraw: '提现',
+};
+
+/** 回执标题：已知 kind → 中文标签；未知 → `—` + 原词（不造名称）。 */
+export function receiptKindLabel(kind) {
+  if (typeof kind !== 'string' || kind.length === 0) return { text: '未知操作', known: false, raw: null };
+  if (KIND_LABEL[kind]) return { text: KIND_LABEL[kind], known: true, raw: kind };
+  return { text: `未知操作 · ${kind.slice(0, 24)}`, known: false, raw: kind };
+}
+
+/**
+ * evidence 的诚实文案（R-33 / AC-27 / AC-28）。
+ *
+ * 0.6.1 **不实现提交路径**（无 tx 广播、无 receipt 验签），所以：
+ * - `included` = `local_manual_entry` → 本机手工登记，**未经链上核对**；
+ * - `seen` 未验签 → 明写未验签，层级不因此推进。
+ * 绿色 `included` 芯片必须配这句话，否则会被读成"链上已确认"。
+ */
+export const EVIDENCE_TEXT = {
+  not_provided: '网关未提供证据（未验签）',
+  receipt_unverified_signature: '已见但验签未通过（未验签，不推进层级）',
+  receipt_unverified: '已见但未验签（0.2 无 wasm 验签入口）',
+  local_manual_entry: '本机手工登记，未经链上核对',
+};
+
+export function receiptEvidenceText(evidence) {
+  const raw = typeof evidence === 'string' ? evidence : null;
+  const keys = raw ? [raw] : Object.keys(evidence ?? {});
+  const seen = typeof evidence?.seen === 'string' ? evidence.seen : null;
+  const included = typeof evidence?.included === 'string' ? evidence.included : null;
+  const parts = [];
+  if (included) parts.push(`${included}：${EVIDENCE_TEXT[included] ?? included}`);
+  if (seen && !included) parts.push(`${seen}：${EVIDENCE_TEXT[seen] ?? seen}`);
+  if (parts.length === 0) {
+    const known = keys.filter((k) => EVIDENCE_TEXT[k]);
+    return known.length > 0
+      ? known.map((k) => `${k}：${EVIDENCE_TEXT[k]}`).join(' · ')
+      : 'evidence 未提供';
+  }
+  return parts.join(' · ');
+}
+
 
 /**
  * 导入 SeenReceipt（§5.3-1 形状）→ seen。
@@ -196,14 +309,14 @@ export function inclusionView(receipt, now) {
   };
 }
 
-/** 回执滚动上限。 */
+/** 回执滚动上限（R-11：丢弃数必须如实返回，不再静默）。 */
 function capStore(store) {
   const keys = Object.keys(store);
-  if (keys.length <= MAX_RECEIPTS) return store;
+  if (keys.length <= MAX_RECEIPTS) return { store, dropped: 0 };
   const drop = keys
     .sort((a, b) => (store[a].openedAt ?? 0) - (store[b].openedAt ?? 0))
     .slice(0, keys.length - MAX_RECEIPTS);
   const next = { ...store };
   for (const k of drop) delete next[k];
-  return next;
+  return { store: next, dropped: drop.length };
 }

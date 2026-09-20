@@ -71,15 +71,38 @@ export function buildWithdrawPreview(input) {
 
   const real = input.displayViews?.real ?? {};
   const reasons = [];
+  /**
+   * 逐条原因 + **性质标注**（R-07 / AC-08）。
+   *
+   * `policy` = 策略/依赖型：本版本不会自行开放（提现通道未开放、托管方签名
+   * 服务待接入、REAL 入金未开放）；
+   * `data` = 数据型：会随网关水位 / finality 推进自行满足。
+   *
+   * 为什么必须分开：三类原因同视觉权重时，用户会把"finality 未达标"这种
+   * 等待型原因读成"等一会儿就能提"，而实际上策略型那两条本版本永远不会满足。
+   * 这是资产误解，不是文案偏好——所以标注由数据产出，不由界面猜。
+   */
+  const reasonDetails = [];
+  const push = (text, kind) => {
+    reasons.push(text);
+    reasonDetails.push({
+      text,
+      kind,
+      qualifier: kind === 'policy' ? '本版本不会开放' : '随凭证推进可能满足',
+    });
+  };
   if (real.show_claim === false) {
-    reasons.push(`vault_offline: ${real.claim_disabled_reason ?? 'wallet-core 展示门未就绪'}`);
+    push(`vault_offline: ${real.claim_disabled_reason ?? 'wallet-core 展示门未就绪'}`, 'policy');
   }
   if (notes.length === 0) {
-    reasons.push('REAL 库为空（当前版本不开放 REAL 入金/铸造）');
+    push('REAL 库为空（当前版本不开放 REAL 入金/铸造）', 'policy');
   } else if (!covered) {
-    reasons.push(`可花费 REAL 余额不足以覆盖请求金额 ${amount}`);
+    push(`可花费 REAL 余额不足以覆盖请求金额 ${amount}`, 'data');
   } else if (!finalityReached) {
-    reasons.push(`finality 未达标：所选 note 最低层级为 ${worst}，提现要求 ${WITHDRAW_MIN_PROOF}`);
+    push(`finality 未达标：所选 note 最低层级为 ${worst}，提现要求 ${WITHDRAW_MIN_PROOF}`, 'data');
+  }
+  if (real.custody_risk_notice === 'real_is_custodial_v1_offline') {
+    push('托管方签名服务待接入（REAL 为托管映射，非链上可自由动用）', 'policy');
   }
 
   return {
@@ -104,6 +127,9 @@ export function buildWithdrawPreview(input) {
       // 展示态红线：canSubmit 恒 false；reasons 逐条解释（UI 禁用按钮并展示）。
       canSubmit: false,
       cannotSubmitReasons: reasons,
+      // 与 `cannotSubmitReasons` 同序、逐条对应的性质标注（R-07 / AC-08）：
+      // 策略型必须带"本版本不会开放"限定语，数据型才可说"随凭证推进可能满足"。
+      cannotSubmitReasonDetails: reasonDetails,
       displayOnly: true,
       generatedAtSec: Number.isSafeInteger(input.nowSec) ? input.nowSec : Math.floor(Date.now() / 1000),
     },

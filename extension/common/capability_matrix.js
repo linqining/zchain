@@ -49,7 +49,76 @@ export function detectExternalWallets(globalObj = globalThis) {
 }
 
 /**
- * 构造能力矩阵（结构化行；popup 消费渲染）。
+ * 交付面能力矩阵（PRD F-19 规则 5 / §13 R-26 / AC-36）——**单一数据源**。
+ *
+ * 为什么放这里：设置页模态、欢迎页的能力宣告、以及验收文档必须引用同一份
+ * 常量。稿面此前分三处各写一份（稿 / UI / 文档），任何一处放宽都无人发现。
+ * PRD 红线：「能力矩阵必须由同一份常量渲染，不得在稿、UI、文档各写一份」。
+ *
+ * ⚠ R-26 是这一版的**文案缺陷修正**：0.6.1 之前此处的"网络"行写成
+ * "mainnet 刻意不注册"，但事实是**只有 ZChain 层**刻意不注册 mainnet；
+ * EVM 注册表含 Ethereum `0x1`，Starknet 亦含主网条目。把局部策略说成全局
+ * 事实，会让 EVM 用户以为主网不可用（而本屏就在展示 chainId 1）。
+ * 因此网络行按层分列，不把三层压成一句。
+ */
+export const CAPABILITY_ROWS = [
+  {
+    layer: 'ZChain',
+    can: 'GAME 域可签可转（贪心选币 + 凭证门槛 + 找零守恒）',
+    cannot: 'REAL 域仅隔离展示；提现预览 canSubmit 恒 false（wallet-core 展示门 ∧ finality）',
+  },
+  {
+    layer: 'EVM',
+    can: '原生币转账与合约写入可签名广播（EIP-155 chainId 编码 + 签名前二次校验）',
+    cannot: '不签 note spend；账簿页 ERC-20 余额未接线（显示 `—`，不报 0）',
+  },
+  {
+    layer: 'Starknet',
+    can: 'invoke v1 + devnet 水龙头（devnet 代币符号 DST，非 ETH）',
+    cannot: 'SNIP-12 授权面已备，**链上 admission 未开放**（当前授权为本机登记）',
+  },
+  {
+    layer: '网络 · ZChain 层',
+    can: 'devnet / testnet 可选（封闭注册表）',
+    cannot: 'mainnet 刻意不注册 → NetworkUnsupported；testnet 未配置网关 → GatewayNotConfigured',
+  },
+  {
+    layer: '网络 · EVM / Starknet 层',
+    can: '含各自主网条目（EVM Ethereum 0x1 / Base / Arbitrum；Starknet 主网），按注册表可选',
+    cannot: 'RPC 返回 chainId 与预设不符 → 拒签，不静默继续',
+  },
+  {
+    layer: '边界',
+    can: '网关水位、回执证据按上游原样展示',
+    cannot: '盲签拒绝；私钥 / 助记词 / nullifier 不出边界；水位不推进、不猜测',
+  },
+  {
+    layer: '会话',
+    can: '三层共用同一口令解锁（一次输入尝试全部层）',
+    cannot: '三层 keystore 与会话彼此独立（存在 2/3 中间态）；后台被回收即锁定（fail-closed）',
+  },
+];
+
+/** 欢迎页固定能力宣告（与上表同源，非查询结果）：`3 账户层 / 2 套 KDF / STARK`。 */
+export const CAPABILITY_SUMMARY = {
+  layers: 3,
+  kdfs: 2,
+  proofSystem: 'STARK',
+  text: '3 账户层 / 2 套 KDF / STARK 可验结算',
+};
+
+/** 交互预算（PRD D-55：超 500ms 必须如实标注，不伪装即时）。 */
+export const INTERACTION_BUDGET_MS = 500;
+
+/** 超过预算时的强制标注文案（F-13 规则 3）。 */
+export function overBudgetNote(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n <= INTERACTION_BUDGET_MS) return null;
+  return `超预算（低频场景可接受，性能不敏感）：${(n / 1000).toFixed(2)}s > 0.50s`;
+}
+
+/**
+ * 外部钱包 / 客户端能力探测矩阵（WALLET-ACC-7）。
  *
  * @param {object} input
  *   {zchainCaps: 自家 getCapabilities 输出, adapterStatus: adapterHost.status()

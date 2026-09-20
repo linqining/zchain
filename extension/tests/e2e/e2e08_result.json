@@ -1,13 +1,18 @@
 {
-  "date": "2026-09-19T10:06:44.720Z",
+  "date": "2026-09-20T01:34:35.118Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "total": 30,
-  "pass": 30,
+  "total": 32,
+  "pass": 32,
   "fail": 0,
   "results": [
     {
       "step": "A0 一键创建三层 → 成功页自动口令只显一次",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "A0b 引导成功页排版：口令框未塌陷（无 0 宽 / 无「一字一行」）",
       "ok": true,
       "detail": ""
     },
@@ -69,7 +74,7 @@
     {
       "step": "C3 摘要来自 wallet-core 预览（展示与签名同源）",
       "ok": true,
-      "detail": "f2d004f0c967…1cb49eea28"
+      "detail": "28362b0e754c…8e9082ae8a"
     },
     {
       "step": "C4 凭证阶梯作为一等组件出现在转账预览（4 级 + 短板文案）",
@@ -129,7 +134,7 @@
     {
       "step": "G1 网关不可达 → 第 1 步标红 + 错误码原样呈现（不伪造结论）",
       "ok": true,
-      "detail": "GatewayUnreachable：网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。 | GatewayUnreachable"
+      "detail": "GatewayUnreachable（未伪造结果） | GatewayUnreachable：网关不可达（网络层失败或 CORS 拒绝）：Failed to fetch。请确认网关已启动；跨源访问需要网关以 --public 启动或已授予主机权限。"
     },
     {
       "step": "G2 结论印章为「未通过」（fail-closed：任一阶段失败即非 verified）",
@@ -149,10 +154,15 @@
     {
       "step": "I1 能力矩阵如实列出各层红线",
       "ok": true,
-      "detail": "ZCHAIN | GAME 域可签可转；REAL 仅隔离展示，提现预览 canSubmit 恒 false | EVM | 转账与合约写入可签名广播（EIP-155 + chainId 校验）；不签 note spend | STARKNET | invoke v1 + devnet 水龙头；SNIP-12 授权面已备，链上 admission 未开放 | "
+      "detail": "ZCHAIN GAME 域可签可转（贪心选币 + 凭证门槛 + 找零守恒） | 不具备 / 红线：REAL 域仅隔离展示；提现预览 canSubmit 恒 false（wallet-core 展示门 ∧ finality） | EVM 原生币转账与合约写入可签名广播（EIP-155 chainId 编码 + 签名前二次校验） | 不具备 / 红线：不签 no"
     },
     {
       "step": "I2 不出现审计徽章：未审计这件事写在界面上",
+      "ok": true,
+      "detail": ""
+    },
+    {
+      "step": "J1 逐屏几何扫描：无 0 宽文本节点、无「一字一行」塌陷",
       "ok": true,
       "detail": ""
     }

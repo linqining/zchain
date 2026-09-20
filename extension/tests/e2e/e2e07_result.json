@@ -1,9 +1,9 @@
 {
-  "date": "2026-09-19T08:22:00.375Z",
+  "date": "2026-09-20T01:31:39.166Z",
   "browser": "Chrome/153.0.8010.36",
   "extensionId": "hjdmkhkbcopknhojgpmpfmbfimhlejeh",
-  "total": 13,
-  "pass": 13,
+  "total": 14,
+  "pass": 14,
   "fail": 0,
   "results": [
     {
@@ -19,17 +19,22 @@
     {
       "step": "O2-diag",
       "ok": true,
-      "detail": "raw={\"pw\":\"DmfnBI…\"} rej=[]"
+      "detail": "raw={\"pw\":\"yM7WXp…\"} rej=[]"
     },
     {
       "step": "O2 一键创建 → 成功页：自动口令只显一次 + 三链地址",
       "ok": true,
-      "detail": "DmfnBI…（24 字符）"
+      "detail": "yM7WXp…（24 字符）"
     },
     {
       "step": "O2b 创建后 SW 状态：onboarded=true + 三层有钱包 + 全部已解锁",
       "ok": true,
       "detail": "{\"onboarded\":true}"
+    },
+    {
+      "step": "O2c 口令框排版：口令独占宽度、按行折行、警示在其下方独占一行",
+      "ok": true,
+      "detail": "{\"spanW\":284,\"boxW\":348,\"lines\":1,\"chars\":24,\"hintBelow\":true,\"copyInBox\":true}"
     },
     {
       "step": "O3 统一首页：三链账户层卡片 + 进入账簿（全部已解锁）",

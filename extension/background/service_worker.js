@@ -83,6 +83,7 @@ import {
   markIncluded,
   openReceipt,
   pendingSpendMap,
+  pendingSpendSum,
 } from '../common/receipts.js';
 import {
   admitOperation,
@@ -601,11 +602,17 @@ async function getReceipts() {
   return receipts ?? {};
 }
 
-async function recordReceipt(digest, kind, chainId, inputs = []) {
+/**
+ * 登记回执。`tableId` 可选（R-25：只接受非负整数，由 `openReceipt` 归一，
+ * 花色写法 `8♠` 与 hex `#A3F2` 一律落 null）。返回被滚动上限丢弃的条数，
+ * 供界面把"仅保留最近 20 条"如实说出来（R-11），而不是静默消失。
+ */
+async function recordReceipt(digest, kind, chainId, inputs = [], { tableId = null } = {}) {
   const store = await getReceipts();
-  const r = openReceipt(store, { digest, kind, chainId, signedAtMs: Date.now(), inputs }, Date.now());
-  if (!r.ok) return; // 重复 digest：幂等跳过（回执登记不影响签名结果）。
+  const r = openReceipt(store, { digest, kind, chainId, signedAtMs: Date.now(), inputs, tableId }, Date.now());
+  if (!r.ok) return { ok: false, code: r.code, dropped: 0 }; // 重复 digest：幂等跳过
   await storage.local.set({ receipts: r.store });
+  return { ok: true, dropped: r.dropped ?? 0 };
 }
 
 // ---------------------------------------------------------------------------
@@ -2163,10 +2170,14 @@ async function handlePopupMessage(m, { page = false } = {}) {
         ...n,
         spendable: n.spendable !== false && !pending.has(n.commitment),
       }));
-      const pendingSum = [...pending.values()].reduce((a, b) => a + (Number(b) || 0), 0);
+      // 在途占用合计与"可用余额"扣减必须走 BigInt（PRD §6.1：note 金额是
+      // u64，十进制串可达 20 位；`Number()` 减法在 >2^53 后静默丢精度，
+      // 而这个值正是转账页 MAX 与 `InsufficientFunds` 判定的输入）。
+      const pendingSum = pendingSpendSum(pending);
       const balances = { ...all.balances };
-      if (pendingSum > 0 && balances.play_free != null) {
-        balances.play_free = String(Math.max(0, Number(balances.play_free) - pendingSum));
+      if (pendingSum !== '0' && /^\d+$/.test(String(balances.play_free ?? ''))) {
+        const left = BigInt(balances.play_free) - BigInt(pendingSum);
+        balances.play_free = left > 0n ? left.toString() : '0';
       }
       return {
         notes,

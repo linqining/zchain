@@ -18,8 +18,13 @@ import {
   inclusionView,
   isPastInclusionDeadline,
   markIncluded,
+  RECEIPT_KINDS,
   openReceipt,
   pendingSpendMap,
+  pendingSpendSum,
+  receiptAmount,
+  receiptEvidenceText,
+  receiptKindLabel,
   validateSeenReceiptShape,
 } from '../common/receipts.js';
 
@@ -150,8 +155,10 @@ test('pendingSpendMap: signed/seen 的 transfer 收据输入占用，included �
   }, NOW).store;
   let m = pendingSpendMap(store);
   assert.equal(m.size, 2);
-  assert.equal(m.get(c1), 300);
-  assert.equal(m.get(c2), 200);
+  // u64 安全契约（R-24）：占用金额是十进制**字符串**，不经 `Number()`。
+  assert.equal(m.get(c1), '300');
+  assert.equal(m.get(c2), '200');
+  assert.equal(pendingSpendSum(m), '500');
 
   // seen 仍占用
   store = applySeenReceipt(store, DIGEST, validReceipt(), NOW + 50).store;
@@ -177,7 +184,8 @@ test('pendingSpendMap: 非 transfer 收据 / 脏输入 / 空 store 安全', () =
   }, NOW).store;
   const m = pendingSpendMap(dirty);
   assert.equal(m.size, 1);
-  assert.equal(m.get('dd'.repeat(32)), 0);
+  // 脏金额按 '0' 记账（仍软锁 commitment —— 锁是防双花，与金额无关）
+  assert.equal(m.get('dd'.repeat(32)), '0');
 });
 
 test('openReceipt: inputs 归一只留 {commitment, amount}', () => {
@@ -185,8 +193,76 @@ test('openReceipt: inputs 归一只留 {commitment, amount}', () => {
     digest: DIGEST, kind: 'transfer', signedAtMs: NOW,
     inputs: [{ commitment: 'ee'.repeat(32), amount: '42', secret: 'x', nullifier: 'y' }, 7],
   }, NOW).store;
-  assert.deepEqual(store[DIGEST].inputs, [{ commitment: 'ee'.repeat(32), amount: 42 }]);
+  assert.deepEqual(store[DIGEST].inputs, [{ commitment: 'ee'.repeat(32), amount: '42' }]);
   // 无 inputs 的旧调用形状：空数组（buy_in 等不受影响）
   const plain = openReceipt({}, { digest: 'ef'.repeat(32), kind: 'buy_in', signedAtMs: NOW }, NOW).store;
   assert.deepEqual(plain['ef'.repeat(32)].inputs, []);
+});
+
+test('u64 金额不丢精度：pendingSpendSum / receiptAmount 走 BigInt（R-24）', () => {
+  const big = '18446744073709551615'; // U64_MAX：Number 会把它变成 ...600
+  const store = openReceipt({}, {
+    digest: 'be'.repeat(32), kind: 'transfer', signedAtMs: NOW,
+    inputs: [{ commitment: 'aa'.repeat(32), amount: big }, { commitment: 'bb'.repeat(32), amount: '1' }],
+  }, NOW).store;
+  const r = store['be'.repeat(32)];
+  assert.deepEqual(receiptAmount(r), { ok: true, total: '18446744073709551616' });
+  assert.equal(pendingSpendSum(pendingSpendMap(store)), '18446744073709551616');
+  assert.notEqual(String(Number(big) + 1), '18446744073709551616', '浮点求和会塌成 …52000：这正是禁用 Number() 求和的理由');
+});
+
+test('receiptAmount：无输入 / 脏金额一律 fail-closed，不返回半截合计或 0', () => {
+  assert.equal(receiptAmount({ inputs: [] }).code, 'NoInputs');
+  assert.equal(receiptAmount(null).code, 'NoInputs');
+  const r = receiptAmount({ inputs: [{ amount: '100' }, { amount: '1.5' }] });
+  assert.equal(r.code, 'AmountInvalid');
+  assert.equal(r.bad, '1.5');
+  assert.equal('total' in r, false);
+});
+
+test('tableId 只接受非负整数（R-25）：hex / 花色写法一律归 null，不猜值', () => {
+  const hexFor = (n) => n.toString(16).padStart(2, '0').repeat(32);
+  const mk = (tableId, n) => openReceipt({}, { digest: hexFor(n), kind: 'settle', signedAtMs: NOW, tableId }, NOW).store[hexFor(n)];
+  assert.equal(mk(8, 1).tableId, 8);
+  assert.equal(mk('128', 2).tableId, 128);
+  assert.equal(mk(0, 3).tableId, 0, '0 是合法桌号，不得当成缺省');
+  const rejected = ['#A3F2', '8♠', -1, 1.5, 'abc', null, undefined, '', '9007199254740993'];
+  rejected.forEach((bad, i) => {
+    assert.equal(mk(bad, 10 + i).tableId, null, `应拒绝 ${JSON.stringify(bad)}`);
+  });
+});
+
+test('receiptKindLabel：已知 kind 给标签，未知原样透出、不造「开桌」（R-25）', () => {
+  assert.deepEqual(receiptKindLabel('settle'), { text: '结算', known: true, raw: 'settle' });
+  assert.deepEqual(receiptKindLabel('buy_in'), { text: '买入', known: true, raw: 'buy_in' });
+  assert.equal(RECEIPT_KINDS.length, 4);
+  const u = receiptKindLabel('opentable');
+  assert.equal(u.known, false);
+  assert.match(u.text, /未知操作 · opentable/);
+  assert.equal(receiptKindLabel(null).known, false);
+});
+
+test('receiptEvidenceText：included 必须说明是本机手工登记（R-33 / AC-27）', () => {
+  const t = receiptEvidenceText({ seen: 'not_provided', included: 'local_manual_entry' });
+  assert.match(t, /本机手工登记，未经链上核对/);
+  assert.match(t, /local_manual_entry/);
+  assert.match(receiptEvidenceText({ seen: 'receipt_unverified_signature' }), /验签未通过/);
+  assert.match(receiptEvidenceText('not_provided'), /未提供证据/);
+  assert.match(receiptEvidenceText({}), /evidence 未提供/);
+  // 未知证据词原样透出，不翻译成"看起来没问题"的句子
+  assert.match(receiptEvidenceText({ included: 'gateway_signed_entry' }), /gateway_signed_entry/);
+});
+
+test('MAX_RECEIPTS 之外的丢弃数如实返回，供界面常驻说明（R-11）', () => {
+  let store = {};
+  let dropped = 0;
+  for (let i = 0; i < 24; i += 1) {
+    const r = openReceipt(store, {
+      digest: i.toString(16).padStart(2, '0').repeat(32), kind: 'transfer', signedAtMs: NOW + i,
+    }, NOW + i);
+    store = r.store;
+    dropped += r.dropped;
+  }
+  assert.equal(Object.keys(store).length, MAX_RECEIPTS);
+  assert.equal(dropped, 4);
 });

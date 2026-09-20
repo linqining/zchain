@@ -212,10 +212,34 @@ async function main() {
     const attr = (sel, name) => page.eval(`document.querySelector(${JSON.stringify(sel)})?.getAttribute(${JSON.stringify(name)}) ?? null`).catch(() => null);
     const bodyText = () => page.eval(`document.body.innerText`).catch(() => '');
 
+    // ===== 排版塌陷探测器（几何层守卫）=====
+    // 存在理由：`.pass` 里一个 `width:100%` 的 flex 兄弟会把口令 span 挤成 0 宽，
+    // 继承的 word-break:break-all 让它在视觉上退化成"一字一行"。`node --check`、
+    // 单测、静态守卫全都抓不到——只有真实布局能抓到。
+    const COLLAPSED = `(() => {
+      const bad = [];
+      for (const el of document.querySelectorAll('.scr *, .ovl *, .mdl *')) {
+        if (!el.offsetParent || el.children.length) continue;
+        const txt = (el.textContent ?? '').trim();
+        if (txt.length < 4) continue;
+        const r = el.getBoundingClientRect();
+        if (r.height <= 0) continue;
+        const tag = el.id || el.className || el.tagName;
+        const lines = el.getClientRects().length;
+        if (r.width < 8) bad.push('0宽:' + tag + ':' + txt.slice(0, 18));
+        else if (txt.length > 10 && lines >= Math.min(txt.length, 8)) bad.push('一字一行:' + tag + ':' + lines + '/' + txt.length);
+      }
+      return bad;
+    })()`;
+
     // ===== A0：引导（一键创建三层；自动口令只显一次）=====
     await nav('welcome-create-btn', `!!document.getElementById('welcome-success')`, 30_000);
     const gen0 = await waitForExpr(`(document.getElementById('welcome-generated-password')?.textContent ?? '').length >= 20 ? 'ok' : null`, 20_000);
     record('A0 一键创建三层 → 成功页自动口令只显一次', gen0 === 'ok');
+    // 口令框就出现在这一屏：先量几何，再离开（R-08 的常驻警示曾把它挤成 0 宽）。
+    const collapsed0 = await page.eval(COLLAPSED).catch(() => ['探测自身抛错']);
+    record('A0b 引导成功页排版：口令框未塌陷（无 0 宽 / 无「一字一行」）',
+      Array.isArray(collapsed0) && collapsed0.length === 0, (collapsed0 ?? []).slice(0, 4).join(' | '));
     await nav('welcome-done-gate', `!document.getElementById('welcome-done-btn')?.disabled`);
     await nav('welcome-done-btn', `!!document.getElementById('home-card')`);
 
@@ -399,6 +423,24 @@ async function main() {
       String(capTxt).replace(/\n/g, ' | ').slice(0, 180));
     const noAudit = (await bodyText()).includes('未通过第三方审计');
     record('I2 不出现审计徽章：未审计这件事写在界面上', noAudit === true);
+
+    // ===== J. 逐屏排版塌陷扫描（探测器定义在 A0 之前）=====
+    const sweepBad = [];
+    const sweepSeen = new Set();
+    for (const [step, id] of [
+      ['首页', 'tab-home'], ['账簿', 'tab-acct'], ['证明', 'tab-proofs'],
+      ['设置', 'hdr-settings'], ['首页', 'tab-home'], ['账户面板', 'hdr-account'],
+    ]) {
+      await page.eval(`document.getElementById(${JSON.stringify(id)})?.click(); true`).catch(() => {});
+      await sleep(450);
+      const bad = await page.eval(COLLAPSED).catch(() => ['扫描自身抛错']);
+      for (const b of bad ?? []) if (!sweepSeen.has(b)) { sweepSeen.add(b); sweepBad.push(`${step}→${b}`); }
+    }
+    record('J1 逐屏几何扫描：无 0 宽文本节点、无「一字一行」塌陷', sweepBad.length === 0, sweepBad.slice(0, 6).join(' | '));
+
+    // 扫描最后一步打开了账户面板：截图前关掉浮层，回到干净的首页。
+    await page.eval(`document.querySelector('.ovl.on [data-close]')?.click(); true`).catch(() => {});
+    await sleep(250);
 
     // ===== 截图（首页 · 恢复纸白底 + 金额可见之后）=====
     await nav('sub-back', `!!document.getElementById('home-card')`);

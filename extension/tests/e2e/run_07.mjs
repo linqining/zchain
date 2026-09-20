@@ -252,7 +252,38 @@ async function main() {
         && created.layers?.stk?.has && created.layers?.stk?.unlocked,
       JSON.stringify({ onboarded: created?.onboarded }).slice(0, 60));
 
+    // ===== O2c：口令框排版（回归：一字一行）=====
+    // 曾经 passBox 把警示 <p>（width:100%）作为 flex 兄弟塞进不换行的 flex 行，
+    // 口令 span 的 flex-basis 是 0 → 分摊不到收缩量却被挤成 0 宽，加上继承的
+    // word-break:break-all，渲染成"每个字符一行"。这里按几何断言，不看文案。
+    const geo = await waitForExpr(`(() => {
+      const span = document.getElementById('welcome-generated-password');
+      const box = span?.closest('.pass');
+      if (!span || !box) return null;
+      const sr = span.getBoundingClientRect();
+      const br = box.getBoundingClientRect();
+      const lines = span.getClientRects().length;
+      const chars = span.textContent.trim().length;
+      const hint = box.querySelector('.hint-s');
+      const hr = hint?.getBoundingClientRect();
+      return {
+        spanW: Math.round(sr.width),
+        boxW: Math.round(br.width),
+        lines,
+        chars,
+        hintBelow: hr ? Math.round(hr.top) >= Math.round(sr.bottom) : null,
+        copyInBox: !!box.querySelector('[data-copy]'),
+      };
+    })()`, 5_000);
+    const geoOk = !!geo
+      && geo.spanW >= geo.boxW * 0.6
+      // 正常排版：32 字符口令最多折 2~3 行；一字一行时 lines === chars。
+      && geo.lines >= 1 && geo.lines <= 4 && geo.lines < geo.chars
+      && geo.hintBelow === true && geo.copyInBox === true;
+    record('O2c 口令框排版：口令独占宽度、按行折行、警示在其下方独占一行', geoOk, JSON.stringify(geo));
+
     // ===== O3：开始使用 → 统一首页（账簿方向的"总账"tab）=====
+
     // 设计 B 立场：口令只显示一次 → 必须勾选确认门，"开始使用"才解锁（门控按钮）。
     await click('welcome-done-gate');
     await click('welcome-done-btn');

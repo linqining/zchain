@@ -131,13 +131,100 @@ export function fmtAmount(value) {
   return `${m[1]}${grouped}${m[3] != null ? `.${m[3]}` : ''}`;
 }
 
-/** 带符号金额（收支列）：正值加 +。 */
+/**
+ * 带符号金额（收支列）：正值加 +。
+ */
 export function fmtSigned(value, { positive = false, negative = false } = {}) {
   const s = fmtAmount(value);
   if (positive) return `+${s}`;
   if (negative) return s.startsWith('-') ? s : `-${s}`;
   return s;
 }
+
+/**
+ * 展示精度表（R-27 / U-01 的裁决落地）。
+ *
+ * 裁决口径：**显示精度 ≠ 存储精度**。`fmtAmount` 保留原始终断结果、
+ * 明确不补齐（账簿纪律：不造精度）；本表只负责"同一列数字纵向能对齐"
+ * 这一件事，由展示层在 `fmtAmount` 之后**追加**小数零。
+ *
+ * 两条硬约束，缺一不可：
+ * 1. **只补齐、不截断、不四舍五入**——上游 `formatUnits` 已经是截断
+ *    （宁可少报不多报），展示层若再 round 就会把余额报高；
+ * 2. 实际小数位**多于**目标位数时**全部保留**（不丢弃真实精度），
+ *    所以 `0.25` → `0.2500`，而 `0.25009999` 原样透出。
+ *
+ * `erc20: null` = 按代币 `decimals` 由调用方传入，不在此表里写死。
+ */
+export const DISPLAY_DECIMALS = {
+  play: 2,
+  native: 2,
+  note: 2,
+  eth: 4,
+  strk: 4,
+  erc20: null,
+  usd: 2,
+  gwei: 2,
+};
+
+/**
+ * 按展示精度补齐小数位（只在小数**位数**不足时追零）。
+ * 非十进制值（`—`、空、协议原词）原样返回，不硬凑成 0.00。
+ */
+export function fmtDisplay(value, kind = 'note', { decimals = null } = {}) {
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '');
+  const target = decimals ?? DISPLAY_DECIMALS[kind];
+  if (target == null) return fmtAmount(raw);
+  const m = /^(-?)(\d+)(?:\.(\d+))?$/.exec(raw);
+  if (!m) return fmtAmount(raw);
+  const frac = m[3] ?? '';
+  const padded = frac.length >= target ? frac : frac.padEnd(target, '0');
+  return fmtAmount(`${m[1]}${m[2]}.${padded}`);
+}
+
+/** 法币等值：价格源未接入时**恒为 `—`**，不接受任何调用方传进来的数字（R-01）。 */
+export function fmtFiat(_amount, { connected = PRICE_SOURCE_CONNECTED } = {}) {
+  if (!connected) return '—';
+  return null; // 价格源接入后由此处统一乘单一快照价（§13 C-02）
+}
+
+/**
+ * 十进制字符串求和（BigInt 路径，禁止 `Number()`）。
+ * u64 金额上限 18446744073709551615 超过 Number.MAX_SAFE_INTEGER，
+ * 走浮点会静默丢精度——账簿的第一纪律是不静默。
+ * @returns {{ok:true,total:string}|{ok:false,code:string,bad:string}}
+ */
+export function sumDecimals(values = []) {
+  let total = 0n;
+  for (const v of values) {
+    const s = typeof v === 'string' ? v.trim() : String(v ?? '');
+    if (!/^\d+$/.test(s)) return { ok: false, code: 'AmountInvalid', bad: s };
+    total += BigInt(s);
+  }
+  return { ok: true, total: total.toString() };
+}
+
+/** u64 上限（`AmountOverflow` 的判定基准）。 */
+export const U64_MAX = '18446744073709551615';
+
+/**
+ * note 凭证词汇归一（R-18）。
+ *
+ * 系统里存在两套同义不同名的枚举：note 侧 `ProofState::Pending` 与
+ * verifier 侧 `FinalityLevel::Local`（`.name()` 返回 `"local"`）。
+ * 旧口径把不认识的词**静默**回落 `pending`，等级信息无声丢失。
+ * 现口径：显式别名表 + `known:false` 上报，调用方必须发
+ * `proof_ladder_mismatch` 埋点，让漂移可见。
+ */
+export const PROOF_ALIASES = { local: 'pending' };
+
+export function normalizeProof(raw) {
+  if (PROOF_LADDER.includes(raw)) return { proof: raw, known: true, raw };
+  const alias = typeof raw === 'string' ? PROOF_ALIASES[raw] : undefined;
+  if (alias) return { proof: alias, known: true, raw, aliased: true };
+  return { proof: 'pending', known: false, raw: raw == null ? null : String(raw) };
+}
+
 
 /** 地址/哈希缩略（首尾保留，中间省略号；短串原样）。 */
 export function shortAddr(a, head = 10, tail = 6) {
@@ -198,20 +285,117 @@ export function proofRank(proof) {
 
 /**
  * note 集合 → 凭证阶梯聚合（计数 + 短板）。
+ *
+ * 未知/缺失 proof 仍回落 `'pending'`（fail-closed：不猜、不把 null 当 0），
+ * 但**不再静默**——`mismatches` 列出原值，调用方须上报
+ * `proof_ladder_mismatch`（R-18），否则词汇漂移会无声吞掉等级信息。
  * @param {Array<{amount?:string|number, proof?:string, spendable?:boolean}>} notes
  */
 export function proofLadder(notes = []) {
   const counts = { pending: 0, soft: 0, proven: 0, finalized: 0 };
+  const mismatches = [];
   let weak = null;
   let spendable = 0;
   for (const n of notes) {
-    const p = PROOF_LADDER.includes(n?.proof) ? n.proof : 'pending';
+    const norm = normalizeProof(n?.proof);
+    // 别名命中（`local` → pending）**也要上报**：那正是 R-18 的词汇双轨信号——
+    // verifier 侧 FinalityLevel::Local 与 note 侧 ProofState::Pending 同名不同源，
+    // 静默映射会把等级差异藏起来。监测到 0 才可以说漂移已消除。
+    if (!norm.known || norm.aliased) mismatches.push(norm.raw ?? 'null');
+    const p = norm.proof;
     counts[p] += 1;
     if (n?.spendable !== false) spendable += 1;
     if (weak === null || proofRank(p) < proofRank(weak)) weak = p;
   }
-  return { ladder: PROOF_LADDER.map((k) => ({ proof: k, count: counts[k] })), counts, weakest: notes.length ? weak : null, spendable, total: notes.length };
+  return {
+    ladder: PROOF_LADDER.map((k) => ({ proof: k, count: counts[k] })),
+    counts,
+    weakest: notes.length ? weak : null,
+    spendable,
+    total: notes.length,
+    mismatches,
+  };
 }
+
+/**
+ * 阶梯"本网络要求的等级"（R-05b）。
+ *
+ * ⚠ 这是**数据不是文案**：GAME 域设计基准 `proven`，devnet 放宽为 `soft`
+ * （本地水龙头铸的 stub note 在 wallet-core 里只有 Soft，无批次根，
+ * 不能谎称 proven）。换网时说明必须随之改变，界不得写死 `proven`。
+ * 单一来源在 `transfer_preview.minProofForNetwork`，这里只做展示侧的
+ * 文案装配，避免第二处硬编码。
+ */
+export function requiredProofText({ required, networkKind } = {}) {
+  if (!required) return '本网络未定义凭证门槛';
+  const net = networkKind ? `（${networkKind}）` : '';
+  return `本网络要求 ${required}${net}`;
+}
+
+// ---------------------------------------------------------------------------
+// 容量上限与超限说明（R-11：每处上限配常驻说明，不留"数据凭空消失"）
+// ---------------------------------------------------------------------------
+
+/** 与 `validation.LIMITS` / `receipts.MAX_RECEIPTS` / `sessions.MAX_SESSION_BINDINGS` 同值。 */
+export const CAPACITY = {
+  noteInputs: 16,
+  noteOutputs: 16,
+  receipts: 20,
+  sessions: 16,
+  chainTxs: 500,
+  proofLog: 20,
+};
+
+/** 超限行为文案（fail-closed + 给出路，不只说"不行"）。 */
+export function capacityNotice(kind, { count = null } = {}) {
+  switch (kind) {
+    case 'noteInputs':
+      return `所需 note 数${count != null ? ` ${count}` : ''}超过单签上限 ${CAPACITY.noteInputs} 张，请先合并小额 note`;
+    case 'receipts':
+      return `本机仅保留最近 ${CAPACITY.receipts} 条回执，更早的不在此处`;
+    case 'sessions':
+      return `授权数已达上限 ${CAPACITY.sessions}，请先撤销不用的 origin`;
+    case 'chainTxs':
+      return `本机仅保留最近 ${CAPACITY.chainTxs} 条链上交易记录`;
+    case 'proofLog':
+      return `本机仅保留最近 ${CAPACITY.proofLog} 次复验记录`;
+    default:
+      return `已达上限 ${CAPACITY[kind] ?? '—'}`;
+  }
+}
+
+/** 会话密钥"日累计"的重置口径（R-31：分窗按 UTC 日，不是本地零点）。 */
+export const DAILY_RESET_TEXT = '日累计按 UTC 日重置（非本地零点）';
+
+/** UTC 日序号——与 `sessions.js` 的 `Math.floor(nowSec / 86_400)` 同口径。 */
+export function utcDayIndex(nowSec = Math.floor(Date.now() / 1000)) {
+  return Math.floor(Number(nowSec) / 86_400);
+}
+
+/**
+ * 标识符前缀标签（R-29）。
+ *
+ * tx hash / 回执 digest / hand_binding / request_id / note commitment 在五
+ * 个屏里反复出现，而稿面它们**前缀互相撞车**（`0xc41d…` 既是买入 tx 又是
+ * hand_binding），跨屏核对不可能。规则：**每个标识符前必须挂具名前缀**，
+ * 前缀取自这张表，不得由页面各自发挥。
+ */
+export const ID_PREFIX = {
+  tx: 'tx',
+  digest: 'rc',
+  handBinding: 'hb',
+  requestId: 'req',
+  noteCommitment: 'note',
+  payoutRoot: 'root',
+  sessionId: 'sess',
+};
+
+/** 具名缩略：`tx 0xc41d…9b04`，参数固定（同一字段类型全应用一组参数）。 */
+export function idText(kind, value, { head = 10, tail = 6 } = {}) {
+  const label = ID_PREFIX[kind] ?? kind ?? 'id';
+  return `${label} ${shortAddr(value, head, tail)}`;
+}
+
 
 /**
  * 阶梯节点渲染态（design .rn 的四种笔触：done / cur / bad / 空）。
@@ -325,7 +509,10 @@ export const ERROR_TEXT = {
   NoKeystore: '还没有钱包：请先创建或导入',
   NoAccount: '还没有该层账户：请先创建或导入',
   OnboardedAlready: '已存在钱包：请用口令解锁，不会被一键创建覆盖',
-  NetworkUnsupported: '该网络不在注册表内（mainnet 刻意不开放）',
+  // R-26：不写"mainnet 刻意不开放"——该策略**只适用于 ZChain 层**，EVM 层
+  // 注册表含 Ethereum 0x1，Starknet 亦有主网条目。笼统措辞会让用户以为
+  // 整个钱包不能上主网（而同一屏就在展示 chainId 1）。
+  NetworkUnsupported: '该网络不在注册表内（未注册即不可用；ZChain 层刻意不含 mainnet）',
   InvalidArgument: '输入不合法',
   AmountInvalid: '金额不合法',
   AmountOverflow: '金额超出可表示范围',
@@ -354,6 +541,8 @@ export const ERROR_TEXT = {
   BackupRejected: '备份被拒绝',
   OriginNotPermitted: '该站点未获授权',
   DuplicateReceipt: '回执已存在',
+  ProofTooLarge: '证明体积超出可验证上限（已拒绝下载）',
+  TelemetryDisabled: '本地诊断记录未开启',
   InternalError: '内部错误',
 };
 
@@ -399,3 +588,121 @@ export function screenTitle(id, chain) {
   if (s.id === 'acct') return `账簿 · ${CHAIN_LABEL[chainOf(chain) ?? 'zc']} 层`;
   return s.name;
 }
+
+// ---------------------------------------------------------------------------
+// outcome 判定与边界态文案（此前散在四个渲染点各自 inline 推导）
+// ---------------------------------------------------------------------------
+
+/**
+ * 凭证阶梯的 `outcome` 唯一出口（AC-09 / AC-10）。
+ *
+ * 同一 `weakest=soft` 在首页要画琥珀 cur、在提现页要画朱红 bad——差别不在
+ * 数据而在**这一格是不是被 fail-closed 卡住**。此前 popup 四处各自
+ * `weakest !== 'finalized' ? 'wait' : 'ok'`，提现页靠传参碰对；一旦某处
+ * 忘记传 `canSubmit`，禁用态就会被画成"仍在推进"的琥珀色——那正是
+ * "把不可用说成等一下就好"的界面事故（R-07 同族）。
+ *
+ * @returns {'idle'|'ok'|'blocked'|'wait'}
+ */
+export function ladderOutcome({ weakest = null, required = null, canSubmit = null, spendable = null } = {}) {
+  if (weakest == null) return 'idle';
+  if (canSubmit === false) return 'blocked';
+  if (spendable === 0) return 'blocked';
+  if (required != null && proofRank(weakest) < proofRank(required)) return 'wait';
+  return 'ok';
+}
+
+/**
+ * 限额 / 超限的统一原因文案（R-06 的五个未演示态、R-11 的三处上限）。
+ * 规则：禁用必须**给原因 + 给出路**，不能只置灰。
+ */
+export function limitReasonText(code, params = {}) {
+  switch (code) {
+    case 'noteCountOverLimit':
+      return `所需 note 数 ${params.count ?? '—'} 超过单签上限 ${CAPACITY.noteInputs}，请先合并小额 note`;
+    case 'previewExpired':
+      return '交易预览已过期（超过 5 分钟），请重新发起——note 集合可能已被桌台消费';
+    case 'sessionLimitReached':
+      return `授权数已达上限 ${CAPACITY.sessions}，请先撤销不用的 origin`;
+    case 'perTxOverLimit':
+      return `本笔 ${params.amount ?? '—'} 超过单笔限额 ≤${params.perTxLimit ?? '—'}，需输入口令确认`;
+    case 'dailyExhausted':
+      return `本会话日累计已耗尽（${params.used ?? '—'}/${params.limit ?? '—'}，${DAILY_RESET_TEXT}），需输入口令`;
+    case 'noDayLimit':
+      return '未设日累计上限';
+    case 'receiptCapacity':
+      return capacityNotice('receipts');
+    case 'scopesEmpty':
+      return '请至少选择一项授权范围';
+    default:
+      return null;
+  }
+}
+
+/** 十进制串减法，下钳 0（u64 安全；"可用 = 余额 − 在途" 的唯一出口）。 */
+export function subClampedDecimal(a, b) {
+  const x = String(a ?? '0').trim();
+  const y = String(b ?? '0').trim();
+  if (!/^\d+$/.test(x) || !/^\d+$/.test(y)) return null;
+  const left = BigInt(x) - BigInt(y);
+  return left > 0n ? left.toString() : '0';
+}
+
+// ---------------------------------------------------------------------------
+// 合计与凭证簿计数（AC-02 / AC-04 / R-36）
+// ---------------------------------------------------------------------------
+
+/**
+ * 按域合计（AC-04：合计必须由求和函数产出，禁止硬编码字面量）。
+ *
+ * 输入是 `assets.groupBalances()` 一类的分组结果 `{ [domain]: [{amount}] }`；
+ * **跨域永不轧差**——REAL 是托管债权、GAME 是无价值筹码，相加即撒谎（D-06）。
+ * 因此返回值是"逐域各一个合计"，界面无从把一个总数写死。
+ *
+ * @returns {Record<string, {ok:boolean,total:string|null,code?:string}>}
+ */
+export function domainTotals(grouped = {}) {
+  const out = {};
+  for (const [domain, rows] of Object.entries(grouped)) {
+    const list = Array.isArray(rows) ? rows : [];
+    const sums = sumDecimals(list.map((r) => (typeof r === 'string' ? r : r?.amount)));
+    out[domain] = sums.ok
+      ? { ok: true, total: sums.total, count: list.length }
+      : { ok: false, total: null, code: sums.code, bad: sums.bad };
+  }
+  return out;
+}
+
+/**
+ * 本机复验记录的计数口径（R-36）。
+ *
+ * 稿面写「最近 24 小时 · 5 份结算证明」，代码里的 proof log **没有时间字段、
+ * 也没有时间过滤**，上限 20 条。二者不能都成立。此处按可实现口径给出：
+ * 「最近 N 次本地复验」，并区分"次数"与"份数"（同一手牌复验两次是 2 次
+ * 不是 2 份）。若记录带 `atMs` 则可另给 24h 过滤值，不带就返回 null——
+ * 不为了文案好看而假装过滤过。
+ */
+export function proofLogSummary(log = []) {
+  const list = Array.isArray(log) ? log : [];
+  const allOk = list.filter((e) => e?.verdict === 'verified').length;
+  const dated = list.filter((e) => Number.isFinite(e?.atMs));
+  const newest = dated.reduce((m, e) => Math.max(m, e.atMs), 0);
+  // 一条带时间戳的记录都没有时，24h 窗口必须是 **null**（不是 0）——
+  // "24 小时内 0 次" 是一个看起来像数据的假结论，正是 DS-13 禁止的那类补齐。
+  const within24h = dated.length > 0
+    ? dated.filter((e) => newest - e.atMs <= 24 * 3600 * 1000).length
+    : null;
+  const bindings = new Set(list.map((e) => e?.binding).filter(Boolean));
+  return {
+    count: list.length,
+    verifiedCount: allOk,
+    distinctBindings: bindings.size,
+    within24h,
+    // 计数文案：无时间戳时只报"次"，不报"小时窗口"（不编造窗口）。
+    text: within24h != null
+      ? `最近 ${list.length} 次本地复验（24 小时内 ${within24h} 次）`
+      : `最近 ${list.length} 次本地复验`,
+    capacityText: list.length >= CAPACITY.proofLog ? capacityNotice('proofLog') : null,
+  };
+}
+

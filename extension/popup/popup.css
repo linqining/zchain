@@ -319,7 +319,10 @@ button.empty { width: 100%; cursor: pointer; }
 /* ---- 组件：收款卡 / 口令块 / dapp 头 / 确认块 ---- */
 .qr { width: 150px; height: 150px; margin: 0 auto; background: #fff; border: 1px solid var(--rl-2); border-radius: 2px; padding: 8px; position: relative; }
 .qr svg { width: 100%; height: 100%; display: block; }
-.pass { display: flex; align-items: center; gap: 8px; background: var(--code); border: 1px solid var(--rl-2); border-radius: var(--r); padding: 11px 12px; font-family: var(--mono); font-size: 13px; letter-spacing: .02em; word-break: break-all; }
+.pass { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 8px; background: var(--code); border: 1px solid var(--rl-2); border-radius: var(--r); padding: 11px 12px; font-family: var(--mono); font-size: 13px; letter-spacing: .02em; word-break: break-all; }
+/* 警示行独占一行：作为 flex 兄弟会把 .grow 的 flex-basis 挤成 0（break-all 下
+   退化成"一字一行"），所以这里用栅格跨列而不是行内 width:100%。 */
+.pass > .hint-s { grid-column: 1 / -1; }
 .dapp { display: flex; align-items: center; gap: 9px; background: var(--cd); border: 1px solid var(--rl); border-radius: var(--r); padding: 10px 12px; margin-bottom: 12px; }
 .dapp-fav { width: 26px; height: 26px; border: 1px solid var(--rl-2); border-radius: 2px; background: var(--pg-2); display: flex; align-items: center; justify-content: center; color: var(--ink-2); flex: none; }
 .dapp .grow b { display: block; font-size: 12px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -392,3 +395,148 @@ details[open] summary::before { content: "▾ "; }
 .al:last-child { border-bottom: none; }
 .al.on { background: var(--felt-w); }
 .al .al-a { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); }
+
+// =============================================================================
+// §7 过渡动画与动效规范（PRD prd-zchain-wallet-ui-b-ledger.md §7）
+//
+// 六条总则的落点：
+//   A-1 诚实性优先于顺滑——动画不得制造"已经好了"的错觉；结论类元素
+//       （印章 / 阶梯等级）只在数据到位后被挂上一次性 class 才播放。
+//   A-2 禁止 scroll-driven 动画（整页无头截图会停在 opacity:0）。
+//   A-3 时长预算：用户动作→界面响应 ≤ 200ms；超出必须伴随真实进度信息。
+//   A-4 与"整体重渲染"共存：不用依赖元素持久存在的 transition，
+//       进入一律走渲染后一次性 class + @keyframes；不依赖 @starting-style /
+//       View Transitions（minimum_chrome_version 116，前者需 117+）。
+//   A-5 尊重 prefers-reduced-motion：时长降到 0.01ms，但状态可读反馈保留。
+//   A-6 禁止动效化的语义域：托管警示条、数字最终值、哈希/地址、能力矩阵正文。
+// =============================================================================
+
+:root {
+  /* 缓动词汇（§7.2）：std 进入/常规，out 离场，seal 仅印章（过冲 ≤1.06）。 */
+  --e-std: cubic-bezier(.2, 0, .38, 1);
+  --e-out: cubic-bezier(0, 0, .3, 1);
+  --e-seal: cubic-bezier(.34, 1.3, .64, 1);
+}
+
+/* --- 关键帧（此前整个设计系统 0 个 @keyframes） --- */
+
+@keyframes qEnter { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+@keyframes qFade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes qSheetUp { from { transform: translateY(100%); } to { transform: none; } }
+@keyframes qModalPop { from { opacity: 0; transform: scale(.96); } to { opacity: 1; transform: none; } }
+@keyframes qSeal { from { opacity: 0; transform: rotate(-8deg) scale(1.08); } to { opacity: 1; transform: rotate(-4deg) scale(1); } }
+@keyframes qRail { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@keyframes qNode { from { transform: scale(.7); } to { transform: none; } }
+@keyframes qSpin { to { transform: rotate(360deg); } }
+@keyframes qPulse { 0%, 100% { background: var(--pg-2); } 50% { background: var(--cd-2); } }
+@keyframes qNudge { 0%, 100% { transform: none; } 25% { transform: translateX(-2px); } 75% { transform: translateX(2px); } }
+
+/* T-02 屏幕导航：淡入 + 4px 位移。横向位移被刻意排除——滑动暗示"链是
+   目的地"，而那正是方向 B 要消灭的模型（DS-0）。 */
+.body.anim-enter { animation: qEnter 140ms var(--e-std) both; }
+/* T-03：换链是筛选不是导航，120ms；抬头不参与（.dh 无动画类）。 */
+.body.anim-filter { animation: qEnter 120ms var(--e-std) both; }
+
+/* T-04 sheet：遮罩先起（160ms）、面板后滑（220ms），错开 40ms 让 sheet
+   读起来是"推开的抽屉"而不是"贴上去的纸条"。 */
+.ovl.anim-enter { animation: qFade 160ms var(--e-std) both; }
+.ovl.anim-enter .sheet { animation: qSheetUp 220ms var(--e-std) both; }
+
+/* T-06 破坏性模态：用 scale 而非 translate 表达"从界面中浮出、必须处理"。
+   刻意不用 seal 缓动——过冲的愉悦感会削弱风险信号。 */
+.mdl-bg.anim-enter { animation: qFade 140ms var(--e-std) both; }
+.mdl-bg.anim-enter .mdl { animation: qModalPop 180ms var(--e-std) both; }
+
+/* T-05 离场比进入快（160ms，JS 延后摘除 .on 以对齐） */
+.ovl.leaving { animation: qFade 160ms var(--e-out) reverse both; }
+.ovl.leaving .sheet { animation: qSheetUp 160ms var(--e-out) reverse both; }
+.mdl-bg.leaving { animation: qFade 140ms var(--e-out) reverse both; }
+.mdl-bg.leaving .mdl { animation: qModalPop 140ms var(--e-out) reverse both; }
+
+/* T-09 凭证阶梯：语义就是单向推进，所以只能从左向右生长；逐格错开 60ms。
+   回退（等级下降）不走动画——mount 只在换屏时挂 class，避免把降级读成摆动。 */
+.rail.anim-enter .rn { animation: qNode 160ms var(--e-std) both; }
+.rail.anim-enter .rline { transform-origin: left center; animation: qRail 240ms var(--e-std) both; }
+.rail.anim-enter .rn:nth-child(3), .rail.anim-enter .rline:nth-child(2) { animation-delay: 60ms; }
+.rail.anim-enter .rn:nth-child(5), .rail.anim-enter .rline:nth-child(4) { animation-delay: 120ms; }
+.rail.anim-enter .rn:nth-child(7), .rail.anim-enter .rline:nth-child(6) { animation-delay: 180ms; }
+
+/* T-10 印章落下：旋转角从 −8° 收敛到静态 −4°，像被手盖上去后停住。
+   只在结论真的返回后由 JS 挂 class（rt.sealAnim），不得预置。 */
+.seal.anim-enter { animation: qSeal 260ms var(--e-seal) both; }
+
+/* T-08 toast：稿面完全无动画，无淡出的 toast 在 380px 窄屏里会"凭空消失"
+   被误读成界面 bug。驻留时长由 JS 决定（常规 2400ms / 破坏性 4000ms）。
+   这里刻意改用 opacity+visibility 而不是基表的 display 切换：toast 节点是
+   **复用同一个** `.tst`（跨渲染持久），因此它是本文件里唯一可以走
+   transition 的元素（A-4 的约束针对的是会被替换的节点）。 */
+.tst { display: flex; opacity: 0; visibility: hidden; pointer-events: none; transform: translateY(6px); transition: opacity 200ms var(--e-out), transform 200ms var(--e-out), visibility 0s linear 200ms; }
+.tst.on { opacity: 1; visibility: visible; transform: none; transition: opacity 140ms var(--e-std), transform 140ms var(--e-std); }
+
+/* T-18 Portal 步骤进行中：循环旋转是"仍在运行"的诚实信号，
+   请求结束必须立即停（JS 摘 class，不播完一圈）。 */
+.spin { animation: qSpin 1.2s linear infinite; transform-origin: 50% 50%; }
+
+/* T-20 骨架：脉冲是这套体系里唯一合法的等待语言。shimmer 斜扫本质是扫光，
+   违反品牌硬规则 3（禁发光/渐变强调）。 */
+.skl { height: 12px; border-radius: 2px; animation: qPulse 1.1s ease-in-out infinite; }
+
+/* T-16 表单错误抖动：唯一允许的"警告性"动效，且只用于**操作失误**
+   （AmountInvalid / OwnerInvalid）；后端拒绝是事实陈述，用错误条不用抖动。 */
+.nudge { animation: qNudge 240ms var(--e-std) both; }
+
+/* T-17 列表项删除：收拢而非直接消失，避免后面的行"自己跳上来"被读成数据被替换。 */
+.row-out { overflow: hidden; transition: opacity 200ms var(--e-out), max-height 200ms var(--e-out); max-height: 200px; }
+.row-out.out { opacity: 0; max-height: 0; }
+
+/* T-07 键入门槛跨过的一刻可见：虚线禁用态 → 实线可用。
+   虚线是"不能点"的专用笔触（DS-4），动画只是让转换可读。 */
+.btn.gated { transition: opacity 120ms var(--e-std), border-color 120ms var(--e-std); }
+.btn.ungated { border-style: solid; }
+
+/* T-13 方形勾选：反色填墨，120ms 让它读作"落章"而不是淡入。 */
+.cb { transition: background 120ms var(--e-std), color 120ms var(--e-std), border-color 120ms var(--e-std); }
+
+/* T-12 限额进度条：宽度是连续量，跳变会让人怀疑算错了；颜色切换**不做动画**
+   （A-6：语义切换必须瞬时确定）。 */
+.meter i { transition: width 240ms var(--e-std); }
+
+/* T-22 锁定瞬间**不加动画**：安全状态切换不该有过渡期，淡入会制造
+   "还能操作一下"的错觉。此处显式声明，防后来者"顺手"给 .scr 统一加过渡。 */
+.scr[data-locked="1"], .scr[data-locked="1"] .body { animation: none !important; transition: none !important; }
+
+/* T-14 按钮按压：按下必须瞬时反馈，加过渡会让人怀疑没点到。
+   （此前的 `.btn{transition:filter .12s}` 让 :active 变渐变，属偏离。） */
+.btn:active { transition: none; }
+
+/* A-5 减弱动效：全部降到 0.01ms，但**状态变化的可读反馈保留**
+   （印章、chip 配色、虚线禁用态不变；阶梯与倒计时是信息不是装饰）。 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .spin { animation: none !important; }
+  .skl { animation: none !important; background: var(--cd-2) !important; }
+}
+
+/* -----------------------------------------------------------------------------
+ * R-40 / AC-45：13/19 屏在 380×600 基准下是滚动态，超过一半的屏幕主操作
+ * 落在首屏之外。这里把账簿的"快捷动作条" `.acts` 改成吸底：抬头在顶
+ * （.dh 不参与滚动）、主操作在底（滚过它之后钉在视口底），中间明细照常滚。
+ * 三链共用一套模板，因此一处规则同时覆盖 home/acct 的数据面。
+ * -------------------------------------------------------------------------- */
+.acts {
+  position: sticky;
+  bottom: 0;
+  z-index: 12;
+  margin: 10px -16px 0;
+  padding: 9px 16px 11px;
+  background: var(--pg);
+  border-top: 1px solid var(--ink);
+}
+.acts button { min-height: 34px; }
+/* 吸底条不参与入场动画（A-6：可用性元素不该动）。 */
+.acts, .acts * { animation: none !important; }
