@@ -1539,8 +1539,16 @@ fn run_catch_up_loop(node: Arc<Node>, transport: Arc<TcpTransport>, shutdown: Ar
             let start = tip.saturating_add(1);
             let end = start.saturating_add(CATCH_UP_CHUNK.saturating_sub(1));
             match transport.request_blocks_by_range(start, end) {
-                Ok(blocks) if blocks.is_empty() => break,
                 Ok(blocks) => {
+                    if blocks.is_empty() {
+                        // 加入门闩置位（join-race 根治）：区间返回空 = 已追平
+                        // 主网链头（或本机即创世首节点），此刻起产块不会与
+                        // 主链分叉。同步中途不放行——否则 fresh 节点会在导入
+                        // 主链区块的半途产出自己的 block 1，形成不可追赶的分
+                        // 叉（实测每次节点重启都以该竞态孤立）。
+                        CATCHUP_FIRST_ROUND.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     let mut imported = 0usize;
                     for block in &blocks {
                         match node.put_block(block) {
@@ -2070,11 +2078,39 @@ fn recv_p2p_message(stream: &mut impl Read) -> Result<Option<NetworkMessage>, St
 /// Keeping the insertion order this way is material: an invalid compact/full
 /// vertex must not influence leader detection merely because it arrived before
 /// its signature, parents, or transactions were checked.
-fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, source: &str) {
+/// 返回值 = 缺失的 parent hash 列表（非空 ⟺ 因缺 parent 被拒）。
+///
+/// 调用方（持有连接写端）应向发送方逐个请求这些 parent 的 full vertex，
+/// 形成「child 被拒 → 回源拉 parent → 递归补链」的闭环——parent 到位后
+/// child 由生产者的周期重播再次送入即可通过。此前缺 parent 一律直接丢弃
+/// 且无人重发 child，vertex 只活在生产者本地 DAG，quorum 永远收不齐，
+/// 链只能出空块（实测 tx 全部滞留）。
+fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, source: &str) -> Vec<Hash> {
+    // 先自检 parent 完整性，一次性收集全部缺口（put_vertex 只报第一个）。
+    let missing: Vec<Hash> = {
+        let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+        vertex
+            .parent_hashes
+            .iter()
+            .filter(|h| {
+                dag_guard.get(h).is_none()
+                    && node.vertex_store().get_by_hash(h).is_err()
+            })
+            .copied()
+            .collect()
+    };
+    if !missing.is_empty() {
+        warn!(
+            "P2P {source} vertex 拒绝：缺 {} 个 parent（已回源请求补链）",
+            missing.len()
+        );
+        return missing;
+    }
     match node.put_vertex(&vertex) {
         Ok(_) => {
             let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
             dag_guard.insert(vertex);
+            Vec::new()
         }
         Err(poker_l1::error::PokerL1Error::InvalidVertexEpoch {
             actual, expected,
@@ -2094,17 +2130,17 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
                     "P2P {source} epoch 跟随拒绝：跳变 {} 超过上限 {MAX_EPOCH_FOLLOW_JUMP}",
                     actual - expected
                 );
-                return;
+                return Vec::new();
             }
             if !node.vertex_authentic(&vertex) {
                 warn!("P2P {source} epoch 跟随拒绝：vertex 未通过认证（author/签名）");
-                return;
+                return Vec::new();
             }
             for next in expected + 1..=actual {
                 let vrf = VRF_SECRET.get().and_then(|v| v.as_ref());
                 if let Err(error) = node.advance_epoch_with_vrf(next, vrf) {
                     warn!("P2P {source} epoch 跟随推进到 {next} 失败：{error}");
-                    return;
+                    return Vec::new();
                 }
             }
             match node.put_vertex(&vertex) {
@@ -2114,8 +2150,12 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
                 }
                 Err(error) => warn!("P2P {source} vertex 拒绝（epoch 跟随后）：{error}"),
             }
+            Vec::new()
         }
-        Err(error) => warn!("P2P {source} vertex 拒绝：{error}"),
+        Err(error) => {
+            warn!("P2P {source} vertex 拒绝：{error}");
+            Vec::new()
+        }
     }
 }
 
@@ -2132,8 +2172,14 @@ fn accept_p2p_transaction(node: &Node, gossip: &GossipManager, tx: Transaction, 
         warn!("P2P {source} 交易拒绝（chain_id）：{error}");
         return;
     }
-    if let Err(error) = validate_tx_signature(&tx) {
+        if let Err(error) = validate_tx_signature(&tx) {
         warn!("P2P {source} 交易拒绝（签名无效）：{error}");
+        return;
+    }
+    // gossip 回声抑制：已见过的 tx（本地已提交/接收过）直接丢弃。vertex
+    // 生产的 tx 重广播 + 对端 drain 后队列为空的组合会让同一批 tx 无限回
+    // 声入池（RBF 彼时无从拦截），pending 被打到上限、出块载荷全是副本。
+    if node.has_seen_tx(&tx.tx_hash()) {
         return;
     }
     // Public/ForceSync/CheckpointAnchor use the account nonce. GameTurn's
@@ -2235,7 +2281,15 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
             Ok(Some(msg)) => {
                 match msg {
                     NetworkMessage::DagVertex(vertex) => {
-                        accept_p2p_vertex(&node, &dag, vertex, "full");
+                        for missing in accept_p2p_vertex(&node, &dag, vertex, "full") {
+                            // 缺 parent → 回源请求（补链闭环，见函数注释）
+                            if let Err(e) = send_p2p_message_locked(
+                                &writer,
+                                &NetworkMessage::RequestFullVertex(missing),
+                            ) {
+                                warn!("P2P 请求缺失 parent 失败：{e}");
+                            }
+                        }
                     }
                     NetworkMessage::CommitVote(vote) => {
                         // A vote is useful only if its signer is an active validator and its
@@ -2363,7 +2417,16 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                     }
                     NetworkMessage::ResponseVertices(vertices) => {
                         for vertex in vertices {
-                            accept_p2p_vertex(&node, &dag, vertex, "range-response");
+                            for missing in
+                                accept_p2p_vertex(&node, &dag, vertex, "range-response")
+                            {
+                                if let Err(e) = send_p2p_message_locked(
+                                    &writer,
+                                    &NetworkMessage::RequestFullVertex(missing),
+                                ) {
+                                    warn!("P2P 请求缺失 parent 失败：{e}");
+                                }
+                            }
                         }
                     }
                     NetworkMessage::RequestBlocksByRange(start, end) => {
@@ -2454,7 +2517,14 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                     NetworkMessage::CompactVertex(compact) => {
                         match reconstruct_compact_vertex(&compact, &gossip) {
                             Ok(vertex) => {
-                                accept_p2p_vertex(&node, &dag, vertex, "compact");
+                                for missing in accept_p2p_vertex(&node, &dag, vertex, "compact") {
+                                if let Err(e) = send_p2p_message_locked(
+                                    &writer,
+                                    &NetworkMessage::RequestFullVertex(missing),
+                                ) {
+                                    warn!("P2P 请求缺失 parent 失败：{e}");
+                                }
+                            }
                             }
                             Err(error) => {
                                 // A cache miss or a short-id collision never creates a partial
@@ -2503,7 +2573,14 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                         }
                     }
                     NetworkMessage::ResponseFullVertex(vertex) => {
-                        accept_p2p_vertex(&node, &dag, vertex, "full-fallback");
+                        for missing in accept_p2p_vertex(&node, &dag, vertex, "full-fallback") {
+                            if let Err(e) = send_p2p_message_locked(
+                                &writer,
+                                &NetworkMessage::RequestFullVertex(missing),
+                            ) {
+                                warn!("P2P 请求缺失 parent 失败：{e}");
+                            }
+                        }
                     }
                     NetworkMessage::LightClientHeader(header) => {
                         // 收到 peer 的 light client header（validator 多签背书），
@@ -3356,6 +3433,12 @@ fn maybe_warn_fork_anchor(node: &Node, max_lag_blocks: u64) {
 /// validator VRF 私钥的进程级共享：epoch 跟随（accept 线程推进 epoch）与
 /// validator loop 都需要它（advance_epoch_with_vrf 的 randomness 派生）。
 static VRF_SECRET: std::sync::OnceLock<Option<[u8; 32]>> = std::sync::OnceLock::new();
+/// 加入门闩（join-race 根治）：catch-up 循环完成至少一次成功 peer 请求后
+/// 置位。validator 产块循环启动前等待它（有 peers 时）——否则 fresh 节点
+/// 会在同步到主链之前就产出自己的 block 1，形成无法追赶的分叉（实测每次
+/// 节点重启都以该竞态孤立）。
+static CATCHUP_FIRST_ROUND: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 fn run_validator_loop(
     node: Arc<Node>,
@@ -3449,6 +3532,11 @@ fn run_validator_loop(
     let mut commit_vote_pins: HashMap<(u64, u64), (Hash, std::time::Instant)> = HashMap::new();
     // 恰 quorum 存活修复 · 定向补洞限频：上次向 peer 请求缺失 vertex 的时刻。
     let mut last_vertex_repair: Option<std::time::Instant> = None;
+    // 传播丢失修复：上次重播未提交自家 vertex 的时刻。compact vertex 只广播
+    // 一次，接收方缺 parent 拒收后再无人重发——该 vertex 只留在生产者本地
+    // DAG，quorum 永远收不齐它（链只出空块、tx 不上链的根因）。周期性重播
+    // 幂等（接收方按 hash 去重），仅在 vertex 尚未被 commit 引用时进行。
+    let mut last_vertex_replay: Option<std::time::Instant> = None;
     loop {
         let before = last_folded_height;
         fold_committed_vertices(&node, &mut committed_vertices, &mut last_folded_height);
@@ -3470,6 +3558,25 @@ fn run_validator_loop(
         block_interval.as_millis(),
         hex::encode(&author_pubkey.raw)
     );
+
+    // 加入门闩：配置了 peers 时，等待 catch-up 完成首轮成功请求（拿到主链
+    // 高度或确认自己就是链头）再开始产块；上限 15s（peers 不可达 = 单机
+    // bootstrap 场景，直接放行）。根除「fresh validator 先产块 1 后同步」
+    // 的分叉竞态。
+    if transport.peer_count() > 0 {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while !CATCHUP_FIRST_ROUND.load(Ordering::SeqCst) {
+            if std::time::Instant::now() >= deadline {
+                warn!("加入门闩：15s 内 catch-up 未完成首轮（peers 不可达？），放行产块");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            if shutdown.load(Ordering::SeqCst) {
+                return;
+            }
+        }
+        info!("加入门闩放行：catch-up 首轮已完成，开始产块");
+    }
 
     while !shutdown.load(Ordering::SeqCst) {
         // 折叠 tip 新增区块的 cert vertex（本地 commit / peer gossip / catch-up 导入
@@ -3519,6 +3626,34 @@ fn run_validator_loop(
         // info!("[validator-loop] round={} 进入 wait_for_pending_tx", round);
         let mut leader_gate_skip: u64 = 0;
         let _has_tx = node.wait_for_pending_tx(block_interval);
+        // 传播丢失修复：每 5s 重播最近一个未提交的自家 vertex（含其承载的
+        // tx 不重发——tx 已随首播 gossip，缺 tx 的 peer 会走 full-vertex
+        // fallback）。已被 commit 引用的 vertex 停止重播。
+        if last_vertex.is_some()
+            && last_vertex_replay
+                .map(|t| std::time::Instant::now() >= t)
+                .unwrap_or(true)
+        {
+            last_vertex_replay = Some(std::time::Instant::now() + Duration::from_secs(5));
+            let replay_vertex = last_vertex.clone();
+            if let Some(vertex) = replay_vertex {
+                let vh = vertex.vertex_hash();
+                let already_committed = committed_vertices.contains(&vh);
+                if !already_committed {
+                    if let Err(error) =
+                        gossip.broadcast_compact_vertex(&vertex, transport.as_ref())
+                    {
+                        warn!("P2P 重播 CompactVertex 失败：{error}");
+                    } else {
+                        tracing::debug!(
+                            "重播未提交自家 vertex round={} hash={}",
+                            vertex.round,
+                            hex::encode(vh)
+                        );
+                    }
+                }
+            }
+        }
         // info!(
         //     "[validator-loop] round={} wait_for_pending_tx 返回 has_tx={}",
         //     round, _has_tx
@@ -3754,6 +3889,7 @@ fn run_validator_loop(
                 vertex.tx_list.len(),
                 hex::encode(vertex_hash)
             );
+
 
             // 从第 2 轮起，检测 commit 并产出 block（缺口 #3：真实 2/3 多签闭环）。
             //

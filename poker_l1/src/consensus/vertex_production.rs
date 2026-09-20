@@ -365,18 +365,34 @@ pub fn sort_vertex_txs_s9(txs: Vec<Transaction>) -> Vec<Transaction> {
             .filter(|tx| matches!(tx.lane_hint, TxLane::GameTurn | TxLane::CheckpointAnchor))
             .cloned(),
     );
-    // 2. Public 中间
-    result.extend(
-        txs.iter()
-            .filter(|tx| tx.lane_hint == TxLane::Public)
-            .cloned(),
-    );
-    // 3. ForceSync 后置
-    result.extend(
-        txs.iter()
-            .filter(|tx| tx.lane_hint == TxLane::ForceSync)
-            .cloned(),
-    );
+    // 2. Public 中间。账户内 nonce 排序（活性修复）：跨 vertex 聚合的
+    // Public tx 若不按 (caller, nonce) 排序，同账户 nonce 大的排在小的
+    // 前面时执行全部 NonceTooHigh 跳过——被跳过的 tx 已随 vertex 消费、
+    // 不会重试，等于永久丢失，账户 nonce 停滞（实测 12 笔批量每块只有
+    // 乱序前缀 1 笔能执行）。stable sort 保持同键下既定顺序。
+    let mut public: Vec<&Transaction> = txs
+        .iter()
+        .filter(|tx| tx.lane_hint == TxLane::Public)
+        .collect();
+    public.sort_by_key(|tx| {
+        (
+            crate::account::derive_address(&tx.tagged_pubkey),
+            tx.nonce,
+        )
+    });
+    result.extend(public.into_iter().cloned());
+    // 3. ForceSync 后置（同账户 nonce 排序，理由同上）
+    let mut forcesync: Vec<&Transaction> = txs
+        .iter()
+        .filter(|tx| tx.lane_hint == TxLane::ForceSync)
+        .collect();
+    forcesync.sort_by_key(|tx| {
+        (
+            crate::account::derive_address(&tx.tagged_pubkey),
+            tx.nonce,
+        )
+    });
+    result.extend(forcesync.into_iter().cloned());
     result
 }
 

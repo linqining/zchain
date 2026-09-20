@@ -2802,6 +2802,21 @@ impl Node {
     /// Validator 节点会将 tx 装入下一个 vertex；非 Validator 节点仅缓存用于查询。
     /// C-2 修复：tx_cache 和 pending_tx 均有 FIFO 驱逐上限（10,000 条）。
     /// M-6 修复：tx_cache + order 合并到单个 Mutex，消除多锁死锁风险。
+    /// tx 是否已被本节点见过（tx_cache，含 RPC 提交与此前 P2P 接收）。
+    ///
+    /// 用途：P2P gossip 回声抑制——vertex 生产时会把承载的 tx 重新广播，
+    /// 对端若已 drain（pending 为空，RBF 无从拦截）就会再次接收同一批 tx，
+    /// 形成「drain → 入 vertex → 重广播 → 对端再入池」的无限回声循环，
+    /// pending 被复制品打到 MAX_PENDING_TX_SIZE（实测 12 笔放大到 10000）。
+    /// RPC 直提路径不经此检查，vertex 传播失败后的同 hash 合法重试不受影响。
+    pub fn has_seen_tx(&self, tx_hash: &Hash) -> bool {
+        self.tx_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(tx_hash)
+            .is_some()
+    }
+
     pub fn submit_tx(&self, tx: Transaction) -> PokerL1Result<Hash> {
         // P0 修复：准入校验前置（limits + chain_id + 签名）。SeenReceipt 是
         // 审查罚没证据的锚点，若对未验签的交易签发，攻击者可提交一笔永远
@@ -3009,6 +3024,52 @@ impl Node {
         if drained.is_empty() {
             return (Vec::new(), Vec::new());
         }
+        // 死 tx 过滤（活性修复）：Public/ForceSync/CheckpointAnchor 通道里
+        // nonce < 账户当前 nonce 的 tx 已被执行过（同 hash 重试副本 / gossip
+        // 重播 / 链重置后的残留），永远不可能再合法进块。不过滤的后果实
+        // 测严重：它们被原样塞进 vertex 撑爆载荷（508 tx × 20 batch），
+        // 出块执行全部 NonceTooLow 跳过，且 vertex 被拒回排后下一轮原样
+        // 再来 —— pending 队列积压到 MAX_PENDING_TX_SIZE 永不消化，出块
+        // 吞吐塌缩、DAG 巨 vertex 诱发 parent 缺失停摆。nonce 查询失败
+        // （账户读错误）时保守保留该 tx。
+        let mut dropped_stale = 0usize;
+        let mut stale_keys: std::collections::HashMap<Address, u64> =
+            std::collections::HashMap::new();
+        let drained: Vec<PendingTxEntry> = drained
+            .into_iter()
+            .filter(|entry| {
+                if entry.tx.lane_hint == TxLane::GameTurn {
+                    return true; // GameTurn 通道使用 game 侧 nonce，不在本过滤范围
+                }
+                let acct_nonce = match stale_keys.get(&entry.caller) {
+                    Some(n) => *n,
+                    None => {
+                        let n = self
+                            .get_account(&entry.caller)
+                            .ok()
+                            .flatten()
+                            .map(|account| account.nonce)
+                            .unwrap_or(0);
+                        stale_keys.insert(entry.caller, n);
+                        n
+                    }
+                };
+                if entry.tx.nonce < acct_nonce {
+                    dropped_stale += 1;
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect();
+        if dropped_stale > 0 {
+            tracing::info!(
+                "drain: 丢弃 {dropped_stale} 笔过期 nonce 死 tx（nonce < 账户当前值，已执行/重播残留）"
+            );
+        }
+        if drained.is_empty() {
+            return (Vec::new(), Vec::new());
+        }
         if deadline_ms == 0 {
             // 禁用路径：与历史行为完全一致（不扫描、不标记去重集合）。
             let txs: Vec<Transaction> = drained.into_iter().map(|entry| entry.tx).collect();
@@ -3078,14 +3139,33 @@ impl Node {
         let now_ms = self.now_ms();
         let receipts = self.seen_receipts.lock().unwrap_or_else(|e| e.into_inner());
         let mut pending = self.pending_tx.lock().unwrap_or_else(|e| e.into_inner());
+        let mut requeued = 0usize;
+        let mut dropped_dup = 0usize;
         for tx in txs.into_iter().rev() {
             let caller = crate::account::derive_address(&tx.tagged_pubkey);
+            // 复制放大修复：drain 排空与回排之间的窗口里，gossip 重播会把
+            // 同一批 tx 重新入队（彼时队列空、RBF 无从拦截）。若回排也不
+            // 去重，每一轮 vertex 失败回排都会让队列近似翻倍 —— 实测 12 笔
+            // 批量在数分钟内放大到 MAX_PENDING_TX_SIZE(10000)，出块载荷全
+            // 是重复副本，账户 nonce 永远追不上批量头部。同 (caller, nonce)
+            // 已在队 → 本笔回排副本直接丢弃（同 hash 语义等价）。
+            if pending.oldest_for(caller, tx.nonce).is_some() {
+                dropped_dup += 1;
+                continue;
+            }
             let arrived_at_ms = receipts
                 .get(&tx.tx_hash())
                 .map(|receipt| receipt.seen_at_ms)
                 .unwrap_or(now_ms);
             pending.push_front(caller, tx, arrived_at_ms);
+            requeued += 1;
         }
+        if dropped_dup > 0 {
+            tracing::debug!(
+                "requeue: 丢弃 {dropped_dup} 笔重复回排 tx（同 caller+nonce 已在队）"
+            );
+        }
+        let _ = requeued;
         while pending.len() > MAX_PENDING_TX_SIZE {
             let min_index = pending
                 .queue

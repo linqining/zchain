@@ -344,6 +344,12 @@ def cmd_deploy_record(args) -> int:
 
 def cmd_bridge(args) -> int:
     rpc = NodeRpc(args.rpc_host, args.rpc_port)
+    # 全节点广播面：tx 提交到每个节点，消除 gossip 丢失导致的"永不执行"
+    rpc_fans = [rpc] + [
+        NodeRpc(args.rpc_host, p)
+        for p in (18545, 18546, 18547, 18548)
+        if p != args.rpc_port
+    ]
     state_path = Path(args.state_file)
     state = load_state(state_path)
     anchored: dict = state.setdefault("anchored", {})
@@ -393,10 +399,19 @@ def cmd_bridge(args) -> int:
                 try:
                     tx_hash, tx_bytes = build_tx(args.zchain_bin, args.secret_key_hex,
                                                  payload, n)
-                    rpc.submit_tx(tx_bytes)
+                    # 广播到全部节点：出块的 validator 可能没收到单点提交的
+                    # tx（gossip 丢失）——块里不含它则该 tx 永不执行、堵死
+                    # 后续 nonce。同 hash 各节点幂等去重，全网必见。
+                    for fan in rpc_fans:
+                        try:
+                            fan.submit_tx(tx_bytes)
+                        except Exception:  # noqa: BLE001 — 单节点失败不阻断
+                            pass
                     submitted.append((binding, tx_hash, n))
-                    # 间隔提交：50 笔背靠背会把节点 RPC 打出 Connection reset
-                    time.sleep(0.3)
+                    # 密集提交（20ms）：submit_tx 会即时唤醒节点 validator loop
+                    # 单独 drain——0.3s 间隔会让每笔独占一个 vertex，每块只
+                    # 执行 1 笔。密集提交使整批落入同一次 drain/同一个 vertex。
+                    time.sleep(0.02)
                 except Exception as e:  # noqa: BLE001
                     msg = str(e)
                     if "nonce" in msg:
@@ -446,6 +461,72 @@ def cmd_bridge(args) -> int:
             return 0
         if args.once:
             return 0
+
+        # ---- 串行流模式（nonce 严格 admission 的配套提交策略）----
+        # 节点 submit_tx 校验 tx.nonce == account.nonce（严格相等，无 future
+        # nonce 缓冲）——批量预构造连续 nonce 只有首笔能入池，其余全部
+        # "nonce too high" 拒收。这里在单轮内串行推进：提交一笔 → 等 nonce
+        # 推进（0.5s 步进）→ 立即提交下一笔，免去整轮 refresh/poll 开销。
+        # 每笔执行时延 ≈ 1-2 个块间隔，吞吐由链出块率决定。
+        stream = [row for row in rows
+                  if row.get("binding_hex") and row["binding_hex"] not in anchored]
+        for row in stream:
+            binding = row["binding_hex"]
+            payload = anchor_payload({
+                "action": "settle_hand_anchor",
+                "binding": binding,
+                "table_id": row.get("table_id"),
+                "frame_index": row.get("index"),
+                "pot": row.get("pot"),
+                "rake_total": row.get("rake_total"),
+                "payouts": row.get("payouts"),
+                "ts_ms": row.get("ts_ms"),
+            })
+            confirmed = False
+            tx_hash = None
+            for attempt in range(3):
+                nonce = sync_nonce(rpc, args.address, nonce)
+                try:
+                    tx_hash, tx_bytes = build_tx(args.zchain_bin, args.secret_key_hex,
+                                                 payload, nonce)
+                    for fan in rpc_fans:
+                        try:
+                            fan.submit_tx(tx_bytes)
+                        except Exception:  # noqa: BLE001
+                            pass
+                except Exception as e:  # noqa: BLE001
+                    msg = str(e)
+                    if "nonce" in msg:
+                        continue  # 竞态：重读链上 nonce 重试
+                    print(f"[bridge] anchor {binding[:16]}… failed: {e}", flush=True)
+                    break
+                deadline = time.time() + 90.0
+                while time.time() < deadline:
+                    try:
+                        chain_nonce = rpc.get_account_nonce(args.address)
+                    except Exception:  # noqa: BLE001
+                        chain_nonce = None
+                    if chain_nonce is not None and chain_nonce > nonce:
+                        confirmed = True
+                        break
+                    time.sleep(0.5)
+                if confirmed:
+                    break
+                print(f"[bridge] anchor {binding[:16]}… nonce={nonce} 90s 未入块，重试", flush=True)
+            if confirmed and tx_hash:
+                anchored[binding] = {"tx_hash": tx_hash, "nonce": nonce}
+                newly += 1
+                state["nonce"] = nonce + 1
+                save_state(state_path, state)
+                total += 1
+                print(f"[bridge] ANCHORED binding={binding[:32]} tx={tx_hash[:20]} "
+                      f"total={total}", flush=True)
+                if args.target > 0 and total >= args.target:
+                    print(f"[bridge] target reached: {total} >= {args.target}", flush=True)
+                    return 0
+            else:
+                # 链停滞：退出流模式回到轮询（外层会重走 refresh/重试）
+                break
         time.sleep(args.poll_secs)
     total = len(anchored)
     if args.target > 0 and total < args.target:
