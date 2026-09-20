@@ -22,6 +22,11 @@ DEPLOY_DIR="${DEPLOY_DIR:-/tmp/zchain-4node}"
 RPC_BASE="${RPC_BASE:-18545}"
 P2P_BASE="${P2P_BASE:-19000}"
 BLOCK_INTERVAL_MS="${BLOCK_INTERVAL_MS:-200}"
+# RPC 监听地址：远程部署（外部服务/浏览器需要访问链）时设 0.0.0.0。
+RPC_HOST="${RPC_HOST:-127.0.0.1}"
+# 额外 genesis 充值账户（逗号分隔 pubkey_hex）：如本地结算桥账户——
+# 远程链无 transfer 交易，桥账户必须有 genesis 余额才能提交锚定 tx。
+EXTRA_ALLOC_PUBS="${EXTRA_ALLOC_PUBS:-}"
 
 if [[ "${N}" == "stop" ]]; then
   for pid_file in "${DEPLOY_DIR}"/node_*.pid; do
@@ -74,14 +79,31 @@ for ((i=0; i<N; i++)); do
 done
 echo "]" >> "$GENESIS_VALIDATORS"
 
-# ===== 3. genesis 余额分配（每 validator 1e11 基础单位）=====
+# ===== 3. genesis 余额分配（每 validator 1e11 基础单位 + 额外账户）=====
 GENESIS_ALLOC="$DEPLOY_DIR/genesis_alloc.json"
 echo "[" > "$GENESIS_ALLOC"
 for ((i=0; i<N; i++)); do
-  COMMA=""; [ "${i}" -lt $((N-1)) ] && COMMA=","
-  echo "  {\"pubkey_hex\": \"${PUBKEYS[i]}\", \"balance\": 100000000000}${COMMA}" >> "$GENESIS_ALLOC"
+  echo "  {\"pubkey_hex\": \"${PUBKEYS[i]}\", \"balance\": 100000000000}," >> "$GENESIS_ALLOC"
 done
+EXTRA_COUNT=0
+if [[ -n "$EXTRA_ALLOC_PUBS" ]]; then
+  IFS=',' read -ra EXTRA_PUBS <<< "$EXTRA_ALLOC_PUBS"
+  EXTRA_COUNT=${#EXTRA_PUBS[@]}
+  for ((i=0; i<EXTRA_COUNT; i++)); do
+    COMMA=""; [ "$((i+1))" -lt "$EXTRA_COUNT" ] && COMMA=","
+    echo "  {\"pubkey_hex\": \"$(echo "${EXTRA_PUBS[i]}" | tr -d '[:space:]')\", \"balance\": 100000000000}${COMMA}" >> "$GENESIS_ALLOC"
+  done
+fi
+# 收尾：extra 为空时 validator 段末尾多一个逗号——用临时文件重写（BSD/GNU
+# sed 通用，避免 -i 参数差异）。
+if [[ "$EXTRA_COUNT" -eq 0 ]]; then
+  TMP_ALLOC="$DEPLOY_DIR/genesis_alloc.json.tmp"
+  sed 's/100000000000},$/100000000000}/' "$GENESIS_ALLOC" > "$TMP_ALLOC" \
+    && mv "$TMP_ALLOC" "$GENESIS_ALLOC"
+fi
 echo "]" >> "$GENESIS_ALLOC"
+python3 -c "import json,sys; json.load(open('$GENESIS_ALLOC'))" \
+  || { echo "genesis_alloc.json 非法 JSON" >&2; exit 1; }
 
 # ===== 4. 密钥文件 =====
 for ((i=0; i<N; i++)); do
@@ -101,7 +123,7 @@ for ((i=0; i<N; i++)); do
   "$ZCHAIN_BIN" node \
     --role validator \
     --data-dir "$DEPLOY_DIR/node_${i}" \
-    --rpc-listen "127.0.0.1:${RPC_PORT}" \
+    --rpc-listen "${RPC_HOST}:${RPC_PORT}" \
     --p2p-listen "127.0.0.1:${P2P_PORT}" \
     --validator-key-file "$DEPLOY_DIR/validator_${i}.key" \
     --vrf-key-file "$DEPLOY_DIR/validator_${i}.vrf" \
@@ -111,7 +133,7 @@ for ((i=0; i<N; i++)); do
     $PEERS \
     > "node_${i}.log" 2>&1 &
   echo $! > "node_${i}.pid"
-  echo "  node ${i}: RPC=127.0.0.1:${RPC_PORT} P2P=127.0.0.1:${P2P_PORT} pid=$!"
+  echo "  node ${i}: RPC=${RPC_HOST}:${RPC_PORT} P2P=127.0.0.1:${P2P_PORT} pid=$!"
 done
 
 # ===== 6. 健康检查：每个节点日志出现 commit_round=（真实出块）=====

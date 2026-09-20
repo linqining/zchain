@@ -30,6 +30,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AIR_ROOT="${AIR_ROOT:-/Users/mac/projects/poker_texas_air}"
 RUN_DIR="${RUN_DIR:-/tmp/poker-air-zchain-1000}"
+ZCHAIN_RPC_HOST="${ZCHAIN_RPC_HOST:-127.0.0.1}"
 ZCHAIN_RPC_PORT="${ZCHAIN_RPC_PORT:-18545}"
 ZCHAIN_P2P_PORT="${ZCHAIN_P2P_PORT:-19000}"
 GATEWAY_PORT="${GATEWAY_PORT:-18900}"
@@ -65,6 +66,11 @@ pkill -f "target/debug/texas" 2>/dev/null || true
 pkill -f "poker_air_bridge.py bridge" 2>/dev/null || true
 pkill -f "poker_air_browser.mjs" 2>/dev/null || true
 for port in "$ZCHAIN_RPC_PORT" "$GATEWAY_PORT" "$GAME_PORT" "$CLIENT_PORT"; do
+  # 远程模式下本地 ZCHAIN_RPC_PORT 可能是 SSH 隧道监听（远程链的通道），
+  # 不能当旧实例清理。
+  if [[ "$port" == "$ZCHAIN_RPC_PORT" && "${ZCHAIN_REMOTE:-0}" == "1" ]]; then
+    continue
+  fi
   if lsof -tiTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
     kill $(lsof -tiTCP:"$port" -sTCP:LISTEN) 2>/dev/null || true
   fi
@@ -137,26 +143,13 @@ cat >"$GENESIS_ALLOC" <<EOF
 ]
 EOF
 
-# ---------- 3) zchain 节点 ----------
-log "启动 zchain validator（RPC :${ZCHAIN_RPC_PORT}，出块 500ms）…"
-"$ZCHAIN_BIN" node \
-  --role validator \
-  --data-dir "$RUN_DIR/chain" \
-  --rpc-listen "127.0.0.1:$ZCHAIN_RPC_PORT" \
-  --p2p-listen "127.0.0.1:$ZCHAIN_P2P_PORT" \
-  --validator-key-file "$KEYS_DIR/validator.key" \
-  --vrf-key-file "$KEYS_DIR/validator.vrf" \
-  --genesis-validators "$GENESIS_VALIDATORS" \
-  --genesis-alloc "$GENESIS_ALLOC" \
-  --block-interval-ms 500 \
-  >"$RUN_DIR/zchain.log" 2>&1 &
-PIDS+=($!)
+# ---------- 3) zchain 节点（本地单 validator，或远程 4 节点常驻链）----------
 rpc_call() {
-  python3 - "$1" "$2" <<'PYEOF'
+  python3 - "$1" "$2" "${ZCHAIN_RPC_HOST}" <<'PYEOF'
 import json, socket, sys
-method, port = sys.argv[1], int(sys.argv[2])
-params = json.loads(sys.argv[3]) if len(sys.argv) > 3 else {}
-s = socket.create_connection(("127.0.0.1", port), timeout=5)
+method, port, host = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+params = json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}
+s = socket.create_connection((host, port), timeout=5)
 s.sendall((json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}) + "\n").encode())
 buf = b""
 while b"\n" not in buf:
@@ -167,10 +160,37 @@ while b"\n" not in buf:
 print(buf.split(b"\n", 1)[0].decode())
 PYEOF
 }
-for i in $(seq 1 60); do
-  if rpc_call get_block_count "$ZCHAIN_RPC_PORT" >/dev/null 2>&1; then break; fi
-  sleep 1
-done
+if [[ "${ZCHAIN_REMOTE:-0}" == "1" || ( "$ZCHAIN_RPC_HOST" != "127.0.0.1" && "$ZCHAIN_RPC_HOST" != "localhost" ) ]]; then
+  # 远程模式：链已在远程服务器以 4 节点常驻部署（scripts/deploy_4node.sh，
+  # RPC_HOST=0.0.0.0 且 EXTRA_ALLOC_PUBS 含本 RUN_DIR 的 bridge.pub——远程链
+  # 无 transfer 交易，桥账户必须有 genesis 余额才能提交锚定 tx）。
+  # ZCHAIN_REMOTE=1 允许 RPC 经 SSH 隧道映射到 127.0.0.1（安全组未放行时）。
+  log "远程 zchain 模式：${ZCHAIN_RPC_HOST}:${ZCHAIN_RPC_PORT}（4 节点常驻链）"
+  REMOTE_OK=0
+  for i in $(seq 1 60); do
+    if rpc_call get_block_count "$ZCHAIN_RPC_PORT" >/dev/null 2>&1; then REMOTE_OK=1; break; fi
+    sleep 1
+  done
+  [ "$REMOTE_OK" == 1 ] || { echo "远程 zchain RPC 不可达: $ZCHAIN_RPC_HOST:$ZCHAIN_RPC_PORT"; exit 1; }
+else
+  log "启动 zchain validator（RPC :${ZCHAIN_RPC_PORT}，出块 500ms）…"
+  "$ZCHAIN_BIN" node \
+    --role validator \
+    --data-dir "$RUN_DIR/chain" \
+    --rpc-listen "127.0.0.1:$ZCHAIN_RPC_PORT" \
+    --p2p-listen "127.0.0.1:$ZCHAIN_P2P_PORT" \
+    --validator-key-file "$KEYS_DIR/validator.key" \
+    --vrf-key-file "$KEYS_DIR/validator.vrf" \
+    --genesis-validators "$GENESIS_VALIDATORS" \
+    --genesis-alloc "$GENESIS_ALLOC" \
+    --block-interval-ms 500 \
+    >"$RUN_DIR/zchain.log" 2>&1 &
+  PIDS+=($!)
+  for i in $(seq 1 60); do
+    if rpc_call get_block_count "$ZCHAIN_RPC_PORT" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+fi
 HEIGHT=$(rpc_call get_block_count "$ZCHAIN_RPC_PORT" 2>/dev/null | python3 -c 'import json,sys; print((json.load(sys.stdin).get("result") or {}).get("height") or 0)' 2>/dev/null || echo 0)
 log "zchain 已就绪（height=${HEIGHT}，日志 $RUN_DIR/zchain.log）"
 
@@ -183,6 +203,7 @@ ATT_PUB=$(python3 "$ROOT/scripts/poker_air_bridge.py" pubkeys --attestor-seed-he
 log "appchain sequencer_pub=$SEQ_PUB attestor_verifier_key=$ATT_PUB"
 DEPLOY_OUT=$(python3 "$ROOT/scripts/poker_air_bridge.py" deploy-record \
   --secret-key-hex "$BRIDGE_KEY" --address "$BRIDGE_ADDR" --rpc-port "$ZCHAIN_RPC_PORT" \
+  --rpc-host "$ZCHAIN_RPC_HOST" \
   --zchain-bin "$ZCHAIN_BIN" \
   --meta "{\"sequencer_public\":\"$SEQ_PUB\",\"attestor_verifier_key\":\"$ATT_PUB\",\"settlement_exit\":\"appchain\",\"air_engine\":\"poker-appchain-texasair\"}")
 log "部署记录已上链: $DEPLOY_OUT"
@@ -228,7 +249,7 @@ log "启动 explorer_gateway（:${GATEWAY_PORT}，WAL=$RUN_DIR/appchain/sequence
 "$GATEWAY_BIN" \
   --appchain-wal "$RUN_DIR/appchain/sequencer.wal" \
   --sequencer-public "$SEQ_PUB" \
-  --l1-rpc "http://127.0.0.1:$ZCHAIN_RPC_PORT" \
+  --l1-rpc "http://$ZCHAIN_RPC_HOST:$ZCHAIN_RPC_PORT" \
   --listen "127.0.0.1:$GATEWAY_PORT" \
   --public \
   >"$RUN_DIR/gateway.log" 2>&1 &
@@ -245,6 +266,7 @@ log "gateway 就绪: http://127.0.0.1:$GATEWAY_PORT"
 log "启动结算桥（目标 $TARGET_HANDS 手）…"
 python3 "$ROOT/scripts/poker_air_bridge.py" bridge \
   --secret-key-hex "$BRIDGE_KEY" --address "$BRIDGE_ADDR" --rpc-port "$ZCHAIN_RPC_PORT" \
+  --rpc-host "$ZCHAIN_RPC_HOST" \
   --zchain-bin "$ZCHAIN_BIN" --gateway-bin "$GATEWAY_BIN" \
   --wal "$RUN_DIR/appchain/sequencer.wal" \
   --sequencer-public "$SEQ_PUB" \

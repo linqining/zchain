@@ -109,21 +109,51 @@ class NodeRpc:
         self.host = host
         self.port = port
         self.timeout = timeout
+        # 持久连接：批量提交时每笔新建 TCP 会被节点拒绝/重置（节点
+        # max_connections 全局 128 含 P2P，抖动期新连接最易被拒）。
+        # 复用单条连接 + 断线自动重连。
+        self._sock: socket.socket | None = None
+        self._buf = b""
+
+    def _connect(self) -> socket.socket:
+        s = socket.create_connection((self.host, self.port), timeout=self.timeout)
+        self._sock = s
+        self._buf = b""
+        return s
+
+    def _ensure(self) -> socket.socket:
+        if self._sock is None:
+            return self._connect()
+        return self._sock
+
+    def _reset(self) -> None:
+        try:
+            if self._sock is not None:
+                self._sock.close()
+        except Exception:  # noqa: BLE001
+            pass
+        self._sock = None
+        self._buf = b""
 
     def call(self, method: str, params) -> dict:
         req = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
-        with socket.create_connection((self.host, self.port), timeout=self.timeout) as s:
-            s.sendall((req + "\n").encode())
-            buf = b""
-            while b"\n" not in buf:
-                chunk = s.recv(65536)
-                if not chunk:
-                    break
-                buf += chunk
-        line = buf.split(b"\n", 1)[0].decode().strip()
-        if not line:
-            raise RuntimeError(f"empty RPC response for {method}")
-        return json.loads(line)
+        last_err: Exception | None = None
+        for _ in range(2):  # 一次失败重连重试
+            try:
+                s = self._ensure()
+                s.sendall((req + "\n").encode())
+                buf = self._buf
+                while b"\n" not in buf:
+                    chunk = s.recv(65536)
+                    if not chunk:
+                        raise ConnectionError("connection closed by node")
+                    buf += chunk
+                line, self._buf = buf.split(b"\n", 1)
+                return json.loads(line.decode())
+            except (OSError, ConnectionError) as e:
+                last_err = e
+                self._reset()
+        raise last_err if last_err else RuntimeError("rpc call failed")
 
     def submit_tx(self, tx_bytes: list[int]) -> str:
         resp = self.call("submit_tx", {"tx_bytes": tx_bytes})
@@ -249,15 +279,34 @@ def cmd_pubkeys(args) -> int:
 
 
 def submit_and_confirm(rpc: NodeRpc, zchain_bin: str, secret_hex: str,
-                       payload: str, nonce: int, wait_secs: float) -> tuple[str, bool]:
+                       payload: str, nonce: int, address: str | None = None,
+                       wait_secs: float = 30.0) -> tuple[str, bool]:
+    """提交并以「账户 nonce 推进」确认真正入块执行。
+
+    不能用 get_tx 判定：节点的 get_tx 读的是 submit_tx 时写入的**内存
+    tx_cache**（rpc/mod.rs submit 路径先 insert 再返回），提交即命中——
+    与是否被打包进块无关。曾因此把 300+ 笔从未入块的 tx 误标 ANCHORED。
+    账户 nonce 是执行序号：account_nonce > tx nonce ⟺ 本笔已被执行。
+    （桥单线程串行提交，同账户无并发在途 tx，语义精确。）"""
     tx_hash, tx_bytes = build_tx(zchain_bin, secret_hex, payload, nonce)
     rpc.submit_tx(tx_bytes)
     deadline = time.time() + wait_secs
     while time.time() < deadline:
-        tx = rpc.get_tx(tx_hash)
-        if tx is not None:
-            return tx_hash, True
-        time.sleep(0.5)
+        if address:
+            try:
+                chain_nonce = rpc.get_account_nonce(address)
+            except Exception:  # noqa: BLE001 — 网络抖动，下轮再查
+                chain_nonce = None
+            if chain_nonce is not None and chain_nonce > nonce:
+                return tx_hash, True
+        else:
+            # 无 address 时退化为旧语义（仅本地演练用，不保证入块）
+            tx = rpc.get_tx(tx_hash)
+            if tx is not None:
+                return tx_hash, True
+        # 2s 间隔：远程低配盘上每次 get_account 都是节点 RocksDB 读，
+        # 0.5s 轮询会叠加出块执行把云盘读 IOPS 打满（IO wait 锁死全机）。
+        time.sleep(2.0)
     return tx_hash, False
 
 
@@ -276,7 +325,7 @@ def sync_nonce(rpc: NodeRpc, address: str | None, fallback: int) -> int:
 
 
 def cmd_deploy_record(args) -> int:
-    rpc = NodeRpc("127.0.0.1", args.rpc_port)
+    rpc = NodeRpc(args.rpc_host, args.rpc_port)
     meta = json.loads(args.meta) if args.meta else {}
     record = {
         "action": "contract_deploy_record",
@@ -287,13 +336,14 @@ def cmd_deploy_record(args) -> int:
     }
     nonce = sync_nonce(rpc, args.address, args.nonce)
     tx_hash, ok = submit_and_confirm(rpc, args.zchain_bin, args.secret_key_hex,
-                                     anchor_payload(record), nonce, args.wait_secs)
+                                     anchor_payload(record), nonce,
+                                     address=args.address, wait_secs=args.wait_secs)
     print(json.dumps({"deploy_record_tx": tx_hash, "included": ok, "nonce": nonce}))
     return 0 if ok else 1
 
 
 def cmd_bridge(args) -> int:
-    rpc = NodeRpc("127.0.0.1", args.rpc_port)
+    rpc = NodeRpc(args.rpc_host, args.rpc_port)
     state_path = Path(args.state_file)
     state = load_state(state_path)
     anchored: dict = state.setdefault("anchored", {})
@@ -312,7 +362,13 @@ def cmd_bridge(args) -> int:
             print(f"[bridge] round {round_no}: refresh failed: {e}", flush=True)
             rows = []
         newly = 0
+        # ---- 批量模式：连续 nonce 预构造 N 笔一次提交，再统一等 nonce 追上。
+        # 链按 nonce 序执行，批量入块吞吐 ~N/(1-2 块间隔)，远快于逐笔确认
+        # （链重置周期 ~10 分钟，全量重锚必须分钟级完成才能收敛）。
+        batch: list[tuple[str, str]] = []  # (binding, payload)
         for row in rows:
+            if args.max_per_round > 0 and len(batch) >= args.max_per_round:
+                break  # 余下的留给下一轮（WAL 不丢）
             binding = row.get("binding_hex")
             if not binding or binding in anchored:
                 continue
@@ -326,47 +382,62 @@ def cmd_bridge(args) -> int:
                 "payouts": row.get("payouts"),
                 "ts_ms": row.get("ts_ms"),
             })
-            # 每次提交前都从链上取权威 nonce（admission 要求 tx.nonce 与
-            # 账户 nonce 严格一致；本地计数在失败/竞态下必然漂移）。
-            nonce = sync_nonce(rpc, args.address, nonce)
-            tx_hash = None
-            included = False
-            for attempt in range(3):
+            batch.append((binding, payload))
+        if batch:
+            base_nonce = sync_nonce(rpc, args.address, nonce)
+            nonce = base_nonce
+            submitted: list[tuple[str, str, int]] = []  # (binding, tx_hash, nonce)
+            ok_submit = True
+            for offset, (binding, payload) in enumerate(batch):
+                n = base_nonce + offset
                 try:
                     tx_hash, tx_bytes = build_tx(args.zchain_bin, args.secret_key_hex,
-                                                 payload, nonce)
+                                                 payload, n)
                     rpc.submit_tx(tx_bytes)
+                    submitted.append((binding, tx_hash, n))
+                    # 间隔提交：50 笔背靠背会把节点 RPC 打出 Connection reset
+                    time.sleep(0.3)
                 except Exception as e:  # noqa: BLE001
                     msg = str(e)
                     if "nonce" in msg:
-                        # nonce 竞态（他处已提交）：读链上最新值原地重试。
+                        # 竞态/重置：放弃本批，下轮以链上权威 nonce 重来
                         nonce = sync_nonce(rpc, args.address, nonce)
-                        continue
+                        ok_submit = False
+                        break
                     print(f"[bridge] anchor {binding[:16]}… failed: {e}", flush=True)
                     break
-                # 提交受理：轮询确认入块（节点空闲休眠由新 tx 提交唤醒，
-                # 正常 <1s 入块；90s 上限覆盖极端情况）。
-                deadline = time.time() + args.wait_secs
+            if ok_submit and submitted:
+                target_nonce = submitted[-1][2]
+                deadline = time.time() + max(args.wait_secs, 60.0)
+                done_nonce = base_nonce
                 while time.time() < deadline:
-                    if rpc.get_tx(tx_hash) is not None:
-                        included = True
+                    try:
+                        chain_nonce = rpc.get_account_nonce(args.address)
+                    except Exception:  # noqa: BLE001 — 下轮再查
+                        chain_nonce = None
+                    if chain_nonce is None:
+                        time.sleep(2.0)
+                        continue
+                    done_nonce = chain_nonce - 1
+                    if chain_nonce > target_nonce:
+                        done_nonce = target_nonce
                         break
-                    time.sleep(0.5)
-                if included:
-                    break
-                # 未在窗口内入块：不再用其他 nonce 重发（严格 nonce 口径下
-                # 只允许一笔在途），留给下一轮以链上权威 nonce 重试。
-                print(f"[bridge] anchor {binding[:16]}… submitted (nonce={nonce}) "
-                      f"but not included in {args.wait_secs}s — will retry next round",
-                      flush=True)
-                break
-            if included and tx_hash:
-                anchored[binding] = {"tx_hash": tx_hash, "nonce": nonce}
-                newly += 1
-                state["nonce"] = nonce + 1
+                    time.sleep(2.0)
+                for binding, tx_hash, n in submitted:
+                    if n <= done_nonce:
+                        anchored[binding] = {"tx_hash": tx_hash, "nonce": n}
+                        newly += 1
+                    else:
+                        # 链停在半途：已执行部分入账，未执行部分下轮重来
+                        print(f"[bridge] anchor {binding[:16]}… nonce={n} 未入块"
+                              f"（链执行到 {done_nonce}），下轮重试", flush=True)
+                state["nonce"] = done_nonce + 1
                 save_state(state_path, state)
-                print(f"[bridge] ANCHORED binding={binding} tx={tx_hash} "
-                      f"pot={row.get('pot')} total={len(anchored)}", flush=True)
+                if newly:
+                    last = submitted[-1]
+                    print(f"[bridge] ANCHORED batch={newly}/{len(submitted)} "
+                          f"last_binding={submitted[newly-1][0][:24]} "
+                          f"total={len(anchored)}", flush=True)
         total = len(anchored)
         print(f"[bridge] round {round_no}: settlements={len(rows)} newly_anchored={newly} "
               f"total_anchored={total}", flush=True)
@@ -396,6 +467,7 @@ def main() -> int:
     p.add_argument("--secret-key-hex", required=True)
     p.add_argument("--address", default="", help="发送方账户地址（keygen address_hex；用于链上 nonce 同步）")
     p.add_argument("--rpc-port", type=int, required=True)
+    p.add_argument("--rpc-host", default="127.0.0.1", help="zchain RPC host（远程 4 节点部署时传公网地址）")
     p.add_argument("--zchain-bin", default="./target/release/zchain")
     p.add_argument("--nonce", type=int, default=0)
     p.add_argument("--meta", default="")
@@ -405,6 +477,7 @@ def main() -> int:
     p.add_argument("--secret-key-hex", required=True)
     p.add_argument("--address", default="", help="发送方账户地址（keygen address_hex；用于链上 nonce 同步）")
     p.add_argument("--rpc-port", type=int, required=True)
+    p.add_argument("--rpc-host", default="127.0.0.1", help="zchain RPC host（远程 4 节点部署时传公网地址）")
     p.add_argument("--wal", required=True)
     p.add_argument("--sequencer-public", required=True)
     p.add_argument("--gateway-bin", default="./target/release/explorer_gateway")
@@ -412,6 +485,10 @@ def main() -> int:
     p.add_argument("--state-file", required=True)
     p.add_argument("--poll-secs", type=float, default=10.0)
     p.add_argument("--target", type=int, default=0)
+    p.add_argument("--max-per-round", type=int, default=0,
+                   help="每轮最多锚定笔数（0=不限）。爆发提交会诱发节点 DAG 视图"
+                        "分叉（mempool 不同步 → vertex parent not found → 全链停"
+                        "摆），远程链建议 5-10 笔/轮温和提交。")
     p.add_argument("--max-rounds", type=int, default=0)
     p.add_argument("--wait-secs", type=float, default=25.0)
     p.add_argument("--once", action="store_true")
