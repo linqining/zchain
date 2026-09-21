@@ -358,6 +358,30 @@ def chain_nonce_max(fans, address):
     return best
 
 
+def strict_chain_nonce(rpc_fans, rpc, address, attempts: int = 8):
+    """严格获取链上账户 nonce（幽灵 anchored 根修，2026-09-21）。
+
+    旧路径：chain_nonce_max 全部读取失败 → sync_nonce 再失败 → 回退调用方
+    的陈旧游标。陈旧 nonce 的 submit 被四个节点静默拒绝（异常被吞），而
+    确认判据「chain_nonce > nonce」因 nonce 停在旧值**瞬时误判为已确认**
+    —— 同一 nonce 被两个 binding 记入 anchored，其中一个从未上链（远程
+    重锚 3029 笔实测 10 条幽灵，含启动期读到 nonce 0 的记录）。
+
+    现改为：两路读取轮流重试（退避至多 ~20s），全部失败返回 None，由调用
+    方放弃本轮；**绝不用陈旧 nonce 提交**。"""
+    delay = 0.5
+    for _ in range(attempts):
+        n = chain_nonce_max(rpc_fans, address)
+        if n is not None:
+            return n
+        n = sync_nonce(rpc, address, None)
+        if n is not None:
+            return n
+        time.sleep(delay)
+        delay = min(delay * 1.5, 5.0)
+    return None
+
+
 def cmd_bridge(args) -> int:
     rpc = NodeRpc(args.rpc_host, args.rpc_port)
     # 全节点广播面：tx 提交到每个节点，消除 gossip 丢失导致的"永不执行"。
@@ -414,10 +438,15 @@ def cmd_bridge(args) -> int:
             })
             batch.append((binding, payload))
         if batch and not args.stream_only:
-            base_nonce = sync_nonce(rpc, args.address, nonce)
-            nonce = base_nonce
+            # 严格取 nonce（同 stream 模式幽灵根修）：读取失败重试，绝不退回
+            # 陈旧游标 —— 全部 submit 会被静默拒绝，而确认判据瞬时误判。
+            base_nonce = strict_chain_nonce(rpc_fans, rpc, args.address)
+            if base_nonce is None:
+                print("[bridge] chain nonce 不可读，本轮跳过批量（下轮重试）", flush=True)
+                batch = []
+            nonce = base_nonce if base_nonce is not None else nonce
             submitted: list[tuple[str, str, int]] = []  # (binding, tx_hash, nonce)
-            ok_submit = True
+            ok_submit = bool(batch)
             for offset, (binding, payload) in enumerate(batch):
                 n = base_nonce + offset
                 try:
@@ -514,9 +543,16 @@ def cmd_bridge(args) -> int:
             })
             confirmed = False
             tx_hash = None
+            nonce_dead = False
             for attempt in range(3):
-                fresh = chain_nonce_max(rpc_fans, args.address)
-                nonce = fresh if fresh is not None else sync_nonce(rpc, args.address, nonce)
+                # 严格取 nonce（幽灵 anchored 根修）：读取失败重试，绝不退回
+                # 陈旧游标——陈旧 nonce 的 submit 被静默拒绝后，确认判据
+                # 「chain_nonce > nonce」瞬时误判（详见 strict_chain_nonce）。
+                fresh = strict_chain_nonce(rpc_fans, rpc, args.address)
+                if fresh is None:
+                    nonce_dead = True
+                    break
+                nonce = fresh
                 try:
                     tx_hash, tx_bytes = build_tx(args.zchain_bin, args.secret_key_hex,
                                                  payload, nonce)
@@ -554,6 +590,11 @@ def cmd_bridge(args) -> int:
                 if confirmed:
                     break
                 print(f"[bridge] anchor {binding[:16]}… nonce={nonce} 90s 未入块，重试", flush=True)
+            if nonce_dead:
+                # 链 nonce 持续不可读：整轮放弃（绝不带陈旧 nonce 继续提交）。
+                print("[bridge] chain nonce 持续不可读，退出本轮 stream（下轮重试）",
+                      flush=True)
+                break
             if confirmed and tx_hash:
                 anchored[binding] = {"tx_hash": tx_hash, "nonce": nonce}
                 newly += 1

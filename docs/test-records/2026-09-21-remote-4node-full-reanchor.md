@@ -46,7 +46,10 @@
   全量 3029 手结算锚定完成（含 1000 手 e2e 测试产生的全部边缘场景：
   全押/边池/平分/弃牌/强制同步等，与本地验证同一 WAL）。
 - 验收器要求的三重证据（链高 / get_tx / 账户 nonce）全部满足。
-- 遗留（非阻塞）：桥的「重试窗口同 nonce」竞态已在脚本中定性
-  （`for attempt in range(3)` 放弃后下一轮重入流模式时，旧 pending tx
-  未执行导致 fresh nonce 未推进），本轮通过对账修复；脚本级根治可后续
-  在放弃前等待 nonce 推进或直接放弃该 binding 到下一轮。
+- 遗留修复（已完成，2026-09-21）：桥的「重试窗口同 nonce」竞态已根修——
+  机制为 chain_nonce_max 全部读取失败 → sync_nonce 再失败 → 回退陈旧游标，
+  陈旧 nonce 的 submit 被四节点静默拒绝后确认判据「chain_nonce > nonce」
+  瞬时误判（远程重锚 3029 笔实测 10 条幽灵，含启动期 nonce-0 记录）。
+  新增 `strict_chain_nonce`（两路读取退避重试，全部失败返回 None、整轮
+  放弃，绝不带陈旧 nonce 提交），stream/batch 两路径接入。本地环 smoke
+  验证：3 笔锚定 nonce 严格连续（700/701/702），链上 nonce=703=state。
