@@ -104,9 +104,10 @@ pub use bullshark::{
     author_has_vertex_since, BlockProjection, CommitLeader, CommitProjectionAttempt, Dag,
     assemble_commit_certificate, attempt_commit_projection, bullshark_linear_order,
     bullshark_linear_order_uncommitted, canonical_commit_candidates, detect_commit_cert_equivocation,
-    detect_commit_leader, find_missing_parent_vertices, has_quorum_distinct_author_references,
-    project_block_from_commit, validate_commit_certificate_fields,
-    validate_commit_certificate_quorum, COMMIT_ABSENCE_ROUNDS,
+    detect_commit_leader, evaluate_leader_wave, find_missing_parent_vertices,
+    has_quorum_distinct_author_references, project_block_from_commit, round_leader_index,
+    validate_commit_certificate_fields, validate_commit_certificate_quorum, WaveOutcome,
+    COMMIT_ABSENCE_ROUNDS,
 };
 
 use blake2::Blake2bVar;

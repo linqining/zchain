@@ -455,6 +455,103 @@ pub fn has_quorum_distinct_author_references(
     false
 }
 
+/// wave-3 固定 leader 评估结果（Mysticeti 对齐：L 轮 leader、L+1 轮投票、
+/// L+2 轮决策）。
+///
+/// 票/证书都只数**固定轮次**（L+1 / L+2），图案有界、随 frontier 冻结——
+/// 与 [`detect_commit_leader`] 的「扫描 leader 之后全部轮次」不同，本评估是
+/// (DAG, committed) 的稳定纯函数：视图收敛后所有节点必然得出同一结论，
+/// 投票语句天然汇聚，无需意图稳定门/钉扎兜底。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WaveOutcome {
+    /// 直接提交：决策轮（L+2）出现 ≥ quorum 个 certificate，每个 certificate
+    /// 的 parents 含 ≥ quorum 张 L+1 轮票（quorum 嵌套 = 2-chain）。
+    Commit {
+        /// L+1 轮支持 leader 的 vertex（按 author 去重，升序遍历序）。
+        votes: Vec<Hash>,
+        /// L+2 轮构成 certificate 的 vertex（按 author 去重）。
+        certs: Vec<Hash>,
+    },
+    /// 跳过：L+1 轮 ≥ quorum 个 author 的 vertex 未引用 leader（blame）。
+    /// 支持/非支持按 author 互斥，blame-quorum 与 vote-quorum 不可能并存
+    /// （quorum 交集），故 Skip 与 Commit 全局互斥——跳过是安全的活性决策。
+    Skip,
+    /// 未决：票数/blame 均未达 quorum（frontier 不足或视角未收敛）。
+    Undecided,
+}
+
+/// 评估 round `leader_round` 的 leader vertex（`leader_hash`）的波。
+///
+/// 参数：
+/// - `dag`：DAG 存储
+/// - `leader_hash`：预定 leader 的 vertex hash（vertex 本身可以尚不在本地：
+///   票按 parent 指针计数，不依赖 leader vertex 在场；投影阶段才要求在场）
+/// - `leader_round`：leader 所在轮 L
+/// - `validator_count`：当前 validator 集规模（quorum 口径与其余检测一致）
+pub fn evaluate_leader_wave(
+    dag: &Dag,
+    leader_hash: &Hash,
+    leader_round: Round,
+    validator_count: usize,
+) -> WaveOutcome {
+    let required = required_quorum(validator_count);
+    // 票：恰在 L+1 轮、parent_hashes 含 leader 的 vertex（按 author 去重）。
+    let mut vote_authors: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut votes: Vec<Hash> = Vec::new();
+    let mut blame_authors: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for vh in dag.round_vertices(leader_round.saturating_add(1)) {
+        let Some(v) = dag.get(vh) else {
+            continue;
+        };
+        if v.parent_hashes.contains(leader_hash) {
+            if vote_authors.insert(v.author_pubkey.to_bytes()) {
+                votes.push(*vh);
+            }
+        } else if blame_authors.insert(v.author_pubkey.to_bytes()) {
+            // blame 只计数，不收集 hash（跳过无需投影）。
+        }
+    }
+    // certificate：恰在 L+2 轮、parents 覆盖 ≥ quorum 个 supporter author 的 vertex。
+    let mut cert_authors: BTreeSet<Vec<u8>> = BTreeSet::new();
+    let mut certs: Vec<Hash> = Vec::new();
+    for ch in dag.round_vertices(leader_round.saturating_add(2)) {
+        let Some(c) = dag.get(ch) else {
+            continue;
+        };
+        let mut covered: BTreeSet<Vec<u8>> = BTreeSet::new();
+        for p in &c.parent_hashes {
+            if let Some(pv) = dag.get(p)
+                && pv.round == leader_round.saturating_add(1)
+                && pv.parent_hashes.contains(leader_hash)
+                && covered.insert(pv.author_pubkey.to_bytes())
+            {
+                if covered.len() >= required {
+                    break;
+                }
+            }
+        }
+        if covered.len() >= required && cert_authors.insert(c.author_pubkey.to_bytes()) {
+            certs.push(*ch);
+        }
+    }
+    if cert_authors.len() >= required {
+        return WaveOutcome::Commit { votes, certs };
+    }
+    if blame_authors.len() >= required {
+        return WaveOutcome::Skip;
+    }
+    WaveOutcome::Undecided
+}
+
+/// 轮转 leader 下标（wave-3 固定 leader，Mysticeti pipelining 等效形式）：
+/// round r 的预定 leader = 排序后活跃 validator 集第 `r % n` 位。
+///
+/// 纯轮数函数，跨节点零沟通即一致；每轮皆有 leader（波间隔 = 3 轮的提交
+/// 时延与每轮一个 leader 的吞吐同时成立）。
+pub fn round_leader_index(round: Round, validator_count: usize) -> usize {
+    (round as usize) % validator_count.max(1)
+}
+
 /// 获取 vertex 的所有祖先（递归遍历 parent_hashes，含自身）。
 fn collect_ancestors(dag: &Dag, hash: &Hash) -> Vec<Hash> {
     let mut visited: BTreeSet<Hash> = BTreeSet::new();
@@ -980,6 +1077,105 @@ mod tests {
             gameturn_nonce: None,
             is_fallback: false,
         }
+    }
+
+    // ===== wave-3 固定 leader 评估测试 =====
+
+    #[test]
+    fn wave_leader_rotation_is_deterministic() {
+        assert_eq!(round_leader_index(1, 4), 1);
+        assert_eq!(round_leader_index(2, 4), 2);
+        assert_eq!(round_leader_index(4, 4), 0);
+        assert_eq!(round_leader_index(5, 4), 1);
+        // 单 validator：恒为 0（len.max(1) 防零）
+        assert_eq!(round_leader_index(9, 1), 0);
+        assert_eq!(round_leader_index(3, 0), 0);
+    }
+
+    #[test]
+    fn wave_commit_on_double_quorum() {
+        // L 轮 leader；L+1 三个 supporter（quorum 票）；L+2 三个 cert
+        //（各覆盖三张票）→ Commit。
+        let mut dag = Dag::new();
+        let leader = dag.insert(make_vertex(1, 5, 0x10, vec![]));
+        let v11 = dag.insert(make_vertex(1, 6, 0x11, vec![leader]));
+        let v12 = dag.insert(make_vertex(1, 6, 0x12, vec![leader]));
+        let v13 = dag.insert(make_vertex(1, 6, 0x13, vec![leader]));
+        let c1 = dag.insert(make_vertex(1, 7, 0x11, vec![v11, v12, v13]));
+        let _c2 = dag.insert(make_vertex(1, 7, 0x12, vec![v11, v12, v13]));
+        let _c3 = dag.insert(make_vertex(1, 7, 0x13, vec![v11, v12, v13]));
+        let _ = c1;
+        match evaluate_leader_wave(&dag, &leader, 5, 4) {
+            WaveOutcome::Commit { votes, certs } => {
+                assert_eq!(votes.len(), 3);
+                assert_eq!(certs.len(), 3);
+            }
+            other => panic!("期望 Commit，实际 {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wave_undecided_before_decision_round() {
+        // 只有票没有 cert → Undecided
+        let mut dag = Dag::new();
+        let leader = dag.insert(make_vertex(1, 5, 0x10, vec![]));
+        dag.insert(make_vertex(1, 6, 0x11, vec![leader]));
+        dag.insert(make_vertex(1, 6, 0x12, vec![leader]));
+        dag.insert(make_vertex(1, 6, 0x13, vec![leader]));
+        assert_eq!(
+            evaluate_leader_wave(&dag, &leader, 5, 4),
+            WaveOutcome::Undecided
+        );
+    }
+
+    #[test]
+    fn wave_skip_on_blame_quorum() {
+        // L+1 三个 vertex 均未引用 leader → blame quorum → Skip
+        let mut dag = Dag::new();
+        let leader = dag.insert(make_vertex(1, 5, 0x10, vec![]));
+        let other = dag.insert(make_vertex(1, 5, 0x0f, vec![]));
+        dag.insert(make_vertex(1, 6, 0x11, vec![other]));
+        dag.insert(make_vertex(1, 6, 0x12, vec![other]));
+        dag.insert(make_vertex(1, 6, 0x13, vec![other]));
+        assert_eq!(evaluate_leader_wave(&dag, &leader, 5, 4), WaveOutcome::Skip);
+    }
+
+    #[test]
+    fn wave_votes_only_from_exact_round() {
+        // 票只数 L+1 轮：L+1 仅 2 张票，L+4 轮迟到引用不计入 → 不可能凑成
+        // Commit（Undecided），证明图案有界（对照旧 detect_commit_leader 的
+        // 全轮扫描）。
+        let mut dag = Dag::new();
+        let leader = dag.insert(make_vertex(1, 5, 0x10, vec![]));
+        let v11 = dag.insert(make_vertex(1, 6, 0x11, vec![leader]));
+        let v12 = dag.insert(make_vertex(1, 6, 0x12, vec![leader]));
+        let _v13 = dag.insert(make_vertex(1, 6, 0x13, vec![])); // 非支持者
+        let c1 = dag.insert(make_vertex(1, 7, 0x11, vec![v11, v12])); // 仅覆盖 2 票 < 3
+        let _c2 = dag.insert(make_vertex(1, 7, 0x12, vec![v11, v12]));
+        // 迟到引用：round 9 的 vertex 直接引用 leader —— 不计为票
+        dag.insert(make_vertex(1, 9, 0x0e, vec![leader, c1]));
+        assert_eq!(
+            evaluate_leader_wave(&dag, &leader, 5, 4),
+            WaveOutcome::Undecided
+        );
+    }
+
+    #[test]
+    fn wave_cert_requires_vote_quorum_inside_parents() {
+        // L+2 cert 的 parents 必须覆盖 ≥ quorum 张票：只覆盖 2/3 的 cert 不算
+        let mut dag = Dag::new();
+        let leader = dag.insert(make_vertex(1, 5, 0x10, vec![]));
+        let v11 = dag.insert(make_vertex(1, 6, 0x11, vec![leader]));
+        let v12 = dag.insert(make_vertex(1, 6, 0x12, vec![leader]));
+        let v13 = dag.insert(make_vertex(1, 6, 0x13, vec![leader]));
+        dag.insert(make_vertex(1, 7, 0x11, vec![v11, v12])); // 覆盖 2 票
+        dag.insert(make_vertex(1, 7, 0x12, vec![v12, v13])); // 覆盖 2 票
+        dag.insert(make_vertex(1, 7, 0x13, vec![v11, v13])); // 覆盖 2 票
+        // 三个"半 cert"各缺一票 → 不足以 Commit，但 blame=0 → Undecided
+        assert_eq!(
+            evaluate_leader_wave(&dag, &leader, 5, 4),
+            WaveOutcome::Undecided
+        );
     }
 
     // ===== Dag 存储测试 =====

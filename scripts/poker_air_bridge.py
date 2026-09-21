@@ -342,12 +342,30 @@ def cmd_deploy_record(args) -> int:
     return 0 if ok else 1
 
 
+def chain_nonce_max(fans, address):
+    """跨节点读账户 nonce 取最大值（最新视图）。
+
+    单节点读取会被块应用滞后拖累（实测读到 0 而实际 4），导致 sync_nonce
+    回退旧值 → 重提旧 nonce → 拒收 + 90s 空等。取 max 恒为新视图。"""
+    best = None
+    for fan in fans:
+        try:
+            n = fan.get_account_nonce(address)
+        except Exception:  # noqa: BLE001
+            continue
+        if n is not None and (best is None or n > best):
+            best = n
+    return best
+
+
 def cmd_bridge(args) -> int:
     rpc = NodeRpc(args.rpc_host, args.rpc_port)
-    # 全节点广播面：tx 提交到每个节点，消除 gossip 丢失导致的"永不执行"
+    # 全节点广播面：tx 提交到每个节点，消除 gossip 丢失导致的"永不执行"。
+    # 端口组从主端口推导（18546→18545-18548；SSH 隧道偏移 28546→28545-28548）。
+    fan_base = args.rpc_port - ((args.rpc_port - 5) % 4)
     rpc_fans = [rpc] + [
         NodeRpc(args.rpc_host, p)
-        for p in (18545, 18546, 18547, 18548)
+        for p in range(fan_base, fan_base + 4)
         if p != args.rpc_port
     ]
     state_path = Path(args.state_file)
@@ -372,11 +390,17 @@ def cmd_bridge(args) -> int:
         # 链按 nonce 序执行，批量入块吞吐 ~N/(1-2 块间隔)，远快于逐笔确认
         # （链重置周期 ~10 分钟，全量重锚必须分钟级完成才能收敛）。
         batch: list[tuple[str, str]] = []  # (binding, payload)
+        owned_all = None
+        if args.partition_m > 1:
+            owned_all = {row["binding_hex"] for i, row in enumerate(rows)
+                         if row.get("binding_hex") and i % args.partition_m == args.partition_n}
         for row in rows:
             if args.max_per_round > 0 and len(batch) >= args.max_per_round:
                 break  # 余下的留给下一轮（WAL 不丢）
             binding = row.get("binding_hex")
             if not binding or binding in anchored:
+                continue
+            if owned_all is not None and binding not in owned_all:
                 continue
             payload = anchor_payload({
                 "action": "settle_hand_anchor",
@@ -389,7 +413,7 @@ def cmd_bridge(args) -> int:
                 "ts_ms": row.get("ts_ms"),
             })
             batch.append((binding, payload))
-        if batch:
+        if batch and not args.stream_only:
             base_nonce = sync_nonce(rpc, args.address, nonce)
             nonce = base_nonce
             submitted: list[tuple[str, str, int]] = []  # (binding, tx_hash, nonce)
@@ -470,6 +494,12 @@ def cmd_bridge(args) -> int:
         # 每笔执行时延 ≈ 1-2 个块间隔，吞吐由链出块率决定。
         stream = [row for row in rows
                   if row.get("binding_hex") and row["binding_hex"] not in anchored]
+        # 分片：多账户并行时各桥认领互不重叠的 WAL 行（按全局序取模）
+        if args.partition_m > 1:
+            all_rows = [row for row in rows if row.get("binding_hex")]
+            owned = {row["binding_hex"] for i, row in enumerate(all_rows)
+                     if i % args.partition_m == args.partition_n}
+            stream = [row for row in stream if row["binding_hex"] in owned]
         for row in stream:
             binding = row["binding_hex"]
             payload = anchor_payload({
@@ -485,7 +515,8 @@ def cmd_bridge(args) -> int:
             confirmed = False
             tx_hash = None
             for attempt in range(3):
-                nonce = sync_nonce(rpc, args.address, nonce)
+                fresh = chain_nonce_max(rpc_fans, args.address)
+                nonce = fresh if fresh is not None else sync_nonce(rpc, args.address, nonce)
                 try:
                     tx_hash, tx_bytes = build_tx(args.zchain_bin, args.secret_key_hex,
                                                  payload, nonce)
@@ -501,14 +532,24 @@ def cmd_bridge(args) -> int:
                     print(f"[bridge] anchor {binding[:16]}… failed: {e}", flush=True)
                     break
                 deadline = time.time() + 90.0
+                last_resubmit = time.time()
                 while time.time() < deadline:
-                    try:
-                        chain_nonce = rpc.get_account_nonce(args.address)
-                    except Exception:  # noqa: BLE001
-                        chain_nonce = None
+                    chain_nonce = chain_nonce_max(rpc_fans, args.address)
                     if chain_nonce is not None and chain_nonce > nonce:
                         confirmed = True
                         break
+                    # 30s 未入块：重提（同 hash，已在池节点 RBF 拒之无害，
+                    # 已 drain 节点重新入池）+ 生产者 2s 重播兜底
+                    if time.time() - last_resubmit > 30:
+                        last_resubmit = time.time()
+                        try:
+                            for fan in rpc_fans:
+                                try:
+                                    fan.submit_tx(tx_bytes)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        except Exception:  # noqa: BLE001
+                            pass
                     time.sleep(0.5)
                 if confirmed:
                     break
@@ -566,6 +607,11 @@ def main() -> int:
     p.add_argument("--state-file", required=True)
     p.add_argument("--poll-secs", type=float, default=10.0)
     p.add_argument("--target", type=int, default=0)
+    p.add_argument("--partition-n", type=int, default=0, help="分片序号（配合 --partition-m）")
+    p.add_argument("--stream-only", action="store_true",
+                   help="跳过 batch 提交阶段，直接串行流模式（batch 的 60s 确认窗口"
+                        "在流模式前空等，实测每笔多耗 60-90s）")
+    p.add_argument("--partition-m", type=int, default=1, help="总分片数（多账户并行锚定）")
     p.add_argument("--max-per-round", type=int, default=0,
                    help="每轮最多锚定笔数（0=不限）。爆发提交会诱发节点 DAG 视图"
                         "分叉（mempool 不同步 → vertex parent not found → 全链停"
