@@ -194,6 +194,83 @@ fn open_node_with_application_verifiers(config: NodeConfig) -> PokerL1Result<Nod
     Node::open(config)
 }
 
+/// 共识事件驱动化（POC，2026-09-24）：DAG 进展唤醒通道。
+///
+/// P2P vertex 准入路径（[`accept_p2p_vertex`]）在 live-Dag 插入后 `record`
+/// 进展并 `notify_validator_wake`；validator loop 从 `wait_for_pending_tx`
+/// 醒来后 `take()` 快照决策：
+///
+/// - `quorum_events > 0`：某轮首次凑齐 2n/3+1 distinct author（threshold
+///   clock，对齐 Mysticeti ready_new_block）→ 空产配速豁免、提前产下一轮
+///   （仍受 `QUORUM_WAKE_FLOOR` 下限配速，防拜占庭节点拉 round 引发的
+///   广播风暴——诚实多数自身的产速即天然上限）；
+/// - `insertions > 0`（无 quorum 事件）：有新 vertex 落地但不必产——跳过
+///   本轮空 vertex 生产、仅执行 commit 扫描（收块即评估 wave：commit 发现
+///   不再被 EMPTY_VERTEX_PACE 的整周期 `continue` 吞掉）。
+///
+/// 纯本地产速/调度策略，不改变任何共识语义（wave 评估、投票、装配、验证
+/// 全部原样）。
+struct DagWake {
+    /// 自上次 take 以来的 live-Dag 插入数（含自家生产）。
+    insertions: std::sync::atomic::AtomicU32,
+    /// 自上次 take 以来「插入使某轮凑齐 quorum」的次数。
+    quorum_events: std::sync::atomic::AtomicU32,
+}
+
+impl DagWake {
+    fn new() -> Self {
+        Self {
+            insertions: std::sync::atomic::AtomicU32::new(0),
+            quorum_events: std::sync::atomic::AtomicU32::new(0),
+        }
+    }
+
+    fn record(&self, quorum_reached: bool) {
+        use std::sync::atomic::Ordering;
+        self.insertions.fetch_add(1, Ordering::Relaxed);
+        if quorum_reached {
+            self.quorum_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// 取走并清零自上次消费以来的进展快照 `(insertions, quorum_events)`。
+    fn take(&self) -> (u32, u32) {
+        use std::sync::atomic::Ordering;
+        (
+            self.insertions.swap(0, Ordering::Relaxed),
+            self.quorum_events.swap(0, Ordering::Relaxed),
+        )
+    }
+}
+
+static DAG_WAKE: std::sync::OnceLock<DagWake> = std::sync::OnceLock::new();
+
+/// vertex 准入后（已持有 live-Dag 锁）记录进展并唤醒 validator loop。
+///
+/// quorum 判定与生产侧同一口径：轮内 distinct active author 数 ≥
+/// [`poker_l1::consensus::vertex_production::required_parent_count`]。
+/// 单 validator 部署无跨节点波，直接跳过（避免无谓唤醒）。
+fn wake_on_dag_insert(dag_guard: &Dag, node: &Node, round: u64) {
+    let vc = node.active_validator_count();
+    if vc <= 1 {
+        return;
+    }
+    let required = poker_l1::consensus::vertex_production::required_parent_count(vc);
+    let mut seen_authors: BTreeSet<Vec<u8>> = BTreeSet::new();
+    for vh in dag_guard.round_vertices(round) {
+        if let Some(v) = dag_guard.get(vh) {
+            if node.is_active_validator(&v.author_pubkey) {
+                seen_authors.insert(v.author_pubkey.to_bytes());
+            }
+        }
+    }
+    let quorum_reached = seen_authors.len() >= required;
+    if let Some(wake) = DAG_WAKE.get() {
+        wake.record(quorum_reached);
+        node.notify_validator_wake();
+    }
+}
+
 /// commit certificate 投票累加器（多 validator 2/3 多签闭环）。
 ///
 /// 跨线程共享（P2P handler 写入收集到的 peer 投票，validator loop 读取凑 quorum）。
@@ -2107,8 +2184,11 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
     }
     match node.put_vertex(&vertex) {
         Ok(_) => {
+            let inserted_round = vertex.round;
             let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
             dag_guard.insert(vertex);
+            // 事件驱动化：记录 DAG 进展（quorum 判定）并唤醒 validator loop。
+            wake_on_dag_insert(&dag_guard, node, inserted_round);
             Vec::new()
         }
         Err(poker_l1::error::PokerL1Error::InvalidVertexEpoch {
@@ -2144,8 +2224,10 @@ fn accept_p2p_vertex(node: &Node, dag: &Arc<Mutex<Dag>>, vertex: DagVertex, sour
             }
             match node.put_vertex(&vertex) {
                 Ok(_) => {
+                    let inserted_round = vertex.round;
                     let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
                     dag_guard.insert(vertex);
+                    wake_on_dag_insert(&dag_guard, node, inserted_round);
                 }
                 Err(error) => warn!("P2P {source} vertex 拒绝（epoch 跟随后）：{error}"),
             }
@@ -2441,7 +2523,7 @@ fn handle_p2p_connection<S: P2pIo + 'static>(
                         }
                     }
                     NetworkMessage::RequestVerticesByRange(start_round, end_round) => {
-                        let vertices = collect_vertices_by_round(&dag, start_round, end_round);
+                        let vertices = collect_vertices_by_round(&node, &dag, start_round, end_round);
                         if let Err(e) = send_p2p_message_locked(
                             &writer,
                             &NetworkMessage::ResponseVertices(vertices),
@@ -2640,6 +2722,7 @@ fn collect_blocks_by_range(
 /// the active epoch and is reset after commit, so it is the authoritative answer for this wire
 /// request.  A bounded scan prevents a peer from turning a sparse, enormous range into CPU work.
 fn collect_vertices_by_round(
+    node: &Node,
     dag: &Arc<Mutex<Dag>>,
     start_round: u64,
     end_round: u64,
@@ -2648,14 +2731,35 @@ fn collect_vertices_by_round(
         return Vec::new();
     }
     let capped_end = end_round.min(start_round.saturating_add(MAX_VERTEX_RANGE_ROUNDS - 1));
-    let dag = dag.lock().unwrap_or_else(|e| e.into_inner());
+    // 全灭重启恢复（2026-09-24）：live Dag 是易失的（重启即空），而 vertex
+    // store 持久。只从 live Dag 取数时，重启后所有 peer 对补洞请求永远回
+    // 空 → parent quorum 无法重组 → 全网停产（桥故障注入门实测）。合并
+    // 持久 store 的同轮 vertex（按 hash 去重），使补洞跨重启可用。
+    let mut seen: std::collections::BTreeSet<Hash> = std::collections::BTreeSet::new();
     let mut vertices = Vec::new();
+    {
+        let dag = dag.lock().unwrap_or_else(|e| e.into_inner());
+        for round in start_round..=capped_end {
+            for hash in dag.round_vertices(round) {
+                if let Some(vertex) = dag.get(hash) {
+                    seen.insert(*hash);
+                    vertices.push(vertex.clone());
+                    if vertices.len() == MAX_VERTEX_RANGE_RESPONSE {
+                        return vertices;
+                    }
+                }
+            }
+        }
+    }
     for round in start_round..=capped_end {
-        for hash in dag.round_vertices(round) {
-            if let Some(vertex) = dag.get(hash) {
-                vertices.push(vertex.clone());
-                if vertices.len() == MAX_VERTEX_RANGE_RESPONSE {
-                    return vertices;
+        if let Ok(stored) = node.vertex_store().get_by_round(node.current_epoch(), round) {
+            for vertex in stored {
+                let hash = vertex.vertex_hash();
+                if seen.insert(hash) {
+                    vertices.push(vertex);
+                    if vertices.len() == MAX_VERTEX_RANGE_RESPONSE {
+                        return vertices;
+                    }
                 }
             }
         }
@@ -3483,6 +3587,8 @@ fn run_validator_loop(
     // 缺口 #3 §3.6：提取 VRF 私钥（若配置），用于 epoch_randomness 派生。
     let vrf_secret: Option<[u8; 32]> = validator_key.vrf_secret;
     let _ = VRF_SECRET.set(vrf_secret);
+    // 事件驱动化唤醒通道（早于 P2P 线程与 validator loop 就绪，避免首波丢失）。
+    let _ = DAG_WAKE.set(DagWake::new());
     // 从 ValidatorKey 提取 secp256k1 SecretKey
     let secret_key = match secp256k1::SecretKey::from_slice(&validator_key.secret_key_bytes) {
         Ok(sk) => sk,
@@ -3508,18 +3614,16 @@ fn run_validator_loop(
     // 否则重启后同 author 同 round 重产 vertex 触发 equivocation，节点
     // 永久无法产出（数据保留重启路径实测）。内存 DAG 重启后为空，因此
     // 从**持久 vertex 存储**按作者取历史最高 round。
-    let mut round: u64 = {
-        let history = node
-            .vertex_store()
-            .get_by_author(&author_pubkey)
-            .unwrap_or_default();
-        history
-            .iter()
-            .map(|v| v.round)
-            .max()
-            .map(|r| r.saturating_add(1))
-            .unwrap_or(1)
-    };
+    let own_history = node
+        .vertex_store()
+        .get_by_author(&author_pubkey)
+        .unwrap_or_default();
+    let mut round: u64 = own_history
+        .iter()
+        .map(|v| v.round)
+        .max()
+        .map(|r| r.saturating_add(1))
+        .unwrap_or(1);
     let (mut commit_round, mut prev_commit_hash, mut prev_block_hash) = node
         .block_store()
         .get_tip_height()
@@ -3539,8 +3643,21 @@ fn run_validator_loop(
                 tip.block_hash(chain_id),
             )
         });
-    // 存完整 vertex（非仅 hash），以便 commit 时从上一个 vertex 构造 block
-    let mut last_vertex: Option<DagVertex> = None;
+    // 存完整 vertex（非仅 hash），以便 commit 时从上一个 vertex 构造 block。
+    //
+    // 全灭重启恢复（2026-09-24 桥故障注入门暴露的存量活性缺陷）：只抬上方
+    // round 变量不够——last_vertex=None 时 parent 选择走「引导」分支把 round
+    // 重置回 1，从 round 1/2 重新产出的 vertex 与 store 里旧 incarnation 的
+    // 同 (epoch, round) vertex 内容不同，validate_vertex 永久判 equivocation，
+    // 全灭重启后全网无法恢复产块（实测 4 节点全部卡 round 2 equivocation
+    // 风暴）。必须把 last_vertex 一并恢复到当前 epoch 的自家最高轮 vertex，
+    // 使生产行为与停机前连续（live DAG 为空 → 走既有的补洞/追赶路径凑
+    // parents）。
+    let mut last_vertex: Option<DagVertex> = own_history
+        .iter()
+        .filter(|v| v.epoch == epoch)
+        .max_by_key(|v| v.round)
+        .cloned();
     // Keep committed frontier vertices in the live DAG for ancestry traversal, but filter them
     // out of later block projections so their transactions cannot execute twice.
     //
@@ -3765,6 +3882,13 @@ fn run_validator_loop(
             .map(|v| !v.tx_list.is_empty())
             .unwrap_or(false);
         let is_multi_validator = node.active_validator_count() > 1;
+        // 事件驱动化快照：P2P 准入路径累积的 DAG 进展（threshold clock /
+        // 收块即评估）。单 validator 部署 wake_on_dag_insert 不记录，恒 (0,0)。
+        let (dag_insertions, dag_quorum_events) = DAG_WAKE
+            .get()
+            .map(|w| w.take())
+            .unwrap_or((0, 0));
+        let mut skip_production = false;
         if txs.is_empty() && !last_has_txs && !is_multi_validator {
             continue;
         }
@@ -3786,7 +3910,25 @@ fn run_validator_loop(
                 .map(|t| std::time::Instant::now().duration_since(t) < EMPTY_VERTEX_PACE)
                 .unwrap_or(false);
             if paced_out {
-                continue;
+                // threshold clock 空产提前量的下限配速：quorum 事件可豁免 1s
+                // 配速提前产下一轮，但两次生产仍须至少间隔该值——该下限防
+                // 拜占庭节点拉 round 引发的广播风暴（Mysticeti leader_timeout
+                // 同职；诚实多数自身产速即天然上限）。
+                const QUORUM_WAKE_FLOOR: Duration = Duration::from_millis(200);
+                let quorum_floor_ok = last_production_at
+                    .map(|t| std::time::Instant::now().duration_since(t) >= QUORUM_WAKE_FLOOR)
+                    .unwrap_or(true);
+                if dag_quorum_events > 0 && quorum_floor_ok {
+                    // threshold clock：引用轮 quorum 已凑齐 → 豁免 1s 配速提前
+                    // 产下一轮（波成熟 L+1/L+2 不再各等一个生产周期）。
+                } else if dag_insertions > 0 || dag_quorum_events > 0 {
+                    // 收块即评估：有新 vertex 落地但未到产速下限——跳过本轮
+                    // 空 vertex 生产、仅执行 commit 扫描（原 continue 会把
+                    // commit 发现一并吞掉最多 1 个周期）。
+                    skip_production = true;
+                } else {
+                    continue;
+                }
             }
         }
         // （背压机制已移除 2026-09-21：三版实测各致新病——全停 = 候选引用
@@ -3816,224 +3958,228 @@ fn run_validator_loop(
 
         while let Some((batch_idx, batch)) = batches.next() {
             let batch_tx_count = batch.len();
-            // 构造 vertex 的 parent_hashes。
-                // 缺口 #3 多 validator 活性修复：多 validator 时，round 同步到全局 Dag 的
-                // max_round+1，parent 引用 max_round 轮的所有不同 author vertex（含自身），
-                // 形成 Bullshark 所需的跨 validator 引用扇形。这使各 validator 的 round
-                // 对齐到同一全局轮次（而非各自独立计数），detect_commit_leader 才能凑齐
-                // 2/3 distinct-author 引用。
-                // 单 validator（vc<=1）仍用自身 last_vertex 作为 parent（兼容引导期）。
-                let vc = node.active_validator_count();
-                let parent_hashes: Vec<Hash> = if vc <= 1 {
-                    // 单 validator：引用自身 last_vertex。
-                    last_vertex
-                        .as_ref()
-                        .map(|v| vec![v.vertex_hash()])
-                        .unwrap_or_default()
-                } else {
-                    // 多 validator：parent 引用「本节点自身最新 vertex 所在轮」的全部不同
-                    // author vertex（含自身），新 vertex 放在该轮 +1。
-                    //
-                    // 不能直接用 dag.max_round() 作为引用轮：
-                    // (1) peer 在 round R 的 vertex 先于本节点自身的 R 轮 vertex 到达时，
-                    //     max_round 已被推到 R，而 put_vertex 要求所有 parent 恰好位于
-                    //     round-1 —— 本节点只能出 R+1，R 轮将永远凑不齐 required 个
-                    //     distinct author，全网活性死锁。以自身 last_vertex.round 为基准
-                    //     使落后节点能在 R 轮继续补充 author。
-                    // (2) 本节点从未产出过 vertex（启动 / 新 epoch）时必须引导为
-                    //     round 1 无 parent：validate_vertex 对 round=1 仅要求无 parent，
-                    //     允许任意时刻加入。若以 max_r 为基准，先启动节点的 vertex 会把
-                    //     后启动节点直接卡死在 max_r+1。
-                    let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                    match last_vertex.as_ref() {
-                        None => {
-                            // 引导（含 Dag 为空的创世情形）。
-                            round = 1;
-                            Vec::new()
-                        }
-                        Some(own) => {
-                            let max_r = dag_guard.max_round().unwrap_or(own.round);
-                            // 引用轮基准：自身 last vertex 所在轮；越界（DAG 被重置等
-                            // 异常）时回退 max_r。
-                            let mut ref_round = if own.round <= max_r { own.round } else { max_r };
-                            // Straggler 追赶（多 validator 活性根修）：round 只按自身
-                            // 产出推进，一旦本节点停顿（GC/阻塞/临时 quorum 失败），
-                            // own.round 与 DAG frontier 的差距永远无法收敛——后续
-                            // vertex 全部产在过时轮次，永远进不了 frontier 领导者的
-                            // causal history（其承载的 tx 永不执行；实测 node 停顿
-                            // 4 分钟后落后 270 轮，该分片锚定全部停滞）。落后超过
-                            // 2 轮即跳到 frontier-1 重新入场；parents 数量不足时
-                            // validate_parents 会跳过本轮，无风险。
-                            if max_r > ref_round.saturating_add(2) {
-                                ref_round = max_r - 1;
+                if !skip_production {
+                // 构造 vertex 的 parent_hashes。
+                    // 缺口 #3 多 validator 活性修复：多 validator 时，round 同步到全局 Dag 的
+                    // max_round+1，parent 引用 max_round 轮的所有不同 author vertex（含自身），
+                    // 形成 Bullshark 所需的跨 validator 引用扇形。这使各 validator 的 round
+                    // 对齐到同一全局轮次（而非各自独立计数），detect_commit_leader 才能凑齐
+                    // 2/3 distinct-author 引用。
+                    // 单 validator（vc<=1）仍用自身 last_vertex 作为 parent（兼容引导期）。
+                    let vc = node.active_validator_count();
+                    let parent_hashes: Vec<Hash> = if vc <= 1 {
+                        // 单 validator：引用自身 last_vertex。
+                        last_vertex
+                            .as_ref()
+                            .map(|v| vec![v.vertex_hash()])
+                            .unwrap_or_default()
+                    } else {
+                        // 多 validator：parent 引用「本节点自身最新 vertex 所在轮」的全部不同
+                        // author vertex（含自身），新 vertex 放在该轮 +1。
+                        //
+                        // 不能直接用 dag.max_round() 作为引用轮：
+                        // (1) peer 在 round R 的 vertex 先于本节点自身的 R 轮 vertex 到达时，
+                        //     max_round 已被推到 R，而 put_vertex 要求所有 parent 恰好位于
+                        //     round-1 —— 本节点只能出 R+1，R 轮将永远凑不齐 required 个
+                        //     distinct author，全网活性死锁。以自身 last_vertex.round 为基准
+                        //     使落后节点能在 R 轮继续补充 author。
+                        // (2) 本节点从未产出过 vertex（启动 / 新 epoch）时必须引导为
+                        //     round 1 无 parent：validate_vertex 对 round=1 仅要求无 parent，
+                        //     允许任意时刻加入。若以 max_r 为基准，先启动节点的 vertex 会把
+                        //     后启动节点直接卡死在 max_r+1。
+                        let dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                        match last_vertex.as_ref() {
+                            None => {
+                                // 引导（含 Dag 为空的创世情形）。
+                                round = 1;
+                                Vec::new()
                             }
-                            // 引用 ref_round 轮的所有不同 author vertex（含自身），
-                            // 并检测该轮预定 leader 是否在场。
-                            let (mut parents, leader_included) =
-                                collect_round_parents_with_leader(&dag_guard, &node, ref_round);
-                            // wave-3 配套（Bullshark PartiallySynchronous proposer /
-                            // Mysticeti ready_new_block 对齐）：引用轮的预定 leader
-                            // vertex 尚未到达时，仅在前沿处短暂等待其投递再产出——
-                            // 未等待就产出等于投下一张永久的非支持票（blame），会
-                            // 触发全网一致的伪 skip、拉高提交时延。落后轮不等待
-                            //（leader 早已该到，缺席即真实缺席）。睡眠绝不在持锁下
-                            // 发生（P2P accept 线程要拿同一把锁）。
-                            if is_multi_validator
-                                && !leader_included
-                                && ref_round >= max_r
-                            {
-                                const PROD_LEADER_WAIT: Duration = Duration::from_millis(800);
-                                drop(dag_guard);
-                                let deadline = std::time::Instant::now() + PROD_LEADER_WAIT;
-                                while std::time::Instant::now() < deadline {
-                                    std::thread::sleep(Duration::from_millis(100));
-                                    let g2 = dag.lock().unwrap_or_else(|e| e.into_inner());
-                                    let (p2, l2) =
-                                        collect_round_parents_with_leader(&g2, &node, ref_round);
-                                    drop(g2);
-                                    if l2 {
-                                        parents = p2;
-                                        break;
-                                    }
-                                    if shutdown.load(Ordering::SeqCst) {
-                                        break;
+                            Some(own) => {
+                                let max_r = dag_guard.max_round().unwrap_or(own.round);
+                                // 引用轮基准：自身 last vertex 所在轮；越界（DAG 被重置等
+                                // 异常）时回退 max_r。
+                                let mut ref_round = if own.round <= max_r { own.round } else { max_r };
+                                // Straggler 追赶（多 validator 活性根修）：round 只按自身
+                                // 产出推进，一旦本节点停顿（GC/阻塞/临时 quorum 失败），
+                                // own.round 与 DAG frontier 的差距永远无法收敛——后续
+                                // vertex 全部产在过时轮次，永远进不了 frontier 领导者的
+                                // causal history（其承载的 tx 永不执行；实测 node 停顿
+                                // 4 分钟后落后 270 轮，该分片锚定全部停滞）。落后超过
+                                // 2 轮即跳到 frontier-1 重新入场；parents 数量不足时
+                                // validate_parents 会跳过本轮，无风险。
+                                if max_r > ref_round.saturating_add(2) {
+                                    ref_round = max_r - 1;
+                                }
+                                // 引用 ref_round 轮的所有不同 author vertex（含自身），
+                                // 并检测该轮预定 leader 是否在场。
+                                let (mut parents, leader_included) =
+                                    collect_round_parents_with_leader(&dag_guard, &node, ref_round);
+                                // wave-3 配套（Bullshark PartiallySynchronous proposer /
+                                // Mysticeti ready_new_block 对齐）：引用轮的预定 leader
+                                // vertex 尚未到达时，仅在前沿处短暂等待其投递再产出——
+                                // 未等待就产出等于投下一张永久的非支持票（blame），会
+                                // 触发全网一致的伪 skip、拉高提交时延。落后轮不等待
+                                //（leader 早已该到，缺席即真实缺席）。睡眠绝不在持锁下
+                                // 发生（P2P accept 线程要拿同一把锁）。
+                                if is_multi_validator
+                                    && !leader_included
+                                    && ref_round >= max_r
+                                {
+                                    const PROD_LEADER_WAIT: Duration = Duration::from_millis(800);
+                                    drop(dag_guard);
+                                    let deadline = std::time::Instant::now() + PROD_LEADER_WAIT;
+                                    while std::time::Instant::now() < deadline {
+                                        std::thread::sleep(Duration::from_millis(100));
+                                        let g2 = dag.lock().unwrap_or_else(|e| e.into_inner());
+                                        let (p2, l2) =
+                                            collect_round_parents_with_leader(&g2, &node, ref_round);
+                                        drop(g2);
+                                        if l2 {
+                                            parents = p2;
+                                            break;
+                                        }
+                                        if shutdown.load(Ordering::SeqCst) {
+                                            break;
+                                        }
                                     }
                                 }
+                                // 同步本地 round 到 ref_round+1（使后续 vertex 的 round 连续）。
+                                round = ref_round + 1;
+                                parents
                             }
-                            // 同步本地 round 到 ref_round+1（使后续 vertex 的 round 连续）。
-                            round = ref_round + 1;
-                            parents
+                        }
+                    };
+                    let mut builder = VertexBuilder::new(epoch, round, author_pubkey.clone());
+                    for tx in batch {
+                        builder.push_tx(tx);
+                    }
+                    // v1.5-a2：本 vertex 实际携带的 forced 集 = 本轮 drain forced 集
+                    // ∩ 本 batch tx 集（forced hash 只承诺真实进入本 vertex 的交易）。
+                    if !drain_forced_hashes.is_empty() {
+                        let batch_hashes: std::collections::BTreeSet<Hash> =
+                            builder.tx_list.iter().map(|tx| tx.tx_hash()).collect();
+                        let batch_forced: Vec<Hash> = drain_forced_hashes
+                            .iter()
+                            .copied()
+                            .filter(|h| batch_hashes.contains(h))
+                            .collect();
+                        if !batch_forced.is_empty() {
+                            builder = builder.with_forced_tx_hashes(batch_forced);
                         }
                     }
-                };
-                let mut builder = VertexBuilder::new(epoch, round, author_pubkey.clone());
-                for tx in batch {
-                    builder.push_tx(tx);
-                }
-                // v1.5-a2：本 vertex 实际携带的 forced 集 = 本轮 drain forced 集
-                // ∩ 本 batch tx 集（forced hash 只承诺真实进入本 vertex 的交易）。
-                if !drain_forced_hashes.is_empty() {
-                    let batch_hashes: std::collections::BTreeSet<Hash> =
-                        builder.tx_list.iter().map(|tx| tx.tx_hash()).collect();
-                    let batch_forced: Vec<Hash> = drain_forced_hashes
-                        .iter()
-                        .copied()
-                        .filter(|h| batch_hashes.contains(h))
-                        .collect();
-                    if !batch_forced.is_empty() {
-                        builder = builder.with_forced_tx_hashes(batch_forced);
-                    }
-                }
-                let builder = builder.with_parents(parent_hashes);
+                    let builder = builder.with_parents(parent_hashes);
 
-                // 创世轮（round 1）无 parent。其余轮次必须先凑齐真实 validator quorum；
-                // 不足时把本批及尚未处理的批次放回 mempool，等待 peer vertex，而不是产出一个
-                // 接收侧必然拒绝的弱 vertex 或静默丢失已经 drain 的交易。
-                if round > 1 {
-                    let vc_check = node.active_validator_count().max(1);
-                    if let Err(e) = builder.validate_parents(vc_check) {
-                        let mut deferred = builder.tx_list;
-                        for (_, remaining_batch) in batches {
-                            deferred.extend(remaining_batch);
-                        }
-                        let deferred_count = deferred.len();
-                        node.requeue_pending_txs(deferred);
-                        warn!(
-                            "vertex parent quorum 未就绪，跳过本轮并回排 {} 笔交易：{e}",
-                            deferred_count
-                        );
-                        // 恰 quorum 存活修复 · 生产侧补洞：parent 缺口多为「vertex 一次性
-                        // gossip 在断连/启动竞态中丢失」所致，而 vertex 不会重播 —— 不主动
-                        // 补齐则节点永久卡在本轮（恰 quorum 时少一个生产者即全网停滞）。
-                        // 丢失常是**连续多轮**（断连窗口内的所有 vertex），且补入的 vertex
-                        // 其 parent 也必须在本地，故请求范围向前覆盖 8 轮；限频执行。
-                        {
-                            let parent_round = round.saturating_sub(1).max(1);
-                            let window_start = parent_round.saturating_sub(8).max(1);
-                            repair_missing_vertices(
-                                &transport,
-                                &dag,
-                                &node,
-                                window_start,
-                                parent_round,
-                                &mut last_vertex_repair,
+                    // 创世轮（round 1）无 parent。其余轮次必须先凑齐真实 validator quorum；
+                    // 不足时把本批及尚未处理的批次放回 mempool，等待 peer vertex，而不是产出一个
+                    // 接收侧必然拒绝的弱 vertex 或静默丢失已经 drain 的交易。
+                    if round > 1 {
+                        let vc_check = node.active_validator_count().max(1);
+                        if let Err(e) = builder.validate_parents(vc_check) {
+                            let mut deferred = builder.tx_list;
+                            for (_, remaining_batch) in batches {
+                                deferred.extend(remaining_batch);
+                            }
+                            let deferred_count = deferred.len();
+                            node.requeue_pending_txs(deferred);
+                            warn!(
+                                "vertex parent quorum 未就绪，跳过本轮并回排 {} 笔交易：{e}",
+                                deferred_count
                             );
+                            // 恰 quorum 存活修复 · 生产侧补洞：parent 缺口多为「vertex 一次性
+                            // gossip 在断连/启动竞态中丢失」所致，而 vertex 不会重播 —— 不主动
+                            // 补齐则节点永久卡在本轮（恰 quorum 时少一个生产者即全网停滞）。
+                            // 丢失常是**连续多轮**（断连窗口内的所有 vertex），且补入的 vertex
+                            // 其 parent 也必须在本地，故请求范围向前覆盖 8 轮；限频执行。
+                            {
+                                let parent_round = round.saturating_sub(1).max(1);
+                                let window_start = parent_round.saturating_sub(8).max(1);
+                                repair_missing_vertices(
+                                    &transport,
+                                    &dag,
+                                    &node,
+                                    window_start,
+                                    parent_round,
+                                    &mut last_vertex_repair,
+                                );
+                            }
+                            std::thread::sleep(block_interval.min(Duration::from_secs(1)));
+                            break;
                         }
-                        std::thread::sleep(block_interval.min(Duration::from_secs(1)));
-                        break;
                     }
-                }
-                // validate_size 为粗估；put_vertex 内部用精确 BCS 再校验一次，此处仅作提前拒绝。
-                if let Err(e) = builder.validate_size() {
-                    warn!("vertex 大小校验失败（batch_idx={}）：{e}", batch_idx);
-                    continue;
-                }
+                    // validate_size 为粗估；put_vertex 内部用精确 BCS 再校验一次，此处仅作提前拒绝。
+                    if let Err(e) = builder.validate_size() {
+                        warn!("vertex 大小校验失败（batch_idx={}）：{e}", batch_idx);
+                        continue;
+                    }
 
-                // 签名 vertex
-                let unsigned = builder.build(vec![]);
-                let vertex_signing_hash = unsigned.signing_hash(chain_id);
-                let vertex_sig = secp256k1_sign_hash(&secret_key, &vertex_signing_hash);
-                let vertex = DagVertex {
-                    author_sig: vertex_sig,
-                    ..unsigned
-                };
+                    // 签名 vertex
+                    let unsigned = builder.build(vec![]);
+                    let vertex_signing_hash = unsigned.signing_hash(chain_id);
+                    let vertex_sig = secp256k1_sign_hash(&secret_key, &vertex_signing_hash);
+                    let vertex = DagVertex {
+                        author_sig: vertex_sig,
+                        ..unsigned
+                    };
 
-                // 先通过完整验证并持久化，再让 vertex 进入 live DAG。反过来的顺序会在
-                // put_vertex 失败时污染 parent 选择和 commit leader 检测。
-                let vertex_hash = match node.put_vertex(&vertex) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        let mut deferred = vertex.tx_list.clone();
-                        for (_, remaining_batch) in batches {
-                            deferred.extend(remaining_batch);
+                    // 先通过完整验证并持久化，再让 vertex 进入 live DAG。反过来的顺序会在
+                    // put_vertex 失败时污染 parent 选择和 commit leader 检测。
+                    let vertex_hash = match node.put_vertex(&vertex) {
+                        Ok(hash) => hash,
+                        Err(e) => {
+                            let mut deferred = vertex.tx_list.clone();
+                            for (_, remaining_batch) in batches {
+                                deferred.extend(remaining_batch);
+                            }
+                            let deferred_count = deferred.len();
+                            node.requeue_pending_txs(deferred);
+                            warn!(
+                                "put_vertex 失败（batch_idx={}），未写入 DAG/广播并回排 {} 笔交易：{e}",
+                                batch_idx, deferred_count
+                            );
+                            std::thread::sleep(block_interval.min(Duration::from_secs(1)));
+                            break;
                         }
-                        let deferred_count = deferred.len();
-                        node.requeue_pending_txs(deferred);
-                        warn!(
-                            "put_vertex 失败（batch_idx={}），未写入 DAG/广播并回排 {} 笔交易：{e}",
-                            batch_idx, deferred_count
-                        );
-                        std::thread::sleep(block_interval.min(Duration::from_secs(1)));
-                        break;
+                    };
+                    {
+                        let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
+                        let live_hash = dag_guard.insert(vertex.clone());
+                        debug_assert_eq!(live_hash, vertex_hash);
                     }
-                };
-                {
-                    let mut dag_guard = dag.lock().unwrap_or_else(|e| e.into_inner());
-                    let live_hash = dag_guard.insert(vertex.clone());
-                    debug_assert_eq!(live_hash, vertex_hash);
-                }
-                // Feed the bounded cache and gossip each transaction before the
-                // compact vertex. Peers that already saw the tx can reconstruct
-                // the vertex from short IDs; peers that missed one safely request
-                // the full vertex fallback below.
-                for tx in &vertex.tx_list {
-                    if let Err(error) = gossip.receive_tx(tx.clone()) {
-                        warn!("本地 vertex tx 未进入 compact-relay 缓存：{error}");
+                    // Feed the bounded cache and gossip each transaction before the
+                    // compact vertex. Peers that already saw the tx can reconstruct
+                    // the vertex from short IDs; peers that missed one safely request
+                    // the full vertex fallback below.
+                    for tx in &vertex.tx_list {
+                        if let Err(error) = gossip.receive_tx(tx.clone()) {
+                            warn!("本地 vertex tx 未进入 compact-relay 缓存：{error}");
+                        }
+                        if let Err(error) = transport.gossip_broadcast(
+                            GossipTopic::Transaction,
+                            &NetworkMessage::Transaction(tx.clone()),
+                        ) {
+                            warn!("P2P 广播 transaction 失败：{error}");
+                        }
                     }
-                    if let Err(error) = transport.gossip_broadcast(
-                        GossipTopic::Transaction,
-                        &NetworkMessage::Transaction(tx.clone()),
-                    ) {
-                        warn!("P2P 广播 transaction 失败：{error}");
+                    if let Err(error) = gossip.broadcast_compact_vertex(&vertex, transport.as_ref()) {
+                        warn!("P2P 广播 CompactVertex 失败：{error}");
                     }
-                }
-                if let Err(error) = gossip.broadcast_compact_vertex(&vertex, transport.as_ref()) {
-                    warn!("P2P 广播 CompactVertex 失败：{error}");
-                }
 
-                info!(
-                    "vertex 已产出 round={} batch_idx={}/{} tx_count={} hash={}",
-                    round,
-                    batch_idx,
-                    batch_count,
-                    vertex.tx_list.len(),
-                    hex::encode(vertex_hash)
-                );
+                    info!(
+                        "vertex 已产出 round={} batch_idx={}/{} tx_count={} hash={}",
+                        round,
+                        batch_idx,
+                        batch_count,
+                        vertex.tx_list.len(),
+                        hex::encode(vertex_hash)
+                    );
 
-                // 记录本 batch 产出（推进在 batch 体末尾、commit 检测之后执行：
-                // 单 validator 的 commit 候选 = last_vertex，提前推进会令候选
-                // 永远指向刚产出、尚无引用的新 vertex → commit 永不成立）。
-                produced_vertex_this_batch = Some(vertex.clone());
+                    // 记录本 batch 产出（推进在 batch 体末尾、commit 检测之后执行：
+                    // 单 validator 的 commit 候选 = last_vertex，提前推进会令候选
+                    // 永远指向刚产出、尚无引用的新 vertex → commit 永不成立）。
+                    produced_vertex_this_batch = Some(vertex.clone());
+                } else {
+                    // 收块即评估：本轮跳过空 vertex 生产，仅执行下方 commit 扫描。
+                }
 
 
             // 从第 2 轮起，检测 commit 并产出 block（缺口 #3：真实 2/3 多签闭环）。
@@ -5885,16 +6031,17 @@ mod tests {
 
     #[test]
     fn vertex_range_response_returns_only_requested_rounds() {
+        let node = Node::open_inmemory(NodeRole::Full, poker_l1::DEFAULT_CHAIN_ID).unwrap();
         let mut dag = Dag::new();
         dag.insert(make_vertex(1, 0x01));
         dag.insert(make_vertex(1, 0x02));
         dag.insert(make_vertex(2, 0x03));
         let dag = Arc::new(Mutex::new(dag));
 
-        let first_round = collect_vertices_by_round(&dag, 1, 1);
+        let first_round = collect_vertices_by_round(&node, &dag, 1, 1);
         assert_eq!(first_round.len(), 2);
         assert!(first_round.iter().all(|vertex| vertex.round == 1));
-        assert!(collect_vertices_by_round(&dag, 3, 2).is_empty());
+        assert!(collect_vertices_by_round(&node, &dag, 3, 2).is_empty());
     }
 
     #[test]

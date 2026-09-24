@@ -192,10 +192,16 @@ pub struct BridgeValidatorSlot {
     pub validators: BTreeSet<TaggedPubkey>,
     /// 所需 quorum 数（2/3 of validators）。
     pub quorum: usize,
+    /// 资产准入白名单（B-TE-1 第一段：随 slot 注册治理注入）。
+    ///
+    /// - `None`：不限制（兼容期 / 自由桥）。
+    /// - `Some(set)`：仅允许集合内 asset id 的 deposit 铸造（如美区 anchor
+    ///   USDC-only 的最小执行点）；未注册资产 fail-closed 拒绝。
+    pub allowed_assets: Option<BTreeSet<Hash>>,
 }
 
 impl BridgeValidatorSlot {
-    /// 创建新插槽。
+    /// 创建新插槽（不限制资产）。
     #[must_use]
     pub fn new(source_chain_id: ChainId, validators: BTreeSet<TaggedPubkey>) -> Self {
         let quorum = required_bridge_quorum(validators.len());
@@ -203,6 +209,23 @@ impl BridgeValidatorSlot {
             source_chain_id,
             validators,
             quorum,
+            allowed_assets: None,
+        }
+    }
+
+    /// 创建带资产白名单的插槽（B-TE-1）。
+    #[must_use]
+    pub fn new_with_asset_allowlist(
+        source_chain_id: ChainId,
+        validators: BTreeSet<TaggedPubkey>,
+        allowed_assets: BTreeSet<Hash>,
+    ) -> Self {
+        let quorum = required_bridge_quorum(validators.len());
+        Self {
+            source_chain_id,
+            validators,
+            quorum,
+            allowed_assets: Some(allowed_assets),
         }
     }
 
@@ -359,6 +382,30 @@ pub fn bridge_verify(
     network_chain_id: ChainId,
     is_protocol_caller: bool,
 ) -> PokerL1Result<BridgeVerifyOutcome> {
+    bridge_verify_inner(registry, tx, network_chain_id, is_protocol_caller, true)
+}
+
+/// [`bridge_verify`] 的只验证变体（P0-4：nonce 消费延迟到写日志合并时原子生效）。
+///
+/// 并行执行器在 capture 后端上先以此入口做全部校验（步骤 1-4，含 nonce
+/// 未消费检查），消费与持久化由 `ObjectWriteLog::apply_to_with_bridge` 在
+/// 合并点统一执行——tx 后续阶段（outputs / 结算）失败则 nonce 不泄漏。
+pub fn bridge_verify_check(
+    registry: &mut BridgeRegistry,
+    tx: &BridgeVerifyTx,
+    network_chain_id: ChainId,
+    is_protocol_caller: bool,
+) -> PokerL1Result<BridgeVerifyOutcome> {
+    bridge_verify_inner(registry, tx, network_chain_id, is_protocol_caller, false)
+}
+
+fn bridge_verify_inner(
+    registry: &mut BridgeRegistry,
+    tx: &BridgeVerifyTx,
+    network_chain_id: ChainId,
+    is_protocol_caller: bool,
+    consume_nonce: bool,
+) -> PokerL1Result<BridgeVerifyOutcome> {
     // SubTask 34.2：必须由协议层调用
     if !is_protocol_caller {
         return Err(PokerL1Error::BridgeVerifyNotAuthorized);
@@ -396,6 +443,17 @@ pub fn bridge_verify(
         PokerL1Error::BridgeValidatorSlotNotRegistered(tx.recipient_pubkey.clone())
     })?;
 
+    // 4a. 资产准入白名单（B-TE-1）：slot 声明 allowed_assets 时，未注册
+    // 资产的 deposit 拒绝铸造（fail-closed；美区 anchor USDC-only 类监管
+    // 要求的最小执行点）。
+    if let Some(allowed) = &slot.allowed_assets {
+        if !allowed.contains(&tx.deposit.asset) {
+            return Err(PokerL1Error::BridgeAssetNotAllowed {
+                asset: tx.deposit.asset,
+            });
+        }
+    }
+
     // 校验签名者全部在插槽中
     slot.validate_signers(&tx.validator_signatures)?;
 
@@ -418,8 +476,11 @@ pub fn bridge_verify(
         })?;
     }
 
-    // 5. 标记 nonce 已消费
-    registry.consume_nonce(tx.deposit.source_chain_id, tx.deposit.nonce);
+    // 5. 标记 nonce 已消费（consume_nonce=false 时跳过——延迟消费模式由
+    // 调用方在写日志合并点统一执行，见 bridge_verify_check）。
+    if consume_nonce {
+        registry.consume_nonce(tx.deposit.source_chain_id, tx.deposit.nonce);
+    }
 
     // 6. 返回验证结果
     Ok(BridgeVerifyOutcome {
@@ -1117,4 +1178,125 @@ mod tests {
         assert_eq!(id1, id2, "确定性 ObjectID");
         assert_eq!(db1.state_root(), db2.state_root(), "确定性 state_root");
     }
+    // ===== 资产白名单（B-TE-1）=====
+
+    fn register_slot_with_allowlist(
+        registry: &mut BridgeRegistry,
+        asset_allowlist: Option<std::collections::BTreeSet<crate::Hash>>,
+    ) -> (Vec<secp256k1::SecretKey>, TaggedPubkey) {
+        let secp = Secp256k1::new();
+        let mut validator_keys = Vec::new();
+        let mut validators = BTreeSet::new();
+        for _ in 0..5 {
+            let (s, p) = secp.generate_keypair(&mut OsRng);
+            let tagged = TaggedPubkey::new(
+                crate::signature::SignatureScheme::Secp256k1,
+                crate::signature::CURRENT_VERSION,
+                p.serialize().to_vec(),
+            )
+            .unwrap();
+            validator_keys.push(s);
+            validators.insert(tagged);
+        }
+        let slot = match asset_allowlist {
+            Some(allowed) => {
+                BridgeValidatorSlot::new_with_asset_allowlist(0xAAAA, validators, allowed)
+            }
+            None => BridgeValidatorSlot::new(0xAAAA, validators),
+        };
+        registry.register_slot(slot);
+        (validator_keys, make_real_keypair().2)
+    }
+
+    #[test]
+    fn test_slot_asset_allowlist_enforced() {
+        let secp = Secp256k1::new();
+        // 白名单只放行 USDC（0xAB..）
+        let mut allowed = std::collections::BTreeSet::new();
+        allowed.insert([0xABu8; 32]);
+        let mut registry = BridgeRegistry::new();
+        let validator_keys = {
+            let (ks, recipient) = register_slot_with_allowlist(&mut registry, Some(allowed));
+            let _ = recipient;
+            ks
+        };
+        let (recipient_secret, _, recipient_tagged) = make_real_keypair();
+        let recipient_addr = derive_address(&recipient_tagged);
+
+        let signed_tx = |asset: [u8; 32], nonce: u64| -> BridgeVerifyTx {
+            let deposit = BridgeDeposit {
+                nonce,
+                source_chain_id: 0xAAAA,
+                dest_chain_id: crate::DEFAULT_CHAIN_ID,
+                asset,
+                amount: 100,
+                recipient: recipient_addr,
+                source_tx_hash: [0xCD; 32],
+            };
+            let msg = deposit.message_hash();
+            let sigs: Vec<BridgeValidatorSig> = validator_keys
+                .iter()
+                .take(4)
+                .map(|s| {
+                    let m = secp256k1::Message::from_digest_slice(&msg).unwrap();
+                    let (rid, compact) =
+                        secp.sign_ecdsa_recoverable(&m, s).serialize_compact();
+                    let mut sig = compact.to_vec();
+                    sig.push(rid.to_i32() as u8);
+                    let public = secp256k1::PublicKey::from_secret_key(&secp, s);
+                    BridgeValidatorSig {
+                        validator: TaggedPubkey::new(
+                            crate::signature::SignatureScheme::Secp256k1,
+                            crate::signature::CURRENT_VERSION,
+                            public.serialize().to_vec(),
+                        )
+                        .unwrap(),
+                        signature: sig,
+                    }
+                })
+                .collect();
+            // recipient 真实签名（SEC2-M1）：让校验走到资产白名单一步
+            let rm = secp256k1::Message::from_digest_slice(&msg).unwrap();
+            let (rid, compact) =
+                secp.sign_ecdsa_recoverable(&rm, &recipient_secret).serialize_compact();
+            let mut recipient_sig = compact.to_vec();
+            recipient_sig.push(rid.to_i32() as u8);
+            BridgeVerifyTx {
+                deposit,
+                validator_signatures: sigs,
+                recipient_sig,
+                recipient_pubkey: recipient_tagged.clone(),
+                preferred_relayer: None,
+            }
+        };
+
+        // 白名单资产：验到 recipient 签名一步（资产检查已通过）
+        let usdc = signed_tx([0xAB; 32], 1);
+        let r = bridge_verify(&mut registry, &usdc, crate::DEFAULT_CHAIN_ID, true);
+        assert!(
+            !matches!(r, Err(PokerL1Error::BridgeAssetNotAllowed { .. })),
+            "白名单资产不得被资产检查拒绝"
+        );
+
+        // 非白名单资产：fail-closed 拒绝
+        let rogue = signed_tx([0xEE; 32], 2);
+        assert!(matches!(
+            bridge_verify(&mut registry, &rogue, crate::DEFAULT_CHAIN_ID, true),
+            Err(PokerL1Error::BridgeAssetNotAllowed { .. })
+        ));
+
+        // 未设置白名单（None）：任意资产放行到后续校验
+        let mut registry2 = BridgeRegistry::new();
+        let (keys2, _) = register_slot_with_allowlist(&mut registry2, None);
+        assert_eq!(keys2.len(), 5);
+        let rogue2 = signed_tx([0xEE; 32], 1);
+        assert!(
+            !matches!(
+                bridge_verify(&mut registry2, &rogue2, crate::DEFAULT_CHAIN_ID, true),
+                Err(PokerL1Error::BridgeAssetNotAllowed { .. })
+            ),
+            "未配置白名单的 slot 不得以资产理由拒绝"
+        );
+    }
+
 }

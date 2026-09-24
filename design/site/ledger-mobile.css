@@ -1,0 +1,240 @@
+/* ==========================================================================
+   ZChain 站点 · 账簿 Ledger 移动端适配层 v0.1
+   --------------------------------------------------------------------------
+   定位：ledger 主样式（website/assets/css/main.css）的**增量层**，只放
+   @media 与移动端专属规则，不重复主样式已有的声明。
+   落地方式：整段追加到 website/assets/css/main.css 末尾（媒体查询不加权重，
+   同特异性靠后者生效，所以必须追加在文件末尾、@media print 之前）。
+
+   三条硬规矩（和主样式同源）：
+   1. 不新增颜色/字号/圆角 token，只用主样式 :root 与 html[data-ground=night] 已有的。
+   2. 移动端不是"桌面压窄"——导航模型、表格呈现、docs 目录这三处在 ≤560 换做法。
+   3. 触控目标 ≥44px；hover 只做增强，不做唯一反馈通道。
+   ========================================================================== */
+
+
+/* --------------------------------------------------------------------------
+   M1 · 顶部横滑 chip 轨导航
+   主样式在 560 下只把 .site-nav 变成 width:100%，13 个链接于是折成两行，
+   吸顶头变成一大块。这里改成：brand 行 + 一条不换行、可横滑、带渐隐提示的
+   chip 轨。保留全部 13 项的可见性，不引入抽屉/底部 tab 这类新层级。
+   -------------------------------------------------------------------------- */
+@media (max-width: 720px) {
+  /* .header-row 有三个子元素（.brand / .site-nav / .ground-toggle），
+     改 block 会让底面按钮掉到第三行。用 grid 区域钉死：品牌左、底面按钮右、导航整行。 */
+  .header-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas: "brand toggle" "nav nav";
+    align-items: center; column-gap: 10px;
+    padding-top: 8px; padding-bottom: 0;
+  }
+  .brand { grid-area: brand; display: flex; align-items: center; }
+  .ground-toggle { grid-area: toggle; margin: 0; min-height: 40px; padding: 0 10px; }
+
+  .site-nav {
+    grid-area: nav;
+    margin: 8px -16px 0;         /* 负 margin 让轨道出血到屏幕边，滑动手势有起点 */
+    width: auto;
+    padding: 0 16px 8px;
+    border-bottom: 1px solid var(--border);
+    /* 左右渐隐：不靠箭头按钮就说明「这边还能滑」 */
+    -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%);
+            mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%);
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .site-nav::-webkit-scrollbar { display: none; }
+  .nav-list {
+    display: flex; flex-wrap: nowrap; gap: 6px;   /* 不换行，靠滑 */
+    width: max-content; padding: 0 2px;
+  }
+  .nav-list li { border-left: 0; }                /* 竖线在横滑轨里会断裂，改边框 */
+  .nav-list a {
+    display: flex; align-items: center; min-height: 44px;   /* 触控下限 */
+    padding: 0 12px; white-space: nowrap;
+    border: 1px solid var(--border); border-radius: var(--radius-sm);
+    background: var(--surface); font-size: 12px;
+    scroll-snap-align: start;
+  }
+  .nav-list a.active {
+    background: var(--felt-w); color: var(--felt);
+    border-color: var(--felt-rl); box-shadow: none;
+    font-weight: 700;
+  }
+  /* 触屏没有 hover：主样式用 :hover 换底色，在移动端会变成「点完留色」的黏滞态 */
+  @media (hover: none) {
+    .nav-list a:hover { background: var(--surface); color: var(--muted); }
+    .nav-list a.active:hover { background: var(--felt-w); color: var(--felt); }
+  }
+}
+
+/* 状态轨（env-strip）里的两枚 chip + finality 折叠块同样改成可滑 */
+@media (max-width: 720px) {
+  .env-strip {
+    display: flex; gap: 8px; align-items: center; text-align: left;
+    padding: 8px 16px; overflow-x: auto;
+    -webkit-overflow-scrolling: touch; scrollbar-width: none;
+  }
+  .env-strip::-webkit-scrollbar { display: none; }
+  .env-strip .chip { flex: none; }
+  .fin-legend { flex: none; margin: 0; padding: 8px 10px; }
+  .fin-legend summary { white-space: nowrap; }
+}
+
+
+/* --------------------------------------------------------------------------
+   M2 · 首屏与栅格
+   -------------------------------------------------------------------------- */
+@media (max-width: 720px) {
+  .page-title { font-size: 30px; line-height: 1.22; }
+  .page-lead { font-size: 15px; }
+  .hero { padding: 30px 20px 32px; }
+  .hero-copy h1 { font-size: 31px; line-height: 1.24; }
+  .hero-grid { gap: 26px; }
+  .hero-visual { min-height: 196px; }
+  .cta-row { flex-direction: column; align-items: stretch; }
+  .cta-row .btn { min-height: 48px; }
+  .entry-grid, .grid-2, .grid-3 { grid-template-columns: minmax(0, 1fr); }
+  .stat-band { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 400px) {
+  .stat-band { grid-template-columns: minmax(0, 1fr); }
+}
+
+
+/* --------------------------------------------------------------------------
+   M3 · 表格转「凭证行」卡
+   主样式在 720 下是 table{display:block;overflow-x:auto;white-space:nowrap}，
+   七列的 explorer 表一屏只容得下 2–3 列，等于读不了。
+   ≤560 改成每个 <tr> 一张账簿小票：字段竖排 k/v，标签取 td[data-label]。
+
+   ⚠ 前置条件：td 必须带 data-label。站点的表格由 build.py 从 Markdown 生成，
+   目前没有该属性（见 README「移动落地补丁」，约 10 行）。没有 data-label 时
+   td::before 的 content 为空串，下面的 :not([data-label]) 兜底会退回整表横滚，
+   不会渲染出一堆空白行。
+   -------------------------------------------------------------------------- */
+@media (max-width: 560px) {
+  table {
+    display: block; width: 100%; margin: 14px 0 20px;
+    border: 0; border-radius: 0; background: none; overflow: visible;
+    white-space: normal; font-size: 13.5px;
+  }
+  table thead { display: none; }
+  table tbody { display: block; }
+  table tr {
+    display: block; margin-bottom: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow-card);
+    break-inside: avoid;
+  }
+  table td {
+    display: grid; grid-template-columns: 6.5em minmax(0, 1fr);
+    gap: 12px; align-items: baseline;
+    padding: 8px 12px; text-align: left;
+    border-bottom: 1px dotted var(--border-soft);
+    /* 卡内列宽只有 ~232px，而哈希/地址常是 64 字符纯文本（不在 <code> 里，
+       拿不到 code 的 overflow-wrap），不断行就会撑破卡片：explorer 实测 +261px。 */
+    overflow-wrap: anywhere;
+  }
+  table tr td:last-child { border-bottom: 0; }
+  /* 卡内是竖排 k/v，「贴右」这个桌面语义在移动端不成立 */
+  table td.num { text-align: left; }
+  table td::before {
+    content: attr(data-label);
+    font-family: var(--mono); font-size: 9.5px; font-weight: 600;
+    letter-spacing: .12em; text-transform: uppercase; color: var(--muted-2);
+  }
+  table td:not([data-label]) { display: block; }   /* 缺标签时不产出空列 */
+  table td:not([data-label])::before { content: none; }
+  tbody tr:hover { background: var(--surface); }   /* 触屏无 hover */
+  /* 可点的状态丸（explorer-live 注入的「刷新实时数据」等）要抬到触控下限；
+     纯展示的 .st 丸留在表格单元里，不能一起撑高，所以只命中 button/a。 */
+  button.st, a.st {
+    display: inline-flex; align-items: center; justify-content: center;
+    min-height: 40px; padding: 0 11px;
+  }
+  /* .st / .chip 是 inline-block，落到网格项里默认被 justify-self:stretch 拉满整列，
+     状态丸在卡里就变成一条通栏色块（桌面是贴文字的）。必须收回来。
+     只收这两个类：.meter 之类本来就该铺满值列。 */
+  table td > .st, table td > .chip { justify-self: start; }
+  /* 无 data-label 的表（JS 注入块等）退回横滚，至少能滑着看 */
+  table:not([data-labeled]) {
+    display: block; overflow-x: auto; white-space: nowrap;
+    border: 1px solid var(--border-soft); background: var(--surface);
+  }
+  table:not([data-labeled]) tr { display: table-row; border: 0; background: none; box-shadow: none; }
+  table:not([data-labeled]) td { display: table-cell; border-bottom: 1px solid var(--border-soft); }
+}
+
+
+/* --------------------------------------------------------------------------
+   M4 · docs 目录转顶部横滑小节轨
+   主样式在 900 下把 .docs-side 变成 static 全宽 —— 29 个分组会全部堆在正文
+   上面，正文被推到两三屏之后。这里用 :has() 只留「当前页所在的那一组」，
+   并把组内链接排成吸顶的横向 chip 轨。零 JS。
+   -------------------------------------------------------------------------- */
+@media (max-width: 900px) {
+  .docs-layout { gap: 0; padding-top: 8px; }
+  .docs-side {
+    position: sticky; top: 56px; z-index: 40;   /* 贴在吸顶头下方 */
+    max-height: none; overflow: hidden;
+    margin: 0 -16px; padding: 8px 16px 10px;
+    background: var(--bg); border-bottom: 1px solid var(--border);
+  }
+  /* 只展开含当前页的那一组；:has 不可用的老浏览器退回「全部展开」= 主样式原行为 */
+  .docs-side .docs-side-group:not(:has(a.active)) { display: none; }
+  .docs-side-h {
+    margin: 0 0 7px; padding: 0; border-bottom: 0;
+    font-size: 9.5px; letter-spacing: .14em;
+  }
+  .docs-side ul { display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+  .docs-side ul::-webkit-scrollbar { display: none; }
+  .docs-side li { flex: none; }
+  .docs-side a {
+    display: flex; align-items: center; min-height: 40px; padding: 0 11px;
+    white-space: nowrap; border: 1px solid var(--border);
+    border-left-width: 1px; border-radius: var(--radius-sm);
+    background: var(--surface); font-size: 12px;
+  }
+  .docs-side a.active { border-color: var(--felt-rl); font-weight: 700; }
+  .docs-main { padding-top: 18px; }
+}
+
+
+/* --------------------------------------------------------------------------
+   M5 · 正文节奏、表单与状态
+   -------------------------------------------------------------------------- */
+@media (max-width: 560px) {
+  .page-body h2 { font-size: 19px; margin: 30px 0 10px; padding-top: 12px; }
+  .page-body h3 { font-size: 16px; }
+  .page-body p, .page-body li { line-height: 1.78; }
+  /* blockquote 主样式没管，一直是 UA 的 40px 双端缩进 —— 390 下白吃 20% 行宽 */
+  .page-body blockquote {
+    margin: 14px 0; padding: 2px 0 2px 12px;
+    border-left: 3px solid var(--border); color: var(--muted);
+  }
+  .formula { padding: 10px 12px; font-size: 11.5px; line-height: 1.65; }
+  .kv { grid-template-columns: minmax(0, 1fr); gap: 2px; padding: 9px 0; }
+  .kv > dd, .kv .v { text-align: left; }
+  .task { font-size: 14px; }
+  .banner { padding: 13px 14px; }
+  .banner-tag { display: block; margin: 0 0 7px; }
+}
+
+
+/* --------------------------------------------------------------------------
+   M6 · 页脚与安全区
+   吸顶头 + 横滑轨都在滚动区里，横向手势不能抢页面滚动；
+   底部留 env(safe-area-inset-bottom)，Home 指示条不压住最后一段文字。
+   -------------------------------------------------------------------------- */
+@media (max-width: 720px) {
+  .site-footer { padding-bottom: 0; }
+  .footer-grid { grid-template-columns: minmax(0, 1fr); gap: 24px; padding: 26px 16px 22px; }
+  .footer-links a, .footer-meta a { display: inline-flex; align-items: center; min-height: 40px; }
+  .footer-meta { padding-bottom: 0; }
+  .site-footer > :last-child { padding-bottom: max(20px, env(safe-area-inset-bottom)); }
+  body { padding-bottom: env(safe-area-inset-bottom); }
+}

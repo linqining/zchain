@@ -82,11 +82,29 @@ impl SidePotResult {
     /// 返回所有 pot 层的总额。
     #[must_use]
     pub fn total(&self) -> u64 {
-        self.pots.iter().map(|p| p.amount).sum()
+        // 显式下标循环而非 iter().map().sum()：语义等价，且避免把
+        // core::iter 的 Map/Sum 适配器拉进 Charon/Aeneas 提取。
+        let mut total: u64 = 0;
+        for i in 0..self.pots.len() {
+            total += self.pots[i].amount;
+        }
+        total
     }
 }
 
 // ========== 核心算法 ==========
+
+/// 升序插入排序的单步插入：`x` 插到首个 `y ≥ x` 之前（保持非降序）。
+///
+/// 与 Lean 模型 `insert_sorted` 同构（`poker_lean/PokerLean/State/SidePot.lean`），
+/// 便于 Bridge 等价证明。仅由 `calculate_side_pots` 使用。
+fn insert_sorted_u64(v: &mut Vec<u64>, x: u64) {
+    let mut i = 0;
+    while i < v.len() && v[i] < x {
+        i += 1;
+    }
+    v.insert(i, x);
+}
 
 /// 计算边池分层（与 poker_l1 `calculate_side_pots` 行为逐字等价）。
 ///
@@ -115,11 +133,14 @@ pub fn calculate_side_pots(
     let total_pot = sum_bets(bets)?;
 
     // 收集 all-in 水位并升序排序（不去重，循环内 level<=prev_level 自然跳过）。
-    let mut levels: Vec<u64> = (0..n)
-        .filter(|&j| all_in[j] && bets[j] > 0)
-        .map(|j| bets[j])
-        .collect();
-    levels.sort_unstable();
+    // 用本地插入排序而非 sort_unstable：语义等价（levels 只按升序消费），
+    // 且避免把 core::slice::sort 的深层泛型实例拉进 Charon/Aeneas 提取。
+    let mut levels: Vec<u64> = Vec::new();
+    for j in 0..n {
+        if all_in[j] && bets[j] > 0 {
+            insert_sorted_u64(&mut levels, bets[j]);
+        }
+    }
 
     let mut pots: Vec<SidePot> = Vec::new();
     let mut prev_level: u64 = 0;
@@ -175,7 +196,11 @@ fn push_or_merge(pots: &mut Vec<SidePot>, amount: u64, eligible: u16) {
     }
     if eligible == 0 && !pots.is_empty() {
         // 所有贡献者都 fold：金额并入最后一层。
-        pots.last_mut().expect("pots 非空").amount += amount;
+        // pop + push 回写（等价 last_mut().expect 修改，且提取友好）。
+        if let Some(mut last) = pots.pop() {
+            last.amount += amount;
+            pots.push(last);
+        }
     } else {
         pots.push(SidePot::new(amount, eligible));
     }

@@ -55,10 +55,18 @@ def collect():
         p = DESIGN / "site" / "png" / f"board-{g}.png"
         if p.exists():
             n, w, h = thumb(p, f"board-{g}")
-            items.append(dict(key=f"board-{g}", label="站点体系板 S0–S10",
-                              sub=f"ledger.css 全 85 类名 · {g}", w=w, h=h,
+            items.append(dict(key=f"board-{g}", label="站点体系板 S0–S10（桌面）",
+                              sub=f"website/assets/css/main.css · {g}", w=w, h=h,
                               full=f"../site/png/board-{g}.png", thumb=n, kind="board"))
-    groups.append(dict(id="system", title="设计体系", desc="token、组件与类名还原度基准", items=items))
+        mp = DESIGN / "site" / "png" / f"mobile-board-{g}.png"
+        if mp.exists():
+            n, w, h = thumb(mp, f"mobile-board-{g}")
+            items.append(dict(key=f"mobile-board-{g}", label="站点体系板 M0–M6（移动 390）",
+                              sub=f"main.css + ledger-mobile.css · {g}", w=w, h=h,
+                              full=f"../site/png/mobile-board-{g}.png", thumb=n, kind="board"))
+    groups.append(dict(id="system", title="设计体系",
+                       desc="token、组件与类名还原度基准；移动板验的是叠加层生效后的真实排版",
+                       items=items))
 
     # ---- 牌桌 ----
     titems = []
@@ -115,14 +123,28 @@ def collect():
     groups.append(dict(id="site-night", title="站点逐页 · 夜场底",
                        desc=f"{len(nitems)} 顶层页 · docs 与纸白同构不重复出图", items=nitems))
 
-    mitems = []
-    for p in sorted((DESIGN / "site" / "pages" / "mobile").glob("*.png")):
-        n, w, h = thumb(p, f"mob-{p.stem}")
-        mitems.append(dict(key=f"mob-{p.stem}", label=title_of(p.stem),
-                           sub=f"390 窄屏 · {w}×{h}", w=w, h=h,
-                           full=f"../site/pages/mobile/{p.name}", thumb=n, kind="site"))
-    groups.append(dict(id="site-mob", title="站点逐页 · 窄屏 390",
-                       desc=f"{len(mitems)} 顶层页 · 表格横向滚动、长标识符断行", items=mitems))
+    MOBILE_GROUPS = [
+        ("mobile", "site-mob", "站点逐页 · 移动 390",
+         "chip 轨导航 + 凭证行卡 + docs 小节轨 · deviceScaleFactor 2"),
+        ("mobile-night", "site-mobn", "站点逐页 · 移动夜场",
+         "13 顶层页 · docs 与纸白同构不重复出图"),
+        ("mobile-360", "site-m360", "档位抽查 · 360px",
+         "explorer / home / ABI 三页，验最窄常见档"),
+        ("mobile-430", "site-m430", "档位抽查 · 430px",
+         "同上，验大屏不出现空洞与异常换行"),
+    ]
+    for d, gid, title, desc in MOBILE_GROUPS:
+        dirp = DESIGN / "site" / "pages" / d
+        if not dirp.exists():
+            continue
+        items = []
+        for p in sorted(dirp.glob("*.png")):
+            n, w, h = thumb(p, f"{gid}-{p.stem}")
+            items.append(dict(key=f"{gid}-{p.stem}", label=title_of(p.stem),
+                              sub=f"{d} · {w}×{h}", w=w, h=h,
+                              full=f"../site/pages/{d}/{p.name}", thumb=n, kind="site"))
+        if items:
+            groups.append(dict(id=gid, title=title, desc=f"{len(items)} 张 · {desc}", items=items))
 
     return groups
 
@@ -188,14 +210,21 @@ footer code{font-family:var(--mono);background:var(--code);padding:1px 5px;borde
 </div>
 <main>__BODY__</main>
 <footer>
-  <p><b>怎么读这套稿</b>：体系板是基准（token 与 85 个类名）；牌桌稿 T1–T6/G1–G2 已评审通过；
-  客户端 C1–C7 是本轮新增；站点 41 页是<b>真实构建产物</b>换掉 <code>main.css</code> 后逐页出的图，
-  不是重画的假页面 —— 所以文案、表格、数字与线上一致，可以直接当还原度验收依据。</p>
-  <p><b>重跑</b>：<code>python3 website/build.py && python3 website/tools/site_shoot.py</code>（站点全套纸白 + 窄屏）；
-  <code>GROUND=night TOPLEVEL=1 python3 website/tools/site_shoot.py</code>（夜场顶层页）；
-  <code>python3 design/client/render.py</code> / <code>GROUND=night …</code>（客户端）；
-  <code>bash design/table/render.sh</code>（牌桌）。改完图再跑 <code>python3 design/review/build.py</code> 刷新本页。</p>
-  <p><b>已知未达项</b>见 <code>design/site/README.md</code> 与 <code>design/client/README.md</code> 的走查段。</p>
+  <p><b>怎么读这套稿</b>：体系板是基准（桌面 S0–S10 / 移动 M0–M6）；牌桌稿 T1–T6/G1–G2 已评审通过；
+  客户端 C1–C7 是新增；站点 41 页是<b>真实构建产物</b>逐页出的图，不是重画的假页面 ——
+  文案、表格、数字与线上一致，可以直接当还原度验收依据。
+  账簿主样式已落地为 <code>website/assets/css/main.css</code>；
+  移动层 <code>design/site/ledger-mobile.css</code> 仍是<b>待落地的增量层</b>，出图时叠在副本上。</p>
+  <p><b>重跑</b>：桌面 <code>python3 website/build.py && python3 website/tools/cdp_shoot.py</code>
+  （加 <code>GROUND=night TOPLEVEL=1</code> 出夜场；本机 headless Chrome 已不可用，
+  两个 shooter 都走有头实例 + CDP）；
+  移动 <code>python3 website/build.py && MOBILE=1 python3 website/tools/cdp_shoot.py</code>
+  （加 <code>GROUND=night TOPLEVEL=1</code> 或 <code>VW=360,430 SLUGS=…</code>）；
+  体系板 <code>BOARD="design/site/zchain-site-mobile-ui.html:mobile-board" python3 website/tools/cdp_shoot.py</code>；
+  移动走查 <code>python3 website/tools/audit_mobile.py</code>；
+  客户端 <code>python3 design/client/render.py</code>；牌桌 <code>bash design/table/render.sh</code>。
+  最后 <code>python3 design/review/build.py</code> 刷新本页。</p>
+  <p><b>已知未达项</b>见 <code>design/site/README.md</code>（含移动段与落地补丁）与 <code>design/client/README.md</code>。</p>
 </footer>
 <script>
 document.querySelectorAll('[data-g]').forEach(function(b){b.addEventListener('click',function(){
@@ -210,7 +239,8 @@ def guard_duplicates() -> list[str]:
     """夜场图若与纸白图逐字节相同，说明 data-ground 没生效——直接报错而不是出假图。"""
     import hashlib
     bad = []
-    pairs = [(DESIGN / "site" / "pages" / "desktop", DESIGN / "site" / "pages" / "desktop-night")]
+    pairs = [(DESIGN / "site" / "pages" / "desktop", DESIGN / "site" / "pages" / "desktop-night"),
+             (DESIGN / "site" / "pages" / "mobile", DESIGN / "site" / "pages" / "mobile-night")]
     for paper, night in pairs:
         if not night.exists():
             continue

@@ -484,10 +484,14 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
                 .bridge_registry_store
                 .clone()
                 .ok_or_else(|| PokerL1Error::BridgeVerifyNotAuthorized)?;
-            // bridge_verify 需 &mut BridgeRegistry（mutex 保护）。
+            // P0-4：只验证（不消费）+ 铸造进后端 + nonce 暂存——消费与持久
+            // 化随写日志在合并点原子生效；tx 后续阶段（outputs / 结算）失败
+            // 则整体丢弃，不再留下「nonce 已烧、无铸币」的半状态。
+            // 捕获型后端 stage 返回 true；直接后端（串行/快照）返回 false，
+            // 此处立即消费+持久化（保持串行语义）。
             let outcome = {
                 let mut registry = bridge_store.registry();
-                crate::bridge::bridge_verify(&mut registry, &bridge_tx, env.chain_id, true)?
+                crate::bridge::bridge_verify_check(&mut registry, &bridge_tx, env.chain_id, true)?
             };
             // 铸造 wrapped Object（creation_nonce 确定性：block_height 高 32 位 | tx_hash 低 32 位，
             // 保证出块/验块双方 ObjectID 一致 → state_root 可重现）。
@@ -499,9 +503,14 @@ fn execute_tx_on_view_inner<B: ObjectBackend>(
             let wrapped_id =
                 crate::bridge::mint_wrapped_object(&outcome, object_db, creation_nonce)?;
             all_created.push(wrapped_id);
-            // 持久化 deposit nonce（Q24：防重启重放铸币）。
-            bridge_store
-                .persist_deposit_nonce(outcome.deposit.source_chain_id, outcome.deposit.nonce)?;
+            let staged = object_db
+                .stage_bridge_deposit(outcome.deposit.source_chain_id, outcome.deposit.nonce);
+            if !staged {
+                let source = outcome.deposit.source_chain_id;
+                let nonce = outcome.deposit.nonce;
+                bridge_store.registry().consume_nonce(source, nonce);
+                bridge_store.persist_deposit_nonce(source, nonce)?;
+            }
             // bridge 调用不经 rBPF，gas_used 保持 0；步骤 6 仍按 Public lane 扣费 + 推进 nonce。
         } else if call.contract_id == crate::vm::precompile::reserved::transfer_contract_id() {
             // Native transfer: selected immutable UTXOs become recipient payment + sender change.
@@ -958,8 +967,12 @@ fn execute_block_parallel(
                     }
                 };
 
-                // 回放写日志到主 ObjectDb（capture 阶段已校验，主库再校验一次）
-                if let Err(e) = log.apply_to(object_db) {
+                // 回放写日志到主 ObjectDb（capture 阶段已校验，主库再校验一次）。
+                // P0-4：桥 deposit nonce 的消费+持久化在此时与对象写原子生效
+                //（预检冲突 → 整笔回执失败，对象写不回放）。
+                if let Err(e) =
+                    log.apply_to_with_bridge(object_db, env.bridge_registry_store.as_deref())
+                {
                     let receipt = settle_failed_tx(env, tx, &e, account_store);
                     if needs_gas {
                         let caller = derive_address(&tx.tagged_pubkey);

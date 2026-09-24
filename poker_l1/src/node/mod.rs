@@ -3203,6 +3203,16 @@ impl Node {
         !result.0.is_empty()
     }
 
+    /// 外部唤醒 validator 产块循环的等待（与 `submit_tx` 共用同一 condvar）。
+    ///
+    /// 共识事件驱动化（threshold clock / 收块即评估 wave）：P2P vertex 准入
+    /// 后调用，使 validator loop 不必等满 block_interval 才发现轮次 quorum
+    /// 已凑齐或波已成熟。虚假唤醒无害——`wait_for_pending_tx` 返回后由调用
+    /// 方按 DAG 实际进展决策（跳过生产仅扫 commit，或提前产下一轮）。
+    pub fn notify_validator_wake(&self) {
+        self.pending_tx_condvar.notify_one();
+    }
+
     // ===== M3-ACC-6：ForceInclude 抗审查机制（plan §5.3 v1 子集） =====
 
     /// 节点本地时钟（毫秒）。来源可注入（[`Self::set_time_source`]），生产默认

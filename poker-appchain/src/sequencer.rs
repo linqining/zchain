@@ -4557,4 +4557,145 @@ mod tests {
         )
         .is_err());
     }
+    // ===== compliance_gate 端到端负例（C-M2 出口判据：准入控制负例测试）=====
+    //
+    // compliance.rs 的门函数矩阵已覆盖判定逻辑；此处覆盖 apply 路径的
+    // 完整闭环：拒绝 → AdmissionRejected + 审计事件（decision=Err）+
+    // 账本零变更；放行 → accepted 审计事件 + deposit_id 入账（正例对照）。
+
+    fn compliance_sequencer(
+        tune: impl FnOnce(&mut crate::compliance::MarketPolicy),
+    ) -> Sequencer {
+        use crate::compliance::{ComplianceParams, GeoPolicy, MarketPolicy};
+        let mut im = MarketPolicy {
+            real_enabled: true,
+            game_enabled: true,
+            ..MarketPolicy::default() // fail-closed 缺省（制动位开）
+        };
+        im.kyc_required_real = false;
+        im.kyc_required_game = false;
+        tune(&mut im);
+        let mut policy = GeoPolicy { version: 1, ..GeoPolicy::default() };
+        policy.markets.insert("IM".into(), im);
+        let mut cfg = SequencerConfig::default();
+        cfg.compliance = Some(ComplianceParams { policy, market: "IM".into() });
+        Sequencer::new(
+            SequencerKey::from_seed(&[11u8; 32]),
+            cfg,
+            Arc::new(MetricsRegistry::new()),
+        )
+    }
+
+    fn real_deposit_op(user: &TestUser, deposit_id: u8, amount: u64) -> Operation {
+        Operation::Deposit {
+            deposit_id: [deposit_id; 32],
+            owner: user.pk(),
+            asset_class: AssetClass::Real,
+            amount,
+        }
+    }
+
+    #[test]
+    fn compliance_gate_rejects_blocked_market_and_leaves_ledger_clean() {
+        // 市场被封（real_enabled=false）→ 拒 + 审计 + 账本零变更
+        let mut s = compliance_sequencer(|mp| mp.real_enabled = false);
+        let alice = TestUser::new(1);
+        let err = s.submit(real_deposit_op(&alice, 1, 100), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)), "{err:?}");
+        let events = s.state().compliance_events.events();
+        assert_eq!(events.len(), 1, "拒绝必须留审计事件");
+        assert_eq!(events[0].op_tag, "deposit");
+        assert_eq!(
+            events[0].decision,
+            Err(crate::compliance::Rejection::RealDisabled)
+        );
+        assert!(s.state().deposit_ids.is_empty(), "被拒入金不得入账");
+        assert!(
+            s.state().notes.values().all(|e| e.note.owner != alice.pk()),
+            "被拒入金不得铸 note"
+        );
+    }
+
+    #[test]
+    fn compliance_gate_negative_matrix_end_to_end() {
+        let alice = TestUser::new(1);
+
+        // fiat_only：NATIVE（v1 REAL Deposit 的 token 口径）被拒
+        let mut s = compliance_sequencer(|mp| mp.fiat_only = true);
+        let err = s.submit(real_deposit_op(&alice, 2, 100), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)));
+        assert_eq!(
+            s.state().compliance_events.events()[0].decision,
+            Err(crate::compliance::Rejection::FiatOnlyNativeRejected)
+        );
+
+        // 单笔限额：>max 拒（边界值放行见正例测试）
+        let mut s = compliance_sequencer(|mp| mp.max_deposit = 100);
+        let err = s.submit(real_deposit_op(&alice, 3, 101), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)));
+        assert_eq!(
+            s.state().compliance_events.events()[0].decision,
+            Err(crate::compliance::Rejection::DepositLimitExceeded)
+        );
+        assert!(s.state().deposit_ids.is_empty());
+
+        // KYC 制动位：通道全拒
+        let mut s = compliance_sequencer(|mp| mp.kyc_required_real = true);
+        let err = s.submit(real_deposit_op(&alice, 4, 100), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)));
+        assert_eq!(
+            s.state().compliance_events.events()[0].decision,
+            Err(crate::compliance::Rejection::KycGateReal)
+        );
+
+        // RG 自排除：owner 承诺命中名单
+        let mut s = compliance_sequencer(|mp| {
+            mp.self_excluded
+                .insert(crate::compliance::owner_key_v1(&alice.pk()));
+        });
+        let err = s.submit(real_deposit_op(&alice, 5, 100), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)));
+        assert_eq!(
+            s.state().compliance_events.events()[0].decision,
+            Err(crate::compliance::Rejection::SelfExcluded)
+        );
+
+        // 市场未配置（部署错配）→ fail-closed
+        let mut s = compliance_sequencer(|_| {});
+        s.config.compliance.as_mut().unwrap().market = "XX".into();
+        let err = s.submit(real_deposit_op(&alice, 6, 100), 1_000).unwrap_err();
+        assert!(matches!(err, AppchainError::AdmissionRejected(_)));
+        assert_eq!(
+            s.state().compliance_events.events()[0].decision,
+            Err(crate::compliance::Rejection::MarketNotConfigured)
+        );
+    }
+
+    #[test]
+    fn compliance_gate_accept_records_audit_and_deposits() {
+        // 正例对照：限额边界值（== max）放行 → accepted 审计 + deposit_id 入账
+        let mut s = compliance_sequencer(|mp| mp.max_deposit = 100);
+        let alice = TestUser::new(1);
+        s.submit(real_deposit_op(&alice, 7, 100), 1_000).unwrap();
+        let events = s.state().compliance_events.events();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].op_tag, "deposit");
+        assert_eq!(events[0].decision, Ok(()));
+        assert_eq!(events[0].amount, Some(100));
+        assert!(
+            s.state().deposit_ids.contains(&[7u8; 32]),
+            "放行入金必须入账幂等集"
+        );
+    }
+
+    #[test]
+    fn compliance_gate_inactive_without_config() {
+        // 未配置合规参数 = 直通（现网部署前形态；负例门只在其配置后生效）
+        let mut s = new_sequencer();
+        let alice = TestUser::new(1);
+        s.submit(real_deposit_op(&alice, 8, 100), 1_000)
+            .expect("无合规配置时 REAL Deposit 直通");
+        assert!(s.state().deposit_ids.contains(&[8u8; 32]));
+        assert!(s.state().compliance_events.events().is_empty());
+    }
 }

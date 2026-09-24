@@ -10,3 +10,8 @@ require mathlib from git
 @[default_target]
 lean_lib PokerLean where
   roots := #[`PokerLean]
+
+/-- 差分对拍 runner（方案 C）：编译为原生二进制，避免解释器栈溢出。 -/
+@[default_target]
+lean_exe differential where
+  root := `Differential.Main

@@ -755,9 +755,23 @@ async function main() {
   let stallSince = Date.now();
   let lastMaintenance = 0;
   let lastReseatAt = 0;
+  let reseatStall = 0;
+  // CDP 连续失败看门狗：Chrome 挂死/崩溃时 game.eval 永远静默失败，
+  // 死循环不退出会让 supervisor 永远等不到重启。连续失败超过阈值即抛出
+  // 退出（非 0），由 supervisor 清理 Chrome 残留并拉起全新浏览器。
+  let cdpFailStreak = 0;
+  const CDP_FAIL_LIMIT = 8;
   while (Date.now() < deadline) {
     iter++;
     const res = await game.eval(ACTION_SCRIPT, 8_000).catch(() => null);
+    if (res === null) {
+      cdpFailStreak++;
+      if (cdpFailStreak >= CDP_FAIL_LIMIT) {
+        throw new Error(`CDP 连续失败 ${cdpFailStreak} 次（Chrome 挂死/崩溃），退出以触发 supervisor 重启`);
+      }
+    } else {
+      cdpFailStreak = 0;
+    }
     const acted = res?.acted ?? null;
     if (acted && acted !== 'cooldown' && acted !== 'probe-wait' && acted !== null) {
       const key = acted === 'bet' ? 'bet' : acted === 'probe-wait' ? 'probe' : acted;
@@ -803,14 +817,18 @@ async function main() {
           lastReseatAt = Date.now();
           edgeStat('bust-reseat-begin', {});
           const clicked = await game.eval(`(() => {
-            if (document.getElementById('amount')) return null; // 买入弹窗已在流程中
+            // 买入弹窗已开（上次 reseat 流程中断残留）：不再跳过——返回 'modal'
+            // 让下方流程继续走 补水→填额→提交→审批，否则弹窗永久卡死重入座。
+            if (document.getElementById('amount')) return 'modal';
             const btns = [...document.querySelectorAll('button')].filter((x) => /^(Sit Down|入座)$/.test(x.textContent.trim()));
             if (btns.length === 0) return null;
             btns[btns.length > 4 ? Math.min(${SEAT}, btns.length - 1) : 0].click();
             return btns.length;
           })()`, 10_000).catch(() => null);
           if (clicked) {
-            progress(`[reseat] 不在座 → 点击 Sit Down（空位=${clicked}），走完整买入签名…`);
+            if (clicked !== 'modal') {
+              progress(`[reseat] 不在座 → 点击 Sit Down（空位=${clicked}），走完整买入签名…`);
+            }
             // 买入签名消耗 note：重入座前先补水龙头，避免 NoPlayableNote
             await popupSend(popup, { type: 'popup:faucet', amount: 1000 }, 30_000)
               .then((r) => progress(`[reseat] faucet top-up: ${JSON.stringify(r)?.slice(0, 80)}`))
@@ -839,9 +857,22 @@ async function main() {
               }).catch(() => 'unknown')`, 10_000).catch(() => 'unknown');
               if (seatedAfter === 'seated') {
                 edgeStat('bust-reseat-done', {});
+                reseatStall = 0;
               } else {
                 edgeStat('bust-reseat-miss', {});
               }
+            }
+          } else if (clicked === null) {
+            // 页面上既无 Sit Down 按钮也无买入弹窗：服务器重启后客户端
+            // 缓存的旧 table（closed=true）会让 join effect 永久跳过重新
+            // 加入 → 只能整页刷新恢复初始态，刷新后下一轮即可点 Sit Down。
+            reseatStall++;
+            progress(`[reseat] 桌面无可用入座按钮（stall=${reseatStall}）`);
+            if (reseatStall >= 3) {
+              reseatStall = 0;
+              progress('[reseat] 整页刷新以清除陈旧 table 状态…');
+              await game.eval(`location.reload(); true`).catch(() => { });
+              await sleep(6000);
             }
           }
         }

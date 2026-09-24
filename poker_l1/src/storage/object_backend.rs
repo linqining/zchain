@@ -63,6 +63,17 @@ pub trait ObjectBackend {
         Ok(())
     }
 
+    /// P0-4（审计 2026-08-01）：暂存本 tx 的桥 deposit nonce 消费。
+    ///
+    /// 捕获型后端（[`crate::executor::write_capture::WriteCaptureBackend`]）
+    /// 覆写为把 nonce 记入写日志并返回 `true`——消费与持久化在写日志合并
+    /// 点统一执行，tx 失败则整体丢弃，不再留下「nonce 已烧、无铸币」的
+    /// 半状态。直接后端保持默认 `false`，由调用方立即消费+持久化（串行
+    /// 语义不变）。
+    fn stage_bridge_deposit(&mut self, _source_chain_id: crate::ChainId, _nonce: u64) -> bool {
+        false
+    }
+
     /// Replace one validated system-owned reserved object.
     ///
     /// Audited economics and consensus paths use this to advance singleton state

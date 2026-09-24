@@ -239,9 +239,35 @@ def is_flush : List Card → Bool
 def count_rank (rank : Nat) (cards : List Card) : Nat :=
   (cards.filter (fun c => c.rank = rank)).length
 
+/-- 组比较：按 `(count, rank)` 字典序降序。
+
+镜像 Rust `groups.sort_unstable_by(|a, b| b.cmp(a))`（`hand_evaluator.rs:177`）。
+组内 rank 互异，故排序为全序，与 `sort_unstable` 结果一致。 -/
+def pair_ge (a b : Nat × Nat) : Bool :=
+  a.1 > b.1 ∨ (a.1 = b.1 ∧ a.2 ≥ b.2)
+
+def insert_group_desc (x : Nat × Nat) : List (Nat × Nat) → List (Nat × Nat)
+  | [] => [x]
+  | y :: ys => if pair_ge x y then x :: y :: ys else y :: insert_group_desc x ys
+
+def sort_groups_desc : List (Nat × Nat) → List (Nat × Nat)
+  | [] => []
+  | x :: xs => insert_group_desc x (sort_groups_desc xs)
+
+/-- 末尾 `(0, 0)` 填充到至少 5 个，保证 `groups[1..4]` 访问安全。
+
+镜像 Rust `while groups.len() < 5 { groups.push((0, 0)); }`（`hand_evaluator.rs:178-180`）。 -/
+def pad_groups (g : List (Nat × Nat)) : List (Nat × Nat) :=
+  g ++ List.replicate (5 - min g.length 5) (0, 0)
+
+/-- 相同点数组：`(count, rank)` 降序 + `(0,0)` 填充。
+
+镜像 Rust `hand_evaluator.rs:170-180`（counts[13] → filter → sort desc → pad）。
+**注意**：分组按 rank 计数（不同花色同点数算同组），排序使 `groups[0]`
+为最大计数组——这是 `evaluate_five` 判定链的前提。 -/
 def build_groups (cards : List Card) : List (Nat × Nat) :=
   let counts := (List.range 13).map (fun i => (count_rank (i + 2) cards, i + 2))
-  (counts.filter (fun c => c.1 > 0)).take 5
+  pad_groups (sort_groups_desc (counts.filter (fun c => c.1 > 0)))
 
 def get_group (g : List (Nat × Nat)) (i : Nat) : Nat × Nat :=
   g.getD i (0, 0)
@@ -303,7 +329,9 @@ def pick5 (cards : List Card) (i j k l m : Nat) : List Card :=
 def evaluate_best (cards : List Card) : HandRank :=
   let n := cards.length
   if n < 5 then
-    let padded := cards ++ List.replicate (5 - n) (Card.new 0 0)
+    -- 填充牌 rank=0（不计入 counts），花色 0,1,2,3 循环递增（不构成同花）。
+    -- 镜像 Rust `hand_evaluator.rs:117-123`（Card::new(next_suit, 0)，next_suit 循环）。
+    let padded := cards ++ (List.range (5 - n)).map (fun i => Card.new (i % 4) 0)
     evaluate_five padded
   else
     let combs := combinations5 n

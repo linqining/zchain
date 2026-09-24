@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-ground="paper">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZChain 站点 · 账簿移动端体系板 M0–M8</title>
+<!-- 板子本身就是 390 宽的文档：媒体查询按视口生效，只有让页面真的在 390 下排版，
+     这里验的才是落地后的同一份 CSS，而不是"看起来像移动端"的仿写。
+     样式全部来自 website/assets/css/main.css（账簿主样式）+ ledger-mobile.css（移动增量层）。
+     本文件不写任何视觉规则，只加板子自己的排布骨架（<style> 里仅 .board* 类）。 -->
+<link rel="stylesheet" href="../../website/assets/css/main.css">
+<link rel="stylesheet" href="ledger-mobile.css">
+<style>
+/* 只服务于"板子"本身，不参与站点渲染 */
+.board-cut { margin: 0; padding: 18px 16px 6px; background: var(--code);
+  border-top: 2px solid var(--text); border-bottom: 1px solid var(--border); }
+.board-cut h2 { font-family: var(--mono); font-size: 11px; letter-spacing: .18em;
+  text-transform: uppercase; color: var(--muted); margin: 0; }
+.board-cut p { font-size: 11.5px; color: var(--muted-2); margin: 5px 0 0; line-height: 1.6; }
+.board-spec { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden; margin: 14px 0 4px; }
+.board-spec > div { background: var(--surface); padding: 9px 11px; }
+.board-spec dt { font-family: var(--mono); font-size: 9.5px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted-2); }
+.board-spec dd { margin: 3px 0 0; font-size: 13px; font-family: var(--mono); color: var(--text); }
+.board-row { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+  border-bottom: 1px dotted var(--border-soft); font-size: 12.5px; }
+.board-row:last-child { border-bottom: 0; }
+.board-tap { display: inline-flex; align-items: center; justify-content: center;
+  border: 1px dashed var(--play); background: var(--play-w); color: var(--play);
+  font-family: var(--mono); font-size: 9.5px; }
+.board-hair { height: 1px; background: var(--border); margin: 16px 0 0; }
+.board-note { font-size: 11.5px; color: var(--muted-2); line-height: 1.7; margin: 8px 0 0; }
+body.shot .board-cut > p { display: none; }
+</style>
+</head>
+<body>
+
+<!-- ============================ M0 规格 ============================ -->
+<figure class="board-cut" id="m0"><div class="wrap">
+  <h2>M0 · 规格基线</h2>
+  <p>移动端不新增任何 token；下面每个数都是主样式的已有值、或它在断点处的取值。
+  移动层额外只补了两条专属约束：<b>触控下限</b>与<b>安全区</b>。</p>
+</div></figure>
+<div class="wrap">
+  <dl class="board-spec">
+    <div><dt>视口基线</dt><dd>390（iPhone 12/13/14 逻辑宽）· 抽查 360 / 430</dd></div>
+    <div><dt>正文</dt><dd>15.5px / 1.78（字号不动，行高从桌面 1.68 抬起）</dd></div>
+    <div><dt>页标题</dt><dd>30px / 1.22（桌面 <code>clamp(24px,3vw,32px)</code>，1280 下即 32）</dd></div>
+    <div><dt>正文行宽</dt><dd>视口 − 32px（.wrap padding 16×2）</dd></div>
+    <div><dt>触控下限</dt><dd>导航 chip 44px · 首屏主 CTA 48px · 次级控件 40px · 正文链接随文本流</dd></div>
+    <div><dt>安全区</dt><dd>底部 env(safe-area-inset-bottom)，Home 条不压页脚</dd></div>
+  </dl>
+  <div class="board-row"><span class="board-tap" style="min-width:44px;min-height:44px">44</span> 导航 chip —— 主推荐命中区</div>
+  <div class="board-row"><span class="board-tap" style="min-width:48px;min-height:48px">48</span> 首屏主 CTA（<code>.cta-row .btn</code>）—— 唯一的正向上任务键</div>
+  <div class="board-row"><span class="board-tap" style="min-width:40px;min-height:40px">40</span> docs 小节 chip / 底面切换 / 页脚链接 —— 次级控件，仍在下限之上</div>
+  <p class="board-note">桌面主样式里 <code>:hover</code> 是主要反馈通道。移动层在 <code>@media (hover:none)</code> 下
+  把导航的 hover 底色撤掉——触屏上 hover 会「点完留色」，看起来像选中了两个项。</p>
+</div>
+
+<!-- ============================ M1 导航 ============================ -->
+<figure class="board-cut" id="m1"><div class="wrap">
+  <h2>M1 · 顶部横滑 chip 轨导航</h2>
+  <p>13 个链接在 390 下不再折行：品牌行 + 一条不换行、可横滑、左右渐隐的 chip 轨。</p>
+</div></figure>
+<header class="site-header">
+  <div class="wrap header-row">
+    <p class="brand"><a href="#m1" class="brand-link"><img src="../../website/assets/img/logo.svg" alt="ZChain Poker 标志" width="30" height="30"><span>ZChain&nbsp;Poker</span></a></p>
+    <nav class="site-nav" aria-label="站点导航"><ul class="nav-list">
+      <li><a href="#m1">首页</a></li><li><a href="#m1">产品</a></li><li><a href="#m1">技术</a></li>
+      <li><a href="#m1">证明</a></li><li><a class="active" href="#m1">浏览器</a></li><li><a href="#m1">开发者</a></li>
+      <li><a href="#m1">文档</a></li><li><a href="#m1">路线图</a></li><li><a href="#m1">安全</a></li>
+      <li><a href="#m1">透明度</a></li><li><a href="#m1">法务</a></li><li><a href="#m1">状态</a></li>
+    </ul></nav>
+    <button type="button" class="ground-toggle" data-ground-toggle aria-label="切换纸白/夜场底面"><span class="ground-toggle-label"></span></button>
+  </div>
+</header>
+<div class="wrap">
+  <p class="board-note">三个决定：① <b>不换行、不折叠</b>——13 项全部保留可发现性，不引入抽屉/底部 tab 这类新层级；
+  ② 轨道用负 margin 出血到屏幕边，滑动从拇指自然起点开始；
+  ③ 左右渐隐（<code>mask-image</code>）替代箭头按钮来说明「这边还能滑」。
+  竖分隔线在横滑轨里会随滚动断裂，所以 chip 改成自带边框。</p>
+</div>
+<div class="env-strip" role="note" aria-label="网络环境与最终性说明">
+  <span class="chip chip-net">devnet &#183; zchain-poker-devnet</span>
+  <span class="chip chip-assets">PLAY 娱乐筹码 &#183; REAL 托管映射 &#183; v1 托管网络</span>
+  <details class="fin-legend"><summary>finality: soft accepted &#8594; BFT ordered &#8594; proven &#8594; finalized/claimable</summary>
+  <div class="fin-legend-body">四种状态来自技术方案 §5.1。v1 当前实际达到 <strong>soft accepted</strong> 与 <strong>proven</strong>。</div></details>
+</div>
+<div class="wrap">
+  <p class="board-note">状态轨同理：<code>display:flex</code> + 横向滚动，两枚 chip 与 finality 折叠块都不换行。</p>
+</div>
+
+<!-- ============================ M2 首页 ============================ -->
+<figure class="board-cut" id="m2"><div class="wrap">
+  <h2>M2 · 首页 hero 与统计带</h2>
+  <p>hero 单列；统计带 390 下两列、≤400 退回单列。</p>
+</div></figure>
+<section class="hero wrap">
+  <div class="hero-grid">
+    <div class="hero-copy">
+      <p class="tagline-en">Every hand. A verifiable settlement.</p>
+      <h1>让每一手牌，都有可验证的结算记录。</h1>
+      <p class="page-lead">ZChain Poker 是面向扑克场景的专用 Appchain：快速确认牌局操作，用可验证证明约束结算与 rake，并把最终资金释放交给明确的 Vault 与退出协议。</p>
+      <div class="cta-row">
+        <a class="btn btn-play" href="#m2">立即试玩 PLAY</a>
+        <a class="btn btn-ghost" href="#m2">阅读技术文档</a>
+        <a class="btn btn-ghost" href="#m2">验证一手牌</a>
+        <a class="btn btn-real" href="#m2">Network Status</a>
+      </div>
+    </div>
+  </div>
+</section>
+<div class="wrap">
+  <div class="stat-band">
+    <div class="stat"><div class="stat-num">2.1 ms</div><div class="stat-lbl">软确认 p50（门槛 100ms）</div></div>
+    <div class="stat"><div class="stat-num">3,200</div><div class="stat-lbl">压测结算（64 桌 × 50 手）</div></div>
+    <div class="stat"><div class="stat-num">16,064</div><div class="stat-lbl">压测牌局操作</div></div>
+    <div class="stat"><div class="stat-num">2,350+</div><div class="stat-lbl">工作区测试通过</div></div>
+  </div>
+  <p class="board-note">CTA 在 720 下改成纵向铺满，四枚按钮各占一行——横排会让「立即试玩」和「Network Status」挤成两字宽。</p>
+</div>
+
+<!-- ============================ M3 凭证行卡 ============================ -->
+<figure class="board-cut" id="m3"><div class="wrap">
+  <h2>M3 · 表格转「凭证行」卡</h2>
+  <p>桌面整表横滚在 390 下七列只剩 2–3 列可读。≤560 每个 &lt;tr&gt; 转成一张账簿小票。</p>
+</div></figure>
+<div class="wrap">
+  <table data-labeled="1">
+    <thead><tr><th class="num">手牌</th><th>桌</th><th class="num">底池</th><th class="num">Rake</th><th>结算层级</th><th>Proof</th></tr></thead>
+    <tbody>
+      <tr><td class="num" data-label="手牌">1042</td><td data-label="桌">7</td><td class="num" data-label="底池">1,840</td><td class="num" data-label="Rake">92</td><td data-label="结算层级"><span class="st st-ok">proven</span></td><td data-label="Proof"><a href="#m3">下载 / 验证</a></td></tr>
+      <tr><td class="num" data-label="手牌">1041</td><td data-label="桌">7</td><td class="num" data-label="底池">620</td><td class="num" data-label="Rake">31</td><td data-label="结算层级"><span class="st st-ok">proven</span></td><td data-label="Proof"><a href="#m3">下载 / 验证</a></td></tr>
+      <tr><td class="num" data-label="手牌">1040</td><td data-label="桌">3</td><td class="num" data-label="底池">0</td><td class="num" data-label="Rake">0</td><td data-label="结算层级"><span class="st st-info">soft accepted</span></td><td data-label="Proof">待批次出征</td></tr>
+    </tbody>
+  </table>
+  <p class="board-note"><b>前置条件</b>：每格必须知道列名，而纯 CSS 取不到兄弟元素文本，所以 <code>&lt;td&gt;</code> 要带
+  <code>data-label</code>。站点表格由 <code>build.py</code> 从 Markdown 生成，目前还没有这个属性——
+  出图时由工具在 dist 内注入，落地补丁见 README。<br>
+  <b>兜底</b>：没有 <code>data-label</code> 的表（JS 注入块等）退回整表横滚，不会渲染出一堆空标签行。下面就是兜底态：</p>
+  <table>
+    <thead><tr><th>组件</th><th>状态</th><th>说明</th></tr></thead>
+    <tbody><tr><td>Sequencer</td><td><span class="st st-ok">operational</span></td><td>出块正常</td></tr>
+    <tr><td>Prover</td><td><span class="st st-ok">operational</span></td><td>proven watermark 连续推进</td></tr></tbody>
+  </table>
+</div>
+
+<!-- ============================ M4 docs ============================ -->
+<figure class="board-cut" id="m4"><div class="wrap">
+  <h2>M4 · docs 目录转吸顶小节轨</h2>
+  <p>主样式在 900 下把整份目录摊在正文上方，29 组会把正文推到两三屏之后。</p>
+</div></figure>
+<div class="wrap docs-layout">
+  <nav class="docs-side" aria-label="文档目录">
+    <div class="docs-side-group"><p class="docs-side-h"><a href="#m4">快速开始</a></p>
+      <ul><li><a href="#m4">快速开始</a></li><li><a href="#m4">PLAY 试玩与网络配置</a></li></ul></div>
+    <div class="docs-side-group"><p class="docs-side-h"><a href="#m4">协议规范</a></p>
+      <ul><li><a href="#m4">协议规范</a></li><li><a class="active" href="#m4">ABI 摘要（v1.2.x）</a></li><li><a href="#m4">Operation 与软确认帧</a></li></ul></div>
+  </nav>
+  <main class="docs-main">
+    <div class="page-head">
+      <p class="docs-kicker">ZChain Poker 文档 · Docs v1.3.0-alpha</p>
+      <h1 class="page-title">ABI 摘要（v1.2.x）</h1>
+      <p class="page-lead">摘要与导读；wire format 唯一事实源见 poker-appchain/docs/ABI.md。</p>
+    </div>
+    <div class="page-body">
+      <blockquote><p>源文件：poker-appchain/docs/ABI.md（v1.2，2026-09-12）。本页为提炼摘要，字段以源文件为准。</p></blockquote>
+      <h2>1. 编码原语</h2>
+      <p>哈希：<code>poseidon_hash_many</code>（多元素）；<code>blake2s-256</code>（字节摘要）。</p>
+    </div>
+  </main>
+</div>
+<div class="wrap">
+  <p class="board-note">用 <code>:has()</code> 只保留「含当前页的那一组」，组内链接排成吸顶横滑轨。零 JS。
+  不支持 <code>:has()</code> 的老浏览器自动退回主样式原行为（全部展开），不会更差。</p>
+</div>
+
+<!-- ============================ M5 表单 ============================ -->
+<figure class="board-cut" id="m5"><div class="wrap">
+  <h2>M5 · 表单与状态</h2>
+  <p>proofs 验证表单在 390 下输入框铺满、按钮另起一行。</p>
+</div></figure>
+<div class="wrap">
+  <div class="card">
+    <h3 class="card-h">浏览器验证（proof portal，接口就绪）</h3>
+    <p>输入 hand id 或 proof digest：</p>
+    <p><input type="text" placeholder="例如：0x00f6fae93ff03c440c1136a5d8b5eab742f07c26" aria-label="hand id"></p>
+    <p><button type="button" disabled>验证（portal 服务上线后开放）</button></p>
+    <p class="board-note">当前状态：v1 静态层 · SAMPLE DATA / devnet · 查询接口待 portal 服务</p>
+  </div>
+  <div class="banner banner-sample">
+    <p class="banner-tag">sample data / devnet</p>
+    <p>本页为<strong>接口就绪的静态层</strong>，全部数据为 SAMPLE DATA / devnet 示例，非实时、非承诺。</p>
+  </div>
+  <p class="board-note">banner-tag 在 560 下改成独占一行——桌面它和正文同行，窄屏会把标题挤到换行。</p>
+</div>
+
+<!-- ============================ M6 页脚 ============================ -->
+<figure class="board-cut" id="m6"><div class="wrap">
+  <h2>M6 · 页脚与安全区</h2>
+  <p>三列转单列，链接行高抬到 40px 命中区，底部留 Home 指示条。</p>
+</div></figure>
+<footer class="site-footer">
+  <div class="wrap footer-grid">
+    <div class="footer-brand">
+      <p class="brand"><a href="#m6" class="brand-link"><img src="../../website/assets/img/logo.svg" alt="ZChain Poker 标志" width="26" height="26"><span>ZChain&nbsp;Poker</span></a></p>
+      <p>面向扑克场景的专用 Appchain。当前为 devnet 托管网络。</p>
+    </div>
+    <div><h2 class="footer-h">站点</h2>
+      <p class="footer-links"><a href="#m6">产品</a> <a href="#m6">技术</a> <a href="#m6">证明</a> <a href="#m6">浏览器</a> <a href="#m6">文档</a></p></div>
+    <div><h2 class="footer-h">版本与仓库</h2>
+      <p class="footer-meta">site v0.1.0 · docs v1.3.0-alpha · ABI v1.2.3</p></div>
+  </div>
+</footer>
+<div class="wrap">
+  <p class="board-note">主样式没管 <code>blockquote</code>，一直是 UA 的 40px 双端缩进；390 下等于白吃 20% 行宽，
+  M4 里那条引文已改回 3px 左规线 + 12px 缩进。</p>
+</div>
+<div class="board-hair"></div>
+
+<script>
+(function () {
+  var q = new URLSearchParams(location.search);
+  if (q.get("g")) document.documentElement.setAttribute("data-ground", q.get("g"));
+  var root = document.documentElement;
+  document.querySelectorAll("[data-ground-toggle]").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      root.setAttribute("data-ground",
+        root.getAttribute("data-ground") === "night" ? "paper" : "night");
+      paint();
+    });
+  });
+  function paint() {
+    var night = root.getAttribute("data-ground") === "night";
+    document.querySelectorAll(".ground-toggle-label").forEach(function (l) {
+      l.textContent = night ? "夜场" : "纸白";
+    });
+  }
+  paint();
+  // 横滑轨把当前项滚进视野（评审图必须看得到 active）。
+  // scrollLeft 要设在「会滚的那个容器」上，而不是 max-content 的被卷内容上。
+  function scroller(e) {
+    while (e && e !== document.body) {
+      var o = getComputedStyle(e).overflowX;
+      if (o === "auto" || o === "scroll") return e;
+      e = e.parentElement;
+    }
+    return null;
+  }
+  function rail(sel) {
+    var a = document.querySelector(sel + " a.active"); if (!a) return;
+    var t = scroller(a.parentElement) || a.parentElement; if (!t) return;
+    /* 用 rect 差值而不是 offsetLeft：.site-header 是 position:sticky，会当 offsetParent，
+       offsetLeft 会把头部偏移一起算进去，靠后的项滚过头。 */
+    var tb = t.getBoundingClientRect(), ab = a.getBoundingClientRect();
+    t.scrollLeft += ab.left - tb.left - (t.clientWidth - ab.width) / 2;
+  }
+  function fit() { rail(".site-nav .nav-list"); rail(".docs-side ul"); }
+  window.addEventListener("load", function () { setTimeout(fit, 120); });
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", function () { setTimeout(fit, 60); });
+  } else { setTimeout(fit, 60); }
+})();
+</script>
+</body>
+</html>

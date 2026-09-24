@@ -86,6 +86,11 @@ ZCHAIN_CFT_CHROME=/path/to/chrome ./render.sh   # 覆盖 Chrome for Testing 路�
 
 ## 已核对的落地风险
 
+> 2026-09-24：数据缺口分四组（A 客户端渲染 / B 派生计算 / C texas 下发 / D 链上证明层）。
+> A/B/C 已在 `poker_texas_air` 落地；**D 组（洗牌证明通道、区块/Gas、合约地址、
+> settlement 凭证）移交单独开发**，缺口、字段对照与实施方案见
+> [data-gaps-onchain.md](./data-gaps-onchain.md)。
+
 - **`ShuffleProofVisualizer` 的 `proof` 在现桌被硬编码为 `null`**，所以永远显示「暂无数据」。
   G2 需要后端把 `ShuffleProofJson` 真正接上才能落地；且现桌 UI 用的字段名
   （`sum_c1_commit` / `sum_c2_commit` / `nonce`）与服务端结构

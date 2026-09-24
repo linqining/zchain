@@ -88,6 +88,12 @@ pub struct ObjectWriteLog {
     pub written_ids: HashSet<ObjectID>,
     /// 被写对象的当前视图：Some(obj) = 最新值；None = 已被本 log 删除。
     current: HashMap<ObjectID, Option<Object>>,
+    /// P0-4：本 tx 暂存的桥 deposit nonce（source_chain_id, nonce）。
+    ///
+    /// 由 bridge 合约分支经 [`ObjectBackend::stage_bridge_deposit`] 暂存，
+    /// 在 [`ObjectWriteLog::apply_to_with_bridge`] 合并点与对象写一并原子
+    /// 生效；tx 失败则随日志整体丢弃（nonce 不泄漏）。
+    pub bridge_deposit_nonces: Vec<(crate::ChainId, u64)>,
 }
 
 impl ObjectWriteLog {
@@ -181,33 +187,83 @@ impl ObjectWriteLog {
     /// capture 阶段已做过一次写校验，提交时 `ObjectDb` 在克隆状态上
     /// 再校验一次，然后使用单个 RocksDB WriteBatch 落盘。
     pub fn apply_to(self, db: &mut ObjectDb) -> PokerL1Result<()> {
-        let mutations = self
-            .writes
-            .into_iter()
-            .map(|op| match op {
-                WriteOp::Create(object) => ObjectMutation::Create(object),
-                WriteOp::Update {
-                    id,
-                    actor,
-                    new_data,
-                } => ObjectMutation::Update {
-                    id,
-                    actor,
-                    new_data,
-                },
-                WriteOp::Transfer {
-                    id,
-                    actor,
-                    new_owner,
-                } => ObjectMutation::Transfer {
-                    id,
-                    actor,
-                    new_owner,
-                },
-                WriteOp::Delete(id) => ObjectMutation::Delete(id),
-            })
-            .collect();
+        self.apply_to_with_bridge(db, None)
+    }
+
+    /// [`apply_to`] 的桥合并点变体（P0-4）：暂存的 deposit nonce 与对象写
+    /// 一并原子生效。
+    ///
+    /// 顺序保证「全有或全无」：
+    /// 1. **预检**：全部暂存 nonce 必须未被消费（同块双花在合并点分出
+    ///    先后——按 tx_index 序，后者整笔回执失败、对象写不回放）；
+    /// 2. 回放对象写到主 ObjectDb（单个 WriteBatch）；
+    /// 3. 统一消费（内存 registry）+ 持久化 nonce。
+    ///
+    /// 任一步失败即返回 `Err`（调用方据此记失败回执并丢弃日志），已回放
+    /// 的对象写由 block 重建流程处理——与既有 `apply_to` 失败语义一致。
+    pub fn apply_to_with_bridge(
+        self,
+        db: &mut ObjectDb,
+        bridge_store: Option<&crate::storage::BridgeRegistryStore>,
+    ) -> PokerL1Result<()> {
+        let Self {
+            writes,
+            bridge_deposit_nonces,
+            ..
+        } = self;
+        if !bridge_deposit_nonces.is_empty() {
+            let store = bridge_store.ok_or_else(|| {
+                PokerL1Error::Other(
+                    "bridge deposit staged but merge has no bridge registry store".into(),
+                )
+            })?;
+            {
+                let registry = store.registry();
+                for &(source, nonce) in &bridge_deposit_nonces {
+                    if registry.is_nonce_consumed(source, nonce) {
+                        return Err(PokerL1Error::BridgeNonceConsumed(nonce));
+                    }
+                }
+            }
+            let mutations = writes
+                .into_iter()
+                .map(write_op_to_mutation)
+                .collect();
+            db.apply_batch(mutations)?;
+            for &(source, nonce) in &bridge_deposit_nonces {
+                store.registry().consume_nonce(source, nonce);
+                store.persist_deposit_nonce(source, nonce)?;
+            }
+            return Ok(());
+        }
+        let mutations = writes.into_iter().map(write_op_to_mutation).collect();
         db.apply_batch(mutations)
+    }
+}
+
+/// [`WriteOp`] → 主库 mutation 的映射（apply 路径共用）。
+fn write_op_to_mutation(op: WriteOp) -> ObjectMutation {
+    match op {
+        WriteOp::Create(object) => ObjectMutation::Create(object),
+        WriteOp::Update {
+            id,
+            actor,
+            new_data,
+        } => ObjectMutation::Update {
+            id,
+            actor,
+            new_data,
+        },
+        WriteOp::Transfer {
+            id,
+            actor,
+            new_owner,
+        } => ObjectMutation::Transfer {
+            id,
+            actor,
+            new_owner,
+        },
+        WriteOp::Delete(id) => ObjectMutation::Delete(id),
     }
 }
 
@@ -257,6 +313,12 @@ impl<'a> WriteCaptureBackend<'a> {
 }
 
 impl ObjectBackend for WriteCaptureBackend<'_> {
+    /// P0-4：暂存到写日志（返回 true = 已暂存，合并点统一消费+持久化）。
+    fn stage_bridge_deposit(&mut self, source_chain_id: crate::ChainId, nonce: u64) -> bool {
+        self.log.bridge_deposit_nonces.push((source_chain_id, nonce));
+        true
+    }
+
     fn create(&mut self, object: Object) -> PokerL1Result<()> {
         if crate::economics::is_treasury_cap_object(&object) {
             return Err(PokerL1Error::Other(

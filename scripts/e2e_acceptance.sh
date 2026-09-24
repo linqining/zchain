@@ -69,6 +69,10 @@ run "drill:restart-catchup" bash scripts/scenario_restart_catchup.sh ./target/re
 run "drill:sequencer-restart" bash scripts/drill_sequencer_restart.sh
 run "smoke:explorer-gateway" bash scripts/explorer_gateway_smoke.sh
 
+# ===== 3b. 桥回归门（锚定正常路径 + 幽灵 nonce 故障注入）=====
+run "drill:bridge-anchor"     bash scripts/scenario_bridge_anchor.sh ./target/release/zchain
+run "drill:bridge-ghost-nonce" bash scripts/scenario_bridge_ghost_nonce.sh ./target/release/zchain
+
 # ===== 4. extension（Node + 浏览器 E2E） =====
 run "extension:unit"        bash -c "cd extension && npm test"
 run "extension:wasm-smoke"  bash -c "cd extension && node tests/wasm_smoke.mjs"

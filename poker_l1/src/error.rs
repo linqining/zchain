@@ -681,6 +681,12 @@ pub enum PokerL1Error {
     /// 桥 nonce 已被消费（防重放，SubTask 34.3）。
     #[error("bridge nonce already consumed: nonce={0}")]
     BridgeNonceConsumed(u64),
+    /// deposit 资产不在 slot 的准入白名单（B-TE-1：资产白名单随 slot 注册注入）。
+    #[error("bridge deposit asset not allowed: {asset:?}")]
+    BridgeAssetNotAllowed {
+        /// 被拒绝的资产标识（源链合约地址 / token id）。
+        asset: crate::Hash,
+    },
     /// bridge_verify tx 非 recipient 本人签名（SEC2-M1 抢跑防护）。
     #[error("bridge_verify tx must be signed by recipient")]
     BridgeVerifyNotSignedByRecipient,

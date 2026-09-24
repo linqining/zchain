@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>ZChain 站点 · 账簿 Ledger 体系板 v0.1</title>
-<link rel="stylesheet" href="ledger.css">
+<link rel="stylesheet" href="../../website/assets/css/main.css">
 <style>
-/* ↓↓↓ 仅体系板自身的外壳样式(评审用),不属于站点。站点样式全在 ledger.css ↓↓↓ */
+/* ↓↓↓ 仅体系板自身的外壳样式(评审用),不属于站点。站点样式全在 website/assets/css/main.css ↓↓↓ */
 .board { max-width: 1188px; margin: 0 auto; padding: 0 24px 90px; }
 .ground-bar { position: sticky; top: 0; z-index: 900; display: flex; align-items: center; gap: 12px; padding: 9px 24px; background: var(--surface); border-bottom: 1px solid var(--border); }
 .ground-bar .ttl { font-weight: 700; font-size: 13.5px; }
@@ -40,7 +40,7 @@
 <body>
 
 <div class="ground-bar">
-  <div class="ttl">ZChain 站点 · 账簿体系板 <small>v0.1 · 85 类名逐条演练 · 样式源 ledger.css</small></div>
+  <div class="ttl">ZChain 站点 · 账簿体系板 <small>v0.1 · 85 类名逐条演练 · 样式源 website/assets/css/main.css</small></div>
   <div class="seg-btn" id="ground">
     <button data-g="paper" class="on">纸白 paper</button>
     <button data-g="night">夜场 night</button>
@@ -51,7 +51,7 @@
 
 <div class="sec" style="margin-top:26px">
   <div class="sec-h"><h2>这是什么</h2><span class="en">Scope</span><span class="no">S0</span></div>
-  <p class="sec-d">本板是 <code>website/assets/css/main.css</code> 的替换件 <code>ledger.css</code> 的验收台：<strong>类名与现站点 1:1</strong>，所以 <code>build.py</code>、<code>templates/base.html</code> 与 13 个 <code>content/*.md</code> 一行都不用改。每节都用站点真实原文与真实类名渲染，不用占位文案。夜场底 14 个 token 逐字沿用 <code>media-kit/v0.1/brand.css</code>，即站点今天的颜色 —— 切到夜场就约等于今天的站，切回纸白是新默认。</p>
+  <p class="sec-d">本板是 <code>website/assets/css/main.css</code> 的验收台：<strong>类名与现站点 1:1</strong>，所以 <code>build.py</code>、<code>templates/base.html</code> 与 13 个 <code>content/*.md</code> 一行都不用改。每节都用站点真实原文与真实类名渲染，不用占位文案。夜场底 14 个 token 逐字沿用 <code>media-kit/v0.1/brand.css</code>，即站点今天的颜色 —— 切到夜场就约等于今天的站，切回纸白是新默认。</p>
 </div>
 
 <div class="sec">
@@ -281,7 +281,7 @@ claimable(hand) ⇔ verify(proof_hand) = true ∧ BFT_ordered(hand)</code>
           <p style="color:var(--muted);font-size:12.5px;margin:0">面向扑克场景的专用 Appchain。当前网络 devnet，不涉及真实资金。</p>
         </div>
         <div class="footer-links"><h2 class="footer-h">站点</h2><a href="#">产品</a><a href="#">技术</a><a href="#">证明</a><a href="#">浏览器</a><a href="#">状态</a><a href="#">文档</a><a href="#">路线图</a><a href="#">透明度</a><a href="#">社区</a><a href="#">法务</a></div>
-        <div class="footer-meta"><h2 class="footer-h">版本与仓库</h2>site v0.1 · docs v1.3.0-alpha (ABI v1.3)<br>样式源 ledger.css · 令牌同源 media-kit/v0.1</div>
+        <div class="footer-meta"><h2 class="footer-h">版本与仓库</h2>site v0.1 · docs v1.3.0-alpha (ABI v1.3)<br>样式源 website/assets/css/main.css · 令牌同源 media-kit/v0.1</div>
       </div>
     </footer>
   </div>
@@ -296,7 +296,7 @@ claimable(hand) ⇔ verify(proof_hand) = true ∧ BFT_ordered(hand)</code>
       <div class="card"><p class="card-kicker">钱包 · 凭证</p><div class="kv" style="font-size:13px"><span class="k">结算状态</span><span class="v"><span class="st st-ok">proven</span></span></div><div class="kv"><span class="k">金额</span><span class="v">2,994 CH</span></div></div>
       <div class="card" style="border-left:3px solid var(--felt)"><p class="card-kicker">牌桌 · 本手凭证</p><div class="kv" style="font-size:13px"><span class="k">第 1042 手</span><span class="v"><span class="st st-ok">proven</span></span></div><div class="kv"><span class="k">派彩</span><span class="v">2,994 CH</span></div></div>
     </div>
-    <p class="sec-d" style="margin:14px 0 0">牌桌稿的 <code>.st</code> 等价物是 <code>.ch</code>、<code>.kv</code> 等价物是 <code>.lr</code>、<code>.banner</code> 等价物是 <code>.bn</code>、<code>.task</code> 等价物是 <code>.stp</code>、印章 <code>.seal</code> 三处通用。逐页铺开时建议把 <code>ledger.css</code> 提为唯一样式源，牌桌与钱包反向 import 它。</p>
+    <p class="sec-d" style="margin:14px 0 0">牌桌稿的 <code>.st</code> 等价物是 <code>.ch</code>、<code>.kv</code> 等价物是 <code>.lr</code>、<code>.banner</code> 等价物是 <code>.bn</code>、<code>.task</code> 等价物是 <code>.stp</code>、印章 <code>.seal</code> 三处通用。逐页铺开时已提为唯一样式源 <code>website/assets/css/main.css</code>，牌桌与钱包稿反向对齐它。</p>
   </div>
 </div>
 

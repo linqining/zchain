@@ -105,3 +105,7 @@ pub mod reconstruction_v3;
 // Phase 3.3: TexasPokerPrecompile impl（待 state_machine/dispatch 完成后补）
 // pub struct TexasPokerPrecompile { ... }
 // impl
+
+// 差分对拍向量生成（方案 C，与 poker_lean/Differential/Main.lean 配套）。
+#[cfg(test)]
+mod tests;
