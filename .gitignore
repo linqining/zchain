@@ -25,3 +25,5 @@ extension/dist/
 cairo-bridge-poc/logs/*
 .zcode/
 extension/tests/e2e*
+# 外部工具二进制/压缩包，体积过大不入库。
+tools_external/
