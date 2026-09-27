@@ -154,7 +154,8 @@ M6-ACC 覆盖：2/3/4/7/8 全覆盖，1/5/6 部分（浏览器吞吐/真机兼�
 发布工程为集成面），连接协议 WalletConnect/EIP-1193 适配器为 0.3。
 WALLET-ACC 覆盖对照见 `poker-wallet/README.md` 与 `extension/ACCEPTANCE.md`。
 
-**产品化（§6）**：`website/` 静态站（构建脚本 python3 标准库，41 页）——
+**产品化（§6）**：`website/` 静态站（构建脚本 python3 标准库，41 页；
+已于 2026-09 迁移至 poker_texas_air 仓库 `website/`）——
 官网 13 路由（含 §6.3 中英文案与首屏四入口）、文档站 13 板块 28 页
 （15 分钟 quickstart、协议提炼、安全公式"数学式+伪代码"）、media-kit v0.1
 21 文件（logo/品牌规范/one-pager/新闻稿/FAQ/whitepaper/litepaper/90s 脚本/
