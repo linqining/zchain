@@ -17,7 +17,7 @@ import { EVM_NETWORKS, resolveEvmNetwork, evmNetworkView } from '../../common/ev
 import { decodeCallOutput } from '../../common/evm/contracts.js';
 
 const RECIPIENT = '0x1111111111111111111111111111111111111111';
-const BRIDGE = '0xa3c06bc2ab43f57cd788f7213c5a83a45cd2743e';
+const BRIDGE = '0x6728873828dd281d274542eb3e6ba7438c0b96e6';
 const TOKEN = '0x2222222222222222222222222222222222222222';
 
 // ---------------------------------------------------------------------------

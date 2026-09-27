@@ -36,6 +36,7 @@ pub mod archive_index;
 pub mod bond;
 pub mod checkpoint;
 pub mod compliance;
+pub mod da;
 pub mod client_view;
 pub mod error;
 pub mod fee;

@@ -6,6 +6,15 @@ use thiserror::Error;
 /// poker-appchain 统一错误。
 #[derive(Debug, Error)]
 pub enum AppchainError {
+    /// DA 后端数据缺失/不可达。
+    #[error("da unavailable: {0}")]
+    DaUnavailable(String),
+    /// DA 数据腐化（摘要/长度不符，fail-closed）。
+    #[error("da corrupted: {0}")]
+    DaCorrupted(String),
+    /// DA 空 payload 拒绝发布。
+    #[error("da empty payload")]
+    DaEmpty,
     /// note 金额溢出或非法（0 面额）。
     #[error("invalid note amount: {0}")]
     InvalidAmount(u64),

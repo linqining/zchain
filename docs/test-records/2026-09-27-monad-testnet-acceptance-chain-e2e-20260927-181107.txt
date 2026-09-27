@@ -1,0 +1,6 @@
+[PASS] chain_id: expected 10143
+operator key: 0xbcd7ecd68d55ca2536f3f50dcbcb44edb0d97aa6 balance 67600000000000000 wei（0.067 MON）
+[FAIL] funded_key: 需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei
+hint: 先经官方水龙头 https://faucet.monad.xyz（人工验证）为 0xbcd7ecd68d55ca2536f3f50dcbcb44edb0d97aa6 领取测试 MON（建议 ≥1 MON）后重跑
+e2e_summary_json {"checks":[{"detail":"expected 10143","item":"chain_id","ok":true},{"detail":"需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei","item":"funded_key","ok":false}],"e2e":"monad-testnet-settlement","failed":1,"passed":1}
+[e2e] 1/2 PASS

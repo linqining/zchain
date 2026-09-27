@@ -234,6 +234,17 @@ fn run(args: BTreeMap<String, String>) -> i32 {
         format!("0.1 MON 锁入 Bridge，DepositInitiated 已捕获 → {}（{}）", deposits_file.display(), deposit_ok.1),
     );
 
+    // ---- 4.5 强制包含 E2E（escape channel：forceOp → finalized 窗口捕获）----
+    let force_ok = forced_inclusion_e2e(
+        &rpc, &key, chain_id, bridge, b"zchain-e2e.force-op", poll_ms,
+    );
+    record(
+        &mut checks,
+        "forced_inclusion",
+        force_ok.0,
+        format!("forceOp 提交 → finalized 窗口捕获（{}）", force_ok.1),
+    );
+
     // ---- 5. 提现 claim E2E（Rust builder 树根 → 链上 claim → 余额对账）----
     let withdraw_ok = withdraw_e2e(
         &rpc, &key, chain_id, outbox, bridge, WITHDRAW_AMOUNT, b"zchain-e2e.withdraw.1", 1, poll_ms,
@@ -310,6 +321,56 @@ fn deposit_e2e(
         }
         None => (false, "finalized 窗口内未捕获事件".into()),
     }
+}
+
+/// 强制包含 E2E：forceOp(载荷) → finalized 窗口 → poll_forced_ops 捕获
+/// （seq 单调 + payload 逐字节一致；L2 侧消费为 sequencer 运营步骤）。
+fn forced_inclusion_e2e(
+    rpc: &L1Rpc,
+    key: &Credentials,
+    chain_id: u64,
+    bridge: [u8; 20],
+    seed: &[u8],
+    poll_ms: u64,
+) -> (bool, String) {
+    let payload = monad_settlement::keccak::keccak256(seed).to_vec();
+    let tx_hash = match send_tx(rpc, key, chain_id, Some(bridge), 0, {
+        let mut out = vec![0u8; 4];
+        out.extend_from_slice(&monad_settlement::abi::word_u64(0x20));
+        out.extend_from_slice(&monad_settlement::abi::word_u64(payload.len() as u64));
+        out.extend_from_slice(&payload);
+        while out.len() % 32 != 0 {
+            out.push(0);
+        }
+        out[0..4].copy_from_slice(&monad_settlement::keccak::keccak256(b"forceOp(bytes)")[0..4]);
+        out
+    }, 200_000) {
+        Ok(h) => h,
+        Err(e) => return (false, format!("forceOp 发送失败: {e}")),
+    };
+    let receipt = match rpc.wait_receipt(&tx_hash, poll_ms.max(1_000), 40) {
+        Ok(r) if r.success => r,
+        Ok(r) => return (false, format!("forceOp 回执失败（block {}）", r.block_number)),
+        Err(e) => return (false, format!("forceOp 未打包: {e}")),
+    };
+    // finalized 窗口捕获（从回执高度起扫）。
+    let mut watcher = monad_settlement::DepositWatcher::new(
+        L1Rpc::new(rpc.url()).unwrap_or_else(|_| unreachable!("same url")),
+        bridge,
+        receipt.block_number,
+    );
+    for _ in 0..40 {
+        match watcher.poll_forced_ops() {
+            Ok(events) => {
+                if let Some(ev) = events.into_iter().find(|ev| ev.payload == payload) {
+                    return (true, format!("seq={} payload 逐字节一致", ev.seq));
+                }
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(Duration::from_millis(poll_ms.max(1_000)));
+    }
+    (false, "finalized 窗口内未捕获 ForcedOp".into())
 }
 
 /// 提现 E2E：单叶窗（root = leaf_hash，证明为空数组）→ commitRoot → claim

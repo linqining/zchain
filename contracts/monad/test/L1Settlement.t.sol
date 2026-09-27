@@ -117,6 +117,29 @@ contract L1SettlementTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // 强制包含（escape channel 原语）
+    // ------------------------------------------------------------------
+
+    function test_ForceOp_EmitsMonotonicSeq() public {
+        vm.expectEmit(true, true, true, true, address(bridge));
+        emit L1Bridge.ForcedOp(0, user, hex"0102");
+        vm.prank(user);
+        bridge.forceOp(hex"0102");
+        vm.prank(user);
+        bridge.forceOp(hex"03");
+        assertEq(bridge.forcedOpSeq(), 2);
+    }
+
+    function test_ForceOp_RejectsEmptyAndOversize() public {
+        vm.prank(user);
+        vm.expectRevert(L1Bridge.BadAmount.selector);
+        bridge.forceOp(new bytes(0));
+        vm.prank(user);
+        vm.expectRevert(L1Bridge.BadAmount.selector);
+        bridge.forceOp(new bytes(4097));
+    }
+
+    // ------------------------------------------------------------------
     // Outbox：claim 前置条件（台账判定；证明字节面由 Rust 对拍覆盖）
     // ------------------------------------------------------------------
 

@@ -345,3 +345,75 @@ mod tests {
         w
     }
 }
+
+// ---------------------------------------------------------------------------
+// 强制包含（L1Bridge.forceOp escape channel）
+// ---------------------------------------------------------------------------
+
+/// `L1Bridge.forceOp(bytes)`。
+#[must_use]
+pub fn encode_force_op(payload: &[u8]) -> Vec<u8> {
+    let sig = "forceOp(bytes)";
+    let mut out = Vec::with_capacity(4 + 32 + (payload.len() + 31) / 32 * 32);
+    out.extend_from_slice(&selector(sig));
+    // 动态 bytes：offset(32) + len(32) + data(padded)
+    out.extend_from_slice(&word_u64(0x20));
+    out.extend_from_slice(&word_u64(payload.len() as u64));
+    out.extend_from_slice(payload);
+    while out.len() % 32 != 0 {
+        out.push(0);
+    }
+    out
+}
+
+/// `ForcedOp(uint256,address,bytes)` 的 topic0。
+#[must_use]
+pub fn forced_op_topic0() -> [u8; 32] {
+    keccak256(b"ForcedOp(uint256,address,bytes)")
+}
+
+/// 解析后的强制包含记录（abi 形态；adapter 层转 32B 投影）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForcedOpEvent {
+    /// 宿主侧单调序号。
+    pub seq: u64,
+    /// 提交者地址。
+    pub submitter: [u8; 20],
+    /// L2 操作字节。
+    pub payload: Vec<u8>,
+}
+
+/// 从 log（topics + data）解析 [`ForcedOpEvent`]。
+///
+/// # Errors
+/// topics/data 形状不符 → [`SettlementError::Shape`]。
+pub fn parse_forced_op_log(topics: &[[u8; 32]], data: &[u8]) -> Result<ForcedOpEvent, SettlementError> {
+    if topics.len() != 3 {
+        return Err(SettlementError::shape(
+            "forced_op_log",
+            format!("expected 3 topics (sig+2 indexed), got {}", topics.len()),
+        ));
+    }
+    if topics[0] != forced_op_topic0() {
+        return Err(SettlementError::shape("forced_op_log", "topic0 mismatch"));
+    }
+    // data = [offset_word][len_word][payload(padded)]（单动态参数 ABI 布局；
+    // offset 指向 len 字所在位置，content 在 offset+32）。
+    if data.len() < 64 {
+        return Err(SettlementError::shape("forced_op_log", "data too short"));
+    }
+    let offset = word_to_u128(&data[0..32].try_into().expect("32 of data")) as usize;
+    if offset + 32 > data.len() {
+        return Err(SettlementError::shape("forced_op_log", "len word out of bounds"));
+    }
+    let len = word_to_u128(&data[offset..offset + 32].try_into().expect("32 of data")) as usize;
+    let content_at = offset + 32;
+    if data.len() < content_at + len {
+        return Err(SettlementError::shape("forced_op_log", "payload out of bounds"));
+    }
+    Ok(ForcedOpEvent {
+        seq: word_to_u128(&topics[1]) as u64,
+        submitter: topics[2][12..].try_into().expect("20 of 32"),
+        payload: data[content_at..content_at + len].to_vec(),
+    })
+}

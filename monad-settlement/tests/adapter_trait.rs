@@ -110,6 +110,58 @@ fn monad_adapter_deposits_map_to_records() {
 }
 
 #[test]
+fn monad_adapter_forced_ops_escape_channel() {
+    let state = Arc::new(Mutex::new(MockState::new(10143)));
+    let mock = MockL1::spawn(Arc::clone(&state));
+    let mut adapter: Box<dyn SettlementAdapter> = Box::new(adapter_on(&mock));
+    adapter.connect().expect("connects");
+
+    // 注入两条 ForcedOp（seq 0/1，用户提交的 L2 op 字节）。
+    {
+        let mut st = state.lock().expect("lock");
+        st.finalized = 110;
+        let topic = |b: [u8; 32]| format!("0x{}", hex::encode(b));
+        let addr_word = |low: [u8; 20]| {
+            let mut w = [0u8; 32];
+            w[12..].copy_from_slice(&low);
+            w
+        };
+        for (seq, payload) in [(0u64, vec![0x01u8, 0x02]), (1u64, vec![0x03])] {
+            // data = [offset=0x20][len][payload padded]（单动态参数 ABI 布局）
+            let mut data = vec![0u8; 32];
+            data[31] = 0x20; // offset = 32（指向 len 字）
+            data.extend_from_slice(&monad_settlement::abi::word_u64(payload.len() as u64));
+            data.extend_from_slice(&payload);
+            while data.len() % 32 != 0 {
+                data.push(0);
+            }
+            st.logs.push((
+                106,
+                serde_json::json!({
+                    "address": format!("0x{}", hex::encode([0x77u8; 20])),
+                    "topics": [
+                        topic(monad_settlement::abi::forced_op_topic0()),
+                        topic(monad_settlement::abi::word_u64(seq)),
+                        topic(addr_word([0x33; 20])),
+                    ],
+                    "data": format!("0x{}", hex::encode(data)),
+                    "blockNumber": "0x6a",
+                }),
+            ));
+        }
+    }
+
+    let ops = adapter.poll_forced_ops().expect("drains");
+    assert_eq!(ops.len(), 2);
+    assert_eq!(ops[0].seq, 0);
+    assert_eq!(ops[0].payload, vec![1, 2]);
+    assert_eq!(&ops[0].submitter[12..], &[0x33; 20]);
+    assert_eq!(ops[1].seq, 1);
+    // 幂等。
+    assert!(adapter.poll_forced_ops().expect("re-poll").is_empty());
+}
+
+#[test]
 fn monad_adapter_claim_gates_and_payload_shape() {
     let state = Arc::new(Mutex::new(MockState::new(10143)));
     let mock = MockL1::spawn(Arc::clone(&state));

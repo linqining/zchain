@@ -22,6 +22,9 @@ contract L1Bridge is AuthorityOwnable {
     /// 入金 nonce（单调递增；L2 侧 DepositV2.deposit_id 幂等键的原料之一）。
     uint256 public depositNonce;
 
+    /// 强制包含序号（单调递增；L2 侧必须按 seq 升序消费，防审查逃生通道）。
+    uint256 public forcedOpSeq;
+
     /// L1Outbox 地址（唯一支付通道；一次性设置）。
     address public outbox;
 
@@ -35,6 +38,16 @@ contract L1Bridge is AuthorityOwnable {
         address indexed token,
         address indexed to,
         uint256 amount
+    );
+
+    /// 强制包含操作：用户绕过 L2 运营方审查的逃生通道（Phase 1 原语）。
+    /// L2 侧必须按 seq 升序消费；未消费由 watcher 审计暴露（validity 结算
+    /// 落地后由证明自动强制）。payload 语义 = poker-appchain borsh Operation，
+    /// 合约不解释（fail-closed 的解释权在 L2 引擎 + 证明）。
+    event ForcedOp(
+        uint256 indexed seq,
+        address indexed submitter,
+        bytes payload
     );
     event OutboxSet(address indexed outbox);
 
@@ -85,6 +98,17 @@ contract L1Bridge is AuthorityOwnable {
         uint256 nonce = depositNonce;
         depositNonce = nonce + 1;
         emit DepositInitiated(nonce, token, to, amount);
+    }
+
+    /// 强制包含：把一个 L2 操作（borsh Operation 字节）直接钉在宿主链上。
+    /// 任何地址可为任意 L2 账户提交（代办）；L2 引擎消费时按其自身语义校验。
+    /// gas 由提交者承担；不锁资金（资金动作仍走 deposit/withdraw 路径）。
+    function forceOp(bytes calldata payload) external whenNotPaused {
+        if (payload.length == 0) revert BadAmount();
+        if (payload.length > 4096) revert BadAmount(); // 单 op 上限（对齐 L2 object 限制面）
+        uint256 seq = forcedOpSeq;
+        forcedOpSeq = seq + 1;
+        emit ForcedOp(seq, msg.sender, payload);
     }
 
     // ------------------------------------------------------------------

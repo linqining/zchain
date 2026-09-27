@@ -114,14 +114,17 @@ capability 渲染。
 | 入金事件面 | ✅ EVM log（DepositWatcher） | ❌ 程序日志/CPI event 解析（无 EVM log） |
 | 最终性 | ✅ `finalized` 标签 | ❌ `finalized` commitment（~13s，同构） |
 | 证明验证 | ⏳ attestation 先行；validity = poker_texas_air AIR 覆盖 + 递归 → SP1 包装上 EVM 验证器 | ❌ **`stwo-solana-probe`**（SBF 跑 Stwo 验证器的 CU/内存实测；先探针后实现） |
-| DA | ⏳ 自托管（现状）+ 宿主 calldata 备选 | 同左 |
-| 强制包含 | ⏳ 宿主侧 escape 通道（经桥进 Inbox 的 force tx）待建 | 同左 |
+| DA | ✅ `DaBackend` trait + SelfHostDa（宿主 calldata/Celestia 为后续实现） | 同左 |
+| 强制包含 | ✅ `L1Bridge.forceOp`（seq 单调 + watcher 消费，链上 8/8） | ❌ 待随 Solana 适配器实现 |
 
 ## 6. 里程碑（zkVM 移除后修订版）
 
-- **Phase 1（进行中）**：SettlementAdapter 形式化 ✅（本轮）；钱包加链即用 ✅（本轮）；
-  剩余：宿主侧强制包含通道、`DaBackend` trait、daemon 按 `dyn SettlementAdapter`
-  装配（monad_settlementd 收敛到 adapter 调用面）。
+- **Phase 1（✅ 全部完成，2026-09-27）**：SettlementAdapter 形式化 ✅；
+  钱包加链即用 ✅（settlement.js + networks.js 契约 + 7 项测试）；
+  宿主侧强制包含通道 ✅（`L1Bridge.forceOp` escape channel + `ForcedOp` 事件 +
+  daemon/adapter 消费面，链上 E2E 8/8 验证）；`DaBackend` trait ✅
+  （poker-appchain `da.rs`：SelfHostDa 内容寻址落盘 + 篡改检测）；daemon ✅
+  已收敛到 `dyn SettlementAdapter` 装配（加新链 = 换适配器，daemon 零改动）。
 - **Phase 2（validity 结算）**：poker_texas_air AIR 从"21 method PoC + 输入一致性
   约束"扩展到**全业务语义覆盖**；递归聚合到常量尺寸（Layer 2/3 落地）；
   Monad 侧 SP1 包装验证器上 EVM。唯一硬性里程碑。

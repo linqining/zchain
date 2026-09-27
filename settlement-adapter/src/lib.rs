@@ -137,6 +137,19 @@ pub struct DepositRecord {
     pub host_block: u64,
 }
 
+/// 强制包含记录（宿主链 escape channel；L2 引擎必须按 seq 升序消费）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForcedOpRecord {
+    /// 宿主侧单调序号（审查审计的排序基准）。
+    pub seq: u64,
+    /// 提交者（32B 投影；可为代办方，操作语义里的账户以 payload 为准）。
+    pub submitter: [u8; 32],
+    /// L2 操作字节（poker-appchain borsh Operation；适配器不解释）。
+    pub payload: Vec<u8>,
+    /// 宿主高度。
+    pub host_block: u64,
+}
+
 /// 适配器错误（链无关；各实现把链上错误映射到通用类别）。
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
@@ -218,6 +231,17 @@ pub trait SettlementAdapter: Send {
     /// # Errors
     /// 该链未配置 claim 面（如 PLAY 类资产不可跨链兑付）。
     fn claim_payload(&self, request: &ClaimRequest) -> Result<Vec<u8>, AdapterError>;
+
+    /// 拉取已终结的强制包含操作（escape channel；一轮，seq 升序）。
+    ///
+    /// 默认实现 = 空流（该链未实现 escape 面时安全缺省；引擎侧审计按
+    /// `host()` 报告"该链无强制包含面"而非静默丢失）。
+    ///
+    /// # Errors
+    /// 传输失败 / 事件解析失败（fail-closed）。
+    fn poll_forced_ops(&mut self) -> Result<Vec<ForcedOpRecord>, AdapterError> {
+        Ok(Vec::new())
+    }
 }
 
 /// 提现领取请求（链无关字段；与 poker-appchain `WithdrawalLeaf` 一一对应）。
@@ -351,6 +375,19 @@ mod tests {
             }
             Ok(request.request_id.to_vec())
         }
+
+        fn poll_forced_ops(&mut self) -> Result<Vec<ForcedOpRecord>, AdapterError> {
+            if self.deposits_drained {
+                return Ok(Vec::new());
+            }
+            self.deposits_drained = true;
+            Ok(vec![ForcedOpRecord {
+                seq: 0,
+                submitter: [7u8; 32],
+                payload: vec![0x01, 0x02],
+                host_block: 43,
+            }])
+        }
     }
 
     #[test]
@@ -412,6 +449,59 @@ mod tests {
         a.restore(&serde_json::json!({"states": 3}));
         assert_eq!(a.pending_finality(), 0); // 全 Finalized
         assert_eq!(a.states.len(), 3);
+    }
+
+    /// 不实现 escape 面的适配器：default poll_forced_ops 返回空流。
+    struct NoEscapeAdapter(FakeAdapter);
+
+    impl SettlementAdapter for NoEscapeAdapter {
+        fn chain_id(&self) -> u64 {
+            self.0.chain_id()
+        }
+        fn host(&self) -> &'static str {
+            "fake-no-escape"
+        }
+        fn connect(&mut self) -> Result<(), AdapterError> {
+            self.0.connect()
+        }
+        fn submit_anchor(&mut self, t: &AnchorTask) -> Result<Option<TxId>, AdapterError> {
+            self.0.submit_anchor(t)
+        }
+        fn poll(&mut self) -> Result<(), AdapterError> {
+            self.0.poll()
+        }
+        fn pending_finality(&self) -> usize {
+            self.0.pending_finality()
+        }
+        fn snapshot(&self) -> serde_json::Value {
+            self.0.snapshot()
+        }
+        fn restore(&mut self, s: &serde_json::Value) {
+            self.0.restore(s)
+        }
+        fn poll_deposits(&mut self) -> Result<Vec<DepositRecord>, AdapterError> {
+            self.0.poll_deposits()
+        }
+        fn claim_payload(&self, r: &ClaimRequest) -> Result<Vec<u8>, AdapterError> {
+            self.0.claim_payload(r)
+        }
+        // poll_forced_ops：不 override → default 空流。
+    }
+
+    #[test]
+    fn forced_ops_default_noop_and_override_paths() {
+        // default：无 escape 面 → 空流（引擎按 host() 报告缺省，不静默丢失语义由引擎管）。
+        let mut plain = NoEscapeAdapter(FakeAdapter::new());
+        assert!(plain.poll_forced_ops().expect("default").is_empty());
+
+        // override：按序产出并幂等。
+        let mut a = FakeAdapter::new();
+        a.connect().expect("connects");
+        let ops = a.poll_forced_ops().expect("first");
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0].seq, 0);
+        assert_eq!(ops[0].payload, vec![1, 2]);
+        assert!(a.poll_forced_ops().expect("second").is_empty());
     }
 
     #[test]

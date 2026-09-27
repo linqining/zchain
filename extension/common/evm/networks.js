@@ -71,9 +71,10 @@ export const EVM_NETWORKS = [
     explorerApiUrl: null,
     faucet: false,
     settlement: true,
-    // 结算合约（contracts/monad 测试网部署实例；见 monad-l2-settlement.md §6.3）。
-    bridgeAddress: '0xa3c06bc2ab43f57cd788f7213c5a83a45cd2743e',
-    inboxAddress: '0x3e4bfea829760e0f52c45f944c93053a6f695c0e',
+    // 结算合约（contracts/monad 测试网部署实例 v2：含 forceOp escape channel；
+    // 见 monad-l2-settlement.md §6.3 与 plan-multi-settlement-architecture.md）。
+    bridgeAddress: '0x6728873828dd281d274542eb3e6ba7438c0b96e6',
+    inboxAddress: '0x60ecddd1359356a43a69de84a1cf235a69a30e71',
   },
   {
     id: 'base',

@@ -33,9 +33,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use monad_settlement::{
-    aggregate_task, anchor_task, checkpoint_task, AnchorState, AnchorSubmitter, Credentials,
-    DepositWatcher, L1Rpc, SettlementError, MONAD_TESTNET_CHAIN_ID,
+    aggregate_task, anchor_task, checkpoint_task, Credentials, L1Rpc, MonadAdapter,
+    SettlementError, MONAD_TESTNET_CHAIN_ID,
 };
+use settlement_adapter::{AnchorKind, AnchorTask as AdapterAnchorTask, SettlementAdapter};
 
 fn main() {
     let args = parse_args(collect_flag_map(std::env::args().skip(1).collect()));
@@ -78,6 +79,7 @@ struct Args {
     checkpoint_file: Option<PathBuf>,
     state_file: Option<PathBuf>,
     deposits_file: Option<PathBuf>,
+    forced_ops_file: Option<PathBuf>,
     ingest_url: Option<String>,
     poll_interval_ms: u64,
     bridge_start_block: u64,
@@ -139,6 +141,7 @@ fn parse_args(args: BTreeMap<String, String>) -> Args {
         checkpoint_file: get("checkpoint-file").map(PathBuf::from),
         state_file: get("state-file").map(PathBuf::from),
         deposits_file: get("deposits-file").map(PathBuf::from),
+        forced_ops_file: get("forced-ops-file").map(PathBuf::from),
         ingest_url: get("ingest-url"),
         poll_interval_ms: parse_u64("poll-interval-ms", 4_000),
         bridge_start_block: parse_u64("bridge-start-block", 0),
@@ -369,50 +372,42 @@ fn run(args: Args) -> Result<(), SettlementError> {
     if want_bridge && args.bridge.is_none() {
         die("bridge mode requires --bridge");
     }
-
-    // chainId 闸门：启动即校验，防错链全流程（143 / 10143 之外一律拒绝）。
-    let actual = L1Rpc::new(args.l1_rpc.clone())?.chain_id()?;
-    if actual != args.expected_chain_id {
-        return Err(SettlementError::ChainIdMismatch {
-            expected: args.expected_chain_id,
-            actual,
-        });
+    // bridge-only 模式不签名：允许省 key（占位凭据，只读轮询用）。
+    if !want_anchor && args.key.is_none() {
+        die("bridge mode read-only: set --key-env to enable any signing (or omit key for pure watch)");
     }
-    log(&format!("chain id verified: {actual}"));
+
+    // 链无关装配：daemon 只面向 dyn SettlementAdapter（加新链 = 换适配器实现）。
+    // 链身份闸门在 MonadAdapter::new 构造期即校验（错链拿不到适配器）。
+    let mut adapter: Box<dyn SettlementAdapter> = Box::new(MonadAdapter::new(
+        args.l1_rpc.clone(),
+        args.key.clone().ok_or_else(|| {
+            SettlementError::InvalidArgument("adapter mode requires --key-env/--key-file".into())
+        })?,
+        args.inbox.unwrap_or([0u8; 20]),
+        args.bridge.unwrap_or([0u8; 20]),
+        args.expected_chain_id,
+    )?);
+    if let Some(v) = read_state_file(&args.state_file) {
+        adapter.restore(&v);
+        log("adapter state restored (anchors + watermarks)");
+    } else if args.bridge_start_block > 0 {
+        // 首跑指定入金扫描起点：写一次状态文件固化。
+        adapter.restore(&serde_json::json!({
+            "kind": "monad",
+            "deposit_next_block": args.bridge_start_block,
+        }));
+    }
+    log(&format!(
+        "adapter connected: host={} chain_id={}",
+        adapter.host(),
+        adapter.chain_id()
+    ));
 
     let http = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| SettlementError::transport("http", e.to_string()))?;
-
-    let mut submitter = if want_anchor {
-        let mut s = AnchorSubmitter::connect(
-            L1Rpc::new(args.l1_rpc.clone())?,
-            args.key.clone().expect("checked"),
-            args.inbox.expect("checked"),
-            args.expected_chain_id,
-        )?;
-        if let Some(v) = read_state_file(&args.state_file) {
-            s.restore(restore_states(&v));
-            log("anchor state restored");
-        }
-        Some(s)
-    } else {
-        None
-    };
-
-    let deposit_start = read_state_file(&args.state_file)
-        .and_then(|v| v.get("deposit_next_block").and_then(Value::as_u64))
-        .unwrap_or(args.bridge_start_block);
-    let mut watcher = if want_bridge {
-        Some(DepositWatcher::new(
-            L1Rpc::new(args.l1_rpc.clone())?,
-            args.bridge.expect("checked"),
-            deposit_start,
-        ))
-    } else {
-        None
-    };
 
     log(&format!(
         "daemon started mode={} gateway={} poll={}ms",
@@ -420,35 +415,40 @@ fn run(args: Args) -> Result<(), SettlementError> {
     ));
     let interval = Duration::from_millis(args.poll_interval_ms);
     loop {
-        if let Some(submitter) = submitter.as_mut() {
-            anchor_round(submitter, &http, &args);
+        if want_anchor {
+            anchor_round(adapter.as_mut(), &http, &args);
         }
-        if let Some(w) = watcher.as_mut() {
-            bridge_round(w, &http, &args);
+        if want_bridge {
+            bridge_round(adapter.as_mut(), &http, &args);
         }
-        if args.state_file.is_some() {
-            let deposit_next = watcher.as_ref().map_or(0, DepositWatcher::next_block);
-            if let Some(submitter) = submitter.as_ref() {
-                save_state(submitter, deposit_next, args.state_file.as_deref());
-            }
+        if let Some(path) = args.state_file.as_deref() {
+            save_state(adapter.as_ref(), Some(path));
         }
         std::thread::sleep(interval);
     }
 }
 
 /// anchor 一轮：三类锚定源 → 组任务 → 提交 → poll（回执 + finality）。
-fn anchor_round(submitter: &mut AnchorSubmitter, http: &reqwest::blocking::Client, args: &Args) {
+/// monad AnchorTask → 链无关 AnchorTask（payload = calldata，不透明字节）。
+fn to_adapter_task(kind: AnchorKind, t: monad_settlement::AnchorTask) -> AdapterAnchorTask {
+    AdapterAnchorTask::new(t.key, kind, t.calldata)
+}
+
+fn anchor_round(adapter: &mut dyn SettlementAdapter, http: &reqwest::blocking::Client, args: &Args) {
     // 1. 批次根（gateway proven log，按追加序；inbox index = 已提交计数）。
     if let Ok(body) = http_get(http, &format!("{}/api/v1/batch_roots", args.gateway)) {
         if let Some(items) = body.get("batch_roots").and_then(Value::as_array) {
-            let mut index = submitter.snapshot().keys().filter(|k| k.starts_with("batch:")).count()
-                as u64;
+            let mut index = adapter
+                .snapshot()
+                .get("anchors")
+                .and_then(Value::as_object)
+                .map_or(0u64, |m| m.keys().filter(|k| k.starts_with("batch:")).count() as u64);
             for item in items {
                 let Some(root) = item.get("batch_root").and_then(Value::as_str) else { continue };
                 let through_op = item.get("op_index").and_then(Value::as_u64).unwrap_or(0);
                 let Ok(root32) = parse_32(root) else { continue };
-                let task = anchor_task(index, root32, through_op);
-                match submitter.submit(&task) {
+                let task = to_adapter_task(AnchorKind::Batch, anchor_task(index, root32, through_op));
+                match adapter.submit_anchor(&task) {
                     Ok(Some(tx)) => {
                         log(&format!("batch #{index} submitted tx=0x{}", hex::encode(tx)))
                     }
@@ -468,8 +468,11 @@ fn anchor_round(submitter: &mut AnchorSubmitter, http: &reqwest::blocking::Clien
                 let through_op = item.get("through_op").and_then(Value::as_u64).unwrap_or(0);
                 let batch_count = item.get("batch_count").and_then(Value::as_u64).unwrap_or(0);
                 let Ok(root32) = parse_32(root) else { continue };
-                let task = aggregate_task(remote_index, root32, through_op, batch_count);
-                match submitter.submit(&task) {
+                let task = to_adapter_task(
+                    AnchorKind::Aggregate,
+                    aggregate_task(remote_index, root32, through_op, batch_count),
+                );
+                match adapter.submit_anchor(&task) {
                     Ok(Some(tx)) => {
                         log(&format!("aggregate #{remote_index} submitted tx=0x{}", hex::encode(tx)))
                     }
@@ -484,17 +487,17 @@ fn anchor_round(submitter: &mut AnchorSubmitter, http: &reqwest::blocking::Clien
     //    "文件更新即重解析，锚定只取最后一次"为纪律，见 runbook）。
     if let Some(path) = &args.checkpoint_file {
         if let Some(task) = checkpoint_task_from_file(path) {
-            match submitter.submit(&task) {
+            match adapter.submit_anchor(&to_adapter_task(AnchorKind::Checkpoint, task)) {
                 Ok(Some(tx)) => log(&format!("checkpoint submitted tx=0x{}", hex::encode(tx))),
                 Ok(None) => {}
                 Err(e) => log(&format!("checkpoint submit failed: {e}")),
             }
         }
     }
-    if let Err(e) = submitter.poll() {
+    if let Err(e) = adapter.poll() {
         log(&format!("poll failed: {e}"));
     }
-    let pending = submitter.pending_finality();
+    let pending = adapter.pending_finality();
     if pending > 0 {
         log(&format!("{pending} anchors awaiting finality"));
     }
@@ -517,45 +520,68 @@ fn checkpoint_task_from_file(path: &Path) -> Option<monad_settlement::AnchorTask
     Some(checkpoint_task(head_index, state_root, withdrawal_root))
 }
 
-/// bridge 一轮：拉入金 → JSONL 落盘 + 可选 ingest POST。
-fn bridge_round(watcher: &mut DepositWatcher, http: &reqwest::blocking::Client, args: &Args) {
-    match watcher.poll_once() {
-        Ok(events) => {
-            for ev in events {
+/// bridge 一轮：入金 + 强制包含（escape channel）→ JSONL 落盘 + ingest POST。
+fn bridge_round(adapter: &mut dyn SettlementAdapter, http: &reqwest::blocking::Client, args: &Args) {
+    // 1. 入金（已终结窗口；32B 投影——加新链不改本函数）。
+    match adapter.poll_deposits() {
+        Ok(records) => {
+            for d in records {
                 let line = json!({
-                    "nonce": ev.nonce,
-                    "token": format!("0x{}", hex::encode(ev.token)),
-                    "to": format!("0x{}", hex::encode(ev.to)),
-                    "amount": ev.amount.to_string(),
+                    "nonce": d.nonce,
+                    "token": format!("0x{}", hex::encode(d.token)),
+                    "to": format!("0x{}", hex::encode(d.recipient)),
+                    "amount": d.amount.to_string(),
+                    "host_block": d.host_block,
                 })
                 .to_string();
                 log(&format!(
                     "deposit #{} token=0x{} to=0x{} amount={}",
-                    ev.nonce,
-                    hex::encode(ev.token),
-                    hex::encode(ev.to),
-                    ev.amount
+                    d.nonce,
+                    hex::encode(d.token),
+                    hex::encode(d.recipient),
+                    d.amount
                 ));
-                if let Some(path) = &args.deposits_file {
-                    if let Ok(mut f) =
-                        std::fs::OpenOptions::new().create(true).append(true).open(path)
-                    {
-                        let _ = writeln!(f, "{line}");
-                    }
-                }
-                if let Some(url) = &args.ingest_url {
-                    if let Err(e) = http
-                        .post(url)
-                        .header("content-type", "application/json")
-                        .body(line)
-                        .send()
-                    {
-                        log(&format!("ingest post failed: {e}"));
-                    }
-                }
+                emit_record(&line, args.deposits_file.as_deref(), args.ingest_url.as_deref(), http);
             }
         }
         Err(e) => log(&format!("deposit poll failed: {e}")),
+    }
+    // 2. 强制包含（escape channel；seq 升序，L2 侧必须消费）。
+    match adapter.poll_forced_ops() {
+        Ok(ops) if !ops.is_empty() => {
+            log(&format!("{} forced ops to consume (L2 must include)", ops.len()));
+            for op in ops {
+                let line = json!({
+                    "seq": op.seq,
+                    "submitter": format!("0x{}", hex::encode(op.submitter)),
+                    "payload": format!("0x{}", hex::encode(op.payload)),
+                    "host_block": op.host_block,
+                })
+                .to_string();
+                emit_record(&line, args.forced_ops_file.as_deref(), args.ingest_url.as_deref(), http);
+            }
+        }
+        Ok(_) => {}
+        Err(e) => log(&format!("forced-op poll failed: {e}")),
+    }
+}
+
+/// JSONL 落盘 + 可选 ingest POST（deposits / forced-ops 共用）。
+fn emit_record(line: &str, path: Option<&Path>, ingest_url: Option<&str>, http: &reqwest::blocking::Client) {
+    if let Some(path) = path {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+    if let Some(url) = ingest_url {
+        if let Err(e) = http
+            .post(url)
+            .header("content-type", "application/json")
+            .body(line.to_string())
+            .send()
+        {
+            log(&format!("ingest post failed: {e}"));
+        }
     }
 }
 
@@ -588,46 +614,12 @@ fn read_state_file(path: &Option<PathBuf>) -> Option<Value> {
     }
 }
 
-fn restore_states(v: &Value) -> BTreeMap<String, AnchorState> {
-    let mut out = BTreeMap::new();
-    if let Some(map) = v.get("anchors").and_then(Value::as_object) {
-        for (key, entry) in map {
-            let Ok(tx) = parse_32(entry.get("tx").and_then(Value::as_str).unwrap_or("")) else {
-                continue;
-            };
-            let block = entry.get("block").and_then(Value::as_u64);
-            let finalized = entry.get("finalized").and_then(Value::as_bool).unwrap_or(false);
-            let state = match (block, finalized) {
-                (None, _) => AnchorState::Submitted { tx_hash: tx },
-                (Some(b), false) => AnchorState::Included { tx_hash: tx, block: b },
-                (Some(b), true) => AnchorState::Finalized { tx_hash: tx, block: b },
-            };
-            out.insert(key.clone(), state);
-        }
-    }
-    out
-}
-
-fn save_state(submitter: &AnchorSubmitter, deposit_next_block: u64, path: Option<&Path>) {
+/// 状态持久化：适配器快照整体落盘（anchors + 各水位；原子写 tmp+rename）。
+fn save_state(adapter: &dyn SettlementAdapter, path: Option<&Path>) {
     let Some(path) = path else { return };
-    let mut anchors = serde_json::Map::new();
-    for (key, state) in submitter.snapshot() {
-        anchors.insert(
-            key,
-            json!({
-                "tx": format!("0x{}", hex::encode(state.tx_hash())),
-                "block": state.block(),
-                "finalized": state.is_finalized(),
-            }),
-        );
-    }
-    let body = json!({
-        "anchors": anchors,
-        "deposit_next_block": deposit_next_block,
-    });
-    // 原子写（tmp + rename），防撕裂。
+    let body = adapter.snapshot().to_string();
     let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, body.to_string()).is_ok() {
+    if std::fs::write(&tmp, body).is_ok() {
         let _ = std::fs::rename(&tmp, path);
     }
 }

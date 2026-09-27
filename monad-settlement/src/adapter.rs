@@ -5,7 +5,8 @@
 //! Solana 适配器（Anchor 程序）按本文件同形状实现即可，引擎零改动。
 
 use settlement_adapter::{
-    AdapterError, AnchorKind, AnchorTask, ClaimRequest, DepositRecord, SettlementAdapter, TxId,
+    AdapterError, AnchorKind, AnchorTask, ClaimRequest, DepositRecord, ForcedOpRecord,
+    SettlementAdapter, TxId,
 };
 
 use crate::abi::{encode_claim, ClaimLeaf};
@@ -119,7 +120,21 @@ impl SettlementAdapter for MonadAdapter {
                 )
             })
             .collect();
-        serde_json::json!({ "kind": "monad", "chain_id": self.chain_id, "anchors": anchors })
+        let deposit_next_block = self
+            .watcher
+            .as_ref()
+            .map_or(0, crate::watcher::DepositWatcher::next_block);
+        let forced_watermark = self
+            .watcher
+            .as_ref()
+            .and_then(crate::watcher::DepositWatcher::forced_watermark);
+        serde_json::json!({
+            "kind": "monad",
+            "chain_id": self.chain_id,
+            "anchors": anchors,
+            "deposit_next_block": deposit_next_block,
+            "forced_watermark": forced_watermark,
+        })
     }
 
     fn restore(&mut self, snapshot: &serde_json::Value) {
@@ -150,6 +165,18 @@ impl SettlementAdapter for MonadAdapter {
             }
         }
         self.submitter.restore(map);
+        // 水位恢复（监听窗口 + 强制包含 seq）。
+        if let (Some(w), Some(next)) = (
+            self.watcher.as_mut(),
+            snapshot.get("deposit_next_block").and_then(serde_json::Value::as_u64),
+        ) {
+            w.advance_to(next);
+        }
+        if let Some(w) = self.watcher.as_mut() {
+            w.restore_forced_watermark(
+                snapshot.get("forced_watermark").and_then(serde_json::Value::as_u64),
+            );
+        }
     }
 
     fn poll_deposits(&mut self) -> Result<Vec<DepositRecord>, AdapterError> {
@@ -173,6 +200,32 @@ impl SettlementAdapter for MonadAdapter {
                     recipient,
                     amount: ev.amount,
                     host_block: ev.host_block,
+                }
+            })
+            .collect())
+    }
+
+    fn poll_forced_ops(&mut self) -> Result<Vec<ForcedOpRecord>, AdapterError> {
+        let watcher = self
+            .watcher
+            .as_mut()
+            .ok_or_else(|| AdapterError::NotConfigured("forced-op watcher".into()))?;
+        let events = watcher
+            .poll_forced_ops()
+            .map_err(|e| AdapterError::Transport {
+                method: "poll_forced_ops".into(),
+                message: e.to_string(),
+            })?;
+        Ok(events
+            .into_iter()
+            .map(|ev| {
+                let mut submitter = [0u8; 32];
+                submitter[12..].copy_from_slice(&ev.submitter);
+                ForcedOpRecord {
+                    seq: ev.seq,
+                    submitter,
+                    payload: ev.payload,
+                    host_block: 0, // 事件面未携带高度时由 seq 排序保证语义
                 }
             })
             .collect())
