@@ -1,5 +1,5 @@
 // =============================================================================
-// extension/background/service_worker.js — ZChain 钱包后台（Extension 0.4）
+// extension/background/service_worker.js — ProofPlay 钱包后台（Extension 0.4）
 //
 // 0.2 交付（plan §6.12.4 表行：testnet、多账户、REAL/PLAY 隔离、proof portal、
 // 备份恢复、网络切换）：

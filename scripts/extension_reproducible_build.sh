@@ -159,7 +159,7 @@ fi
 
 # dist-checksums.txt：打包文件的清单 + SHA-256（发布附随件）。
 {
-  echo "# ZChain Wallet Extension — dist checksums（extension_reproducible_build.sh 产出）"
+  echo "# ProofPlay Wallet Extension — dist checksums（extension_reproducible_build.sh 产出）"
   echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "# reproducible: $STATUS"
   echo "# package: extension-0.4.0-alpha.zip sha256: $S1"

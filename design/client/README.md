@@ -1,4 +1,4 @@
-# ZChain 客户端 · 账簿 Ledger 设计稿 C1–C7
+# ProofPlay Poker 客户端 · 账簿 Ledger 设计稿 C1–C7
 
 牌桌稿（`../table/`）和站点稿（`../site/`）之后的第三块：把 `/play` 之外的**客户端路由**也画成同一套账簿语言。
 这一轮的输入是 React 源码，不是想象——每屏的文案都从

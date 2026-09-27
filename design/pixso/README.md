@@ -1,4 +1,4 @@
-# ZChain Wallet · Pixso 导入包
+# ProofPlay Wallet · Pixso 导入包
 
 从两套已有设计稿自动抽取生成，剥离了「总览/交互」外壳与切换脚本，
 使每一屏都以**固定 380×600 画板**静态可见，供 Pixso `code_to_design` 导入。
@@ -53,13 +53,13 @@ Pixso MCP 的每个写操作都需要 `file_key`，且无法自动定位当前�
 node design/pixso/build-pixso-import.js \
   design/zchain-wallet-ui.html \
   design/pixso/pixso-a-felt.html \
-  "ZChain Wallet · 方向 A 毡布绿 (Night)"
+  "ProofPlay Wallet · 方向 A 毡布绿 (Night)"
 
 node design/pixso/build-pixso-shot-export.mjs          # 默认即方向 B / paper / 整屏版一起出
 # 夜场底色另出一套：
 node design/pixso/build-pixso-shot-export.mjs \
   --ground=night --out=./pixso-b-ledger-night.html \
-  --title="ZChain Wallet · 方向 B 账簿 Ledger (Night)"
+  --title="ProofPlay Wallet · 方向 B 账簿 Ledger (Night)"
 ```
 
 B 的脚本需要 Chrome for Testing（定位方式同 `design/figma/build.mjs`，`ZCHAIN_CFT_CHROME` 可覆盖）。

@@ -199,7 +199,7 @@ export function createEip1193Provider({ zchain, eventSource = null, networkId = 
     // 诚实标志：绝不提供 isMetaMask/isRabby 等 EIP-1193 身份伪装。
     isZChain: true,
     isZChainEip1193Shim: true,
-    providerName: 'ZChain Wallet (EIP-1193 shim, read-only eth_*)',
+    providerName: 'ProofPlay Wallet (EIP-1193 shim, read-only eth_*)',
 
     /** EIP-1193 request 入口。 */
     async request({ method, params } = {}) {

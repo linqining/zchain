@@ -1,4 +1,4 @@
-/* ZChain Wallet mobile — 屏幕 + 路由 + 交互(设计稿 19 屏 1:1 移植)。
+/* ProofPlay Wallet mobile — 屏幕 + 路由 + 交互(设计稿 19 屏 1:1 移植)。
  *
  * 结构对应 design/zchain-wallet-ui-b-ledger.html:
  *   t-welcome/t-success/t-import/t-lock/t-home/t-acct(×3 链)/t-zc-send/
@@ -17,8 +17,8 @@ S.welcome = () => `
 <section class="scr" aria-label="欢迎">
   <div class="cover">
     <span class="ch ch-solid" style="position:absolute;right:0;top:2px">DevNet</span>
-    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ZChain 单色 logo" style="color:var(--ink)"><use href="#logo-zc"/></svg>
-    <div class="cv-n">ZChain Wallet</div>
+    <svg class="cv-logo" viewBox="0 0 64 64" aria-label="ProofPlay 单色 logo" style="color:var(--ink)"><use href="#logo-zc"/></svg>
+    <div class="cv-n">ProofPlay Wallet</div>
     <div class="cv-t">桌上飞快,结算可证</div>
     <div class="cv-e">Fast at the table. Verifiable at settlement.</div>
     <div class="cv-meta">
@@ -144,7 +144,7 @@ S.home = () => `
       <button class="mi" data-nav="zc-confirm"><span class="mi-ic" style="color:var(--amb);border-color:var(--amb-rl);background:var(--amb-w)">${ICO("pen", "ic-s")}</span><span class="grow"><b>开桌签名请求 · 8♠ 桌</b><span>poker.zchain.devnet · 92s 后过期</span></span>${ICO("chev-r", "ic-s")}</button>
     </div>
     <button class="btn btn-s btn-sm" style="width:100%;height:38px" data-nav="lock">${ICO("lock", "ic-s")}全部锁定</button>
-    <div class="foot">ZChain Wallet · 移动客户端 0.1.0 · DevNet<br>Play / DevNet / v1.3</div>
+    <div class="foot">ProofPlay Wallet · 移动客户端 0.1.0 · DevNet<br>Play / DevNet / v1.3</div>
   </div>
   ${tabsHtml("home")}
 </section>`;
@@ -652,7 +652,7 @@ S.settings = () => `
       <button class="mi" data-toast="示意:打开文档站"><span class="mi-ic">${ICO("ext", "ic-s")}</span><span class="grow"><b>文档与源码</b><span>docs / website</span></span>${ICO("chev-r", "ic-s")}</button>
     </div>
     <div class="bn bn-bad">${ICO("warn")}<div><b>未通过第三方审计</b><p>「可验证」指密码学与结算证明可被独立复核,不等于已审计;本界面不出现任何审计徽章。</p></div></div>
-    <div class="foot">ZChain Wallet · 桌上飞快,结算可证<br>Fast at the table. Verifiable at settlement.<br>Play / DevNet / v1.3</div>
+    <div class="foot">ProofPlay Wallet · 桌上飞快,结算可证<br>Fast at the table. Verifiable at settlement.<br>Play / DevNet / v1.3</div>
   </div>
   <div class="mdl-bg" id="mdl-cap">
     <div class="mdl">
@@ -946,7 +946,7 @@ window.__exportStandalone = function () {
   const sprite = document.querySelector("svg[aria-hidden='true']")?.outerHTML || "";
   return `<!DOCTYPE html>
 <html lang="zh-CN" data-ground="${ground}">
-<head><meta charset="UTF-8"><title>ZChain Wallet · ${cur.dataset.sid}</title>
+<head><meta charset="UTF-8"><title>ProofPlay Wallet · ${cur.dataset.sid}</title>
 <style>
 html,body{margin:0;padding:0;background:var(--pg)}
 #board{width:393px;${fullH}position:relative;overflow:hidden;margin:0}

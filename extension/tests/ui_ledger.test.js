@@ -247,5 +247,5 @@ test('19 nextGround / screenTitle：双底色切换与账簿标题', () => {
   assert.equal(screenTitle('acct', 'evm'), '账簿 · EVM 层');
   assert.equal(screenTitle('acct'), '账簿 · ZChain 层');
   assert.equal(screenTitle('settings'), '设置 · 能力矩阵');
-  assert.equal(screenTitle('nope'), 'ZChain Wallet');
+  assert.equal(screenTitle('nope'), 'ProofPlay Wallet');
 });

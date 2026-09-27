@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * build-pixso-import.js
- * Transform the two ZChain Wallet design mockups into clean, Pixso-importable
+ * Transform the two ProofPlay Wallet design mockups into clean, Pixso-importable
  * "board" HTML: every one of the 18 popup screens rendered as a standalone
  * 380x600 device frame on a grid, plus the design-system boards. The gallery /
  * proto toolbar chrome and the JS that toggles screen visibility are stripped so

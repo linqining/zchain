@@ -1,4 +1,4 @@
-# ZChain 牌桌设计稿 · 账簿 Ledger 方向 v0.1
+# ProofPlay Poker 牌桌设计稿 · 账簿 Ledger 方向 v0.1
 
 重设计 `poker_texas_air/client` 的**两套牌桌**：生产桌 `/play`（可玩，socket.io）与
 ZK 展示桌 `/game/:gameId`（结算可证叙事）。视觉走钱包已有的**方向 B「纸白账簿」**，

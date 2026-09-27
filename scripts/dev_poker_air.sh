@@ -8,7 +8,7 @@
 # 每手出 STARK 证明并落 sequencer.wal）→ explorer_gateway（18900 读
 # appchain WAL + 代理 zchain L1，扩展数据面）→ 结算桥（逐笔 appchain
 # 结算锚定为 zchain Public tx，get_tx 确认）→ vite 前端（5173）→
-# 真实 Chrome for Testing 加载 extension 钱包 → ZChain Wallet 登录入座 →
+# 真实 Chrome for Testing 加载 extension 钱包 → ProofPlay Wallet 登录入座 →
 # 自动打牌直到 TARGET_HANDS（默认 100）手全部结算并锚定上链。
 #
 # 用法：

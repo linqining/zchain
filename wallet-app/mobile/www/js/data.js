@@ -1,4 +1,4 @@
-/* ZChain Wallet mobile — 设计稿示例数据(与 design/zchain-wallet-ui-b-ledger.html 同一套示例数据)。
+/* ProofPlay Wallet mobile — 设计稿示例数据(与 design/zchain-wallet-ui-b-ledger.html 同一套示例数据)。
  * 移动客户端 MVP 阶段为静态演示数据;接入 wallet-core 时按桌面端 ui/app.js 的
  * 传输适配层(Tauri invoke / POST /api/<cmd>)替换字段来源。 */
 "use strict";

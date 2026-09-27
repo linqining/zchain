@@ -47,7 +47,7 @@ const flag = (name) => process.argv.slice(2).includes(`--${name}`);
 
 const SRC = resolve(HERE, arg("src", "../zchain-wallet-ui-b-ledger.html"));
 const OUT = resolve(HERE, arg("out", "./pixso-b-ledger.html"));
-const TITLE = arg("title", "ZChain Wallet · 方向 B 账簿 Ledger (Paper)");
+const TITLE = arg("title", "ProofPlay Wallet · 方向 B 账簿 Ledger (Paper)");
 const GROUND = arg("ground", "paper");
 const ONLY = arg("only", "").split(",").map((s) => s.trim()).filter(Boolean);
 const SCREENS_DIR = join(dirname(OUT), basename(OUT, ".html") + ".screens");

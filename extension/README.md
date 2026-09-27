@@ -1,4 +1,4 @@
-# ZChain Wallet — Browser Extension 0.6.0-alpha（plan-appchain §6.12.4）
+# ProofPlay Wallet — Browser Extension 0.6.0-alpha（plan-appchain §6.12.4）
 
 浏览器钱包插件（0.1 最小可用骨架 → 0.2 迭代 → 0.3/0.4 迭代 → 0.5 迭代 →
 0.6 迭代 → **0.6.1 交互迭代**）。

@@ -1,4 +1,4 @@
-# wallet-app — ZChain 独立桌面钱包 MVP（plan §6.12.5）
+# wallet-app — ProofPlay Wallet 独立桌面钱包 MVP（plan §6.12.5）
 
 Tauri v2 桌面壳 + 复用 [`poker-wallet`](../poker-wallet)（wallet-core，plan §6.12.3）。
 独立 Cargo workspace（自带 `Cargo.lock`），**不加入 zchain 根 workspace**，避免

@@ -1,4 +1,4 @@
-# ZChain Wallet 移动版 · Figma / Pixso 导入包(方向 B「账簿 Ledger」)
+# ProofPlay Wallet 移动版 · Figma / Pixso 导入包(方向 B「账簿 Ledger」)
 
 由 `build.mjs` 从 `wallet-app/mobile/www`(设计稿 19 屏的手机尺寸移植,393 逻辑宽)
 批量产出,供把设计铺进 Figma / Pixso,并作为原生客户端(Kotlin Compose / SwiftUI)

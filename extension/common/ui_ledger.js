@@ -584,7 +584,7 @@ export function nextGround(current) {
 /** 屏幕标题（票据抬头第二行的语义锚点）。 */
 export function screenTitle(id, chain) {
   const s = SCREEN_INDEX.get(id);
-  if (!s) return 'ZChain Wallet';
+  if (!s) return 'ProofPlay Wallet';
   if (s.id === 'acct') return `账簿 · ${CHAIN_LABEL[chainOf(chain) ?? 'zc']} 层`;
   return s.name;
 }

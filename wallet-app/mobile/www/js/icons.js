@@ -1,4 +1,4 @@
-/* ZChain Wallet mobile — 线性图标精灵(38 枚,单线/方头/1.6 stroke)
+/* ProofPlay Wallet mobile — 线性图标精灵(38 枚,单线/方头/1.6 stroke)
  * 与 design/zchain-wallet-ui-b-ledger.html 的 <defs> 逐字节同源;
  * 另含品牌 logo(圆角方框 + Z + 旋方块)与 29 格收款码版式 qr-art。 */
 "use strict";

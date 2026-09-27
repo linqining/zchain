@@ -1,5 +1,5 @@
 // =============================================================================
-// extension/popup/popup.js — ZChain Wallet 弹窗（方向 B「账簿 / Ledger」v0.2）
+// extension/popup/popup.js — ProofPlay Wallet 弹窗（方向 B「账簿 / Ledger」v0.2）
 //
 // 设计出处：design/zchain-wallet-ui-b-ledger.html。本文件是**屏幕注册表的执行
 // 者**：只做 DOM 编排与消息派发；屏幕结构/导航关系/金额口径/阶梯语义/错误文案
@@ -144,7 +144,7 @@ function logo(cls, style) {
   const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
   svg.setAttribute('class', cls);
   svg.setAttribute('viewBox', '0 0 64 64');
-  svg.setAttribute('aria-label', 'ZChain 单色 logo');
+  svg.setAttribute('aria-label', 'ProofPlay 单色 logo');
   if (style) svg.setAttribute('style', style);
   const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
   use.setAttribute('href', '#z-logo');
@@ -933,7 +933,7 @@ RENDERERS.welcome = async () => {
     h('div', { class: 'cover' }, [
       chip('DevNet', 'ch-solid'),
       logo('cv-logo', 'color:var(--ink)'),
-      h('div', { class: 'cv-n', text: 'ZChain Wallet' }),
+      h('div', { class: 'cv-n', text: 'ProofPlay Wallet' }),
       h('div', { class: 'cv-t', text: '桌上飞快，结算可证' }),
       h('div', { class: 'cv-e', text: 'Fast at the table. Verifiable at settlement.' }),
       h('div', { class: 'cv-meta' }, [
@@ -1196,7 +1196,7 @@ RENDERERS.home = async (ov) => {
         }), { more: '查看全部', moreAttrs: { 'data-nav': 'zc-receipts', id: 'home-receipts-more' } })
         : null,
       btn('全部锁定', { cls: 'btn-s', id: 'home-lock-all', attrs: { 'data-act': 'lock-all', style: 'width:100%;height:38px;margin-top:2px' }, icon: 'lock' }),
-      h('div', { class: 'foot', text: `ZChain Wallet · 方向 B 账簿 v0.2 / Extension ${ov.providerVersion ?? ''} · DevNet` }),
+      h('div', { class: 'foot', text: `ProofPlay Wallet · 方向 B 账簿 v0.2 / Extension ${ov.providerVersion ?? ''} · DevNet` }),
     ]),
     tabsBar(),
   ], { aria: '三链总账' }));
@@ -3425,7 +3425,7 @@ RENDERERS.settings = async (ov) => {
         mi({ iconName: 'ext', title: 'Proof Portal 独立页', sub: '逐阶段明细 / 主机权限授予', attrs: { 'data-act': 'portal-open' } }),
       ], { cls: 'rows' }),
       banner('bad', '未通过第三方审计', '「可验证」指密码学与结算证明可被独立复核，不等于已审计；本界面不出现任何审计徽章。'),
-      h('div', { class: 'foot', text: 'ZChain Wallet · 桌上飞快，结算可证\nFast at the table. Verifiable at settlement.' }),
+      h('div', { class: 'foot', text: 'ProofPlay Wallet · 桌上飞快，结算可证\nFast at the table. Verifiable at settlement.' }),
     ]),
     mdlCapability(),
   ], { aria: '设置' }));

@@ -19,6 +19,10 @@ pub struct Receipt {
     pub block_number: u64,
     /// 合约创建回执的新地址（非创建交易 = None）。
     pub contract_address: Option<[u8; 20]>,
+    /// 实际消耗 gas（回执缺字段时为 None）。
+    pub gas_used: Option<u128>,
+    /// 打包生效的每 gas 单价（wei；EIP-155 交易 = tx.gasPrice）。
+    pub effective_gas_price: Option<u128>,
     /// 原始 log（address + topics + data）。
     pub logs: Vec<RawLog>,
 }
@@ -241,6 +245,12 @@ impl L1Rpc {
             success: status == "0x1",
             block_number,
             contract_address,
+            gas_used: v.get("gasUsed").and_then(Value::as_str).and_then(|s| {
+                u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+            }),
+            effective_gas_price: v.get("effectiveGasPrice").and_then(Value::as_str).and_then(|s| {
+                u128::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+            }),
             logs,
         }))
     }

@@ -7,7 +7,7 @@
 //   1. 启动 Chrome（headless=new，--load-extension 加载 ZChain 扩展）；
 //   2. popup 一键创建钱包（口令自动保存到运行目录）；
 //   3. devnet 水龙头铸造 PLAY note（签名输入）；
-//   4. 打开 poker 客户端 → Log In → "ZChain Wallet" 按钮（扩展弹窗批准
+//   4. 打开 poker 客户端 → Log In → "ProofPlay Wallet" 按钮（扩展弹窗批准
 //      连接 + 登录签名，经 popup:listPending/popup:approve 消息驱动）；
 //   5. /play 桌面 → Sit Down → 买入弹窗确认（扩展批准 buy_in 签名）；
 //   6. 自动跟牌循环（Check 优先、其次 Call/Fold），直到
@@ -548,10 +548,10 @@ async function main() {
     const zchainBtn = await waitForExpr(game, `!!document.querySelector('[data-testid=login-zchain]')`, 15_000);
     if (!zchainBtn) {
       await screenshot(game, 'no-zchain-button');
-      throw new Error('登录弹窗未出现 ZChain Wallet 按钮（扩展未注入 window.zchain？）');
+      throw new Error('登录弹窗未出现 ProofPlay Wallet 按钮（扩展未注入 window.zchain？）');
     }
     await game.eval(`document.querySelector('[data-testid=login-zchain]').click()`);
-    progress('ZChain Wallet 登录：等待扩展审批（连接 + 登录签名）…');
+    progress('ProofPlay Wallet 登录：等待扩展审批（连接 + 登录签名）…');
     for (let i = 0; i < 30; i++) {
       await drainApprovals(popup, 'login', 5);
       await sleep(1500);

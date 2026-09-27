@@ -1,4 +1,4 @@
-/* ZChain Wallet UI — 无框架、无外部运行时（本地静态资源）。
+/* ProofPlay Wallet UI — 无框架、无外部运行时（本地静态资源）。
  *
  * 传输适配层：
  *  - Tauri（路线 A）：window.__TAURI__.core.invoke（withGlobalTauri）

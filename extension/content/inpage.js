@@ -90,7 +90,7 @@
 
   const provider = {
     isZChain: true, // 唯一命名空间标志；刻意不提供 isMetaMask/isRabby 等
-    providerName: 'ZChain Wallet',
+    providerName: 'ProofPlay Wallet',
     version: PROVIDER_VERSION,
 
     /** 连接：未授权 origin 触发弹窗显式确认（权限最小化）。

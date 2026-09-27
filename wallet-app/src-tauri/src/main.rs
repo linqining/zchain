@@ -44,5 +44,5 @@ fn main() {
             commands::backup_import,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running ZChain Wallet");
+        .expect("error while running ProofPlay Wallet");
 }

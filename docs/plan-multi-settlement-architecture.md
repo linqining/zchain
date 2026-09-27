@@ -61,7 +61,8 @@ Monad 测试网 E2E 7/7）。新增链（如 Solana）= 新 crate（如
 | --- | --- | --- |
 | `airs/*`（21 method AIR）+ `texas_canonical*` | **不改** | 业务语义直写电路，链无关 |
 | `proof_archive` / `public_inputs` / `outer_aggregate` | **不改** | 证明产物 = 链无关字节（batch_root/aggregate_root/public inputs） |
-| `settlement_binding` / `starknet_settlement` | **新增一个兄弟模块** | 按链出 calldata/调用编码：Starknet 先例 → 新 host 加 `host_evm_settlement`（Monad 已由 zchain 侧 `monad-settlement::abi` 承担，可回迁合并） |
+| `host_evm_settlement` | ✅ **已落地（2026-09-27）** | EVM 族结算绑定：Inbox/Outbox/Bridge calldata 编码 + 入金/强制包含事件解析 + `WithdrawalClaimBundle`（钱包 claim 打包，serde 传输形状）——与 zchain `monad-settlement::abi` 金标准向量跨仓对拍锁定（4 项测试） |
+| `starknet_settlement` | 已有 | Starknet 先例（同层参照） |
 | `orchestrator` / `prove_task` | 不改 | 消费 vm-common `ProveTask`，输出承诺字节 |
 
 **证明产物契约**（poker_texas_air 对所有宿主链的稳定承诺）：

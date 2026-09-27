@@ -1,4 +1,4 @@
-# ZChain 站点 · 账簿 Ledger 体系 v1.1
+# ProofPlay Poker 站点 · 账簿 Ledger 体系 v1.1
 
 > **迁移提示**：官网源码（`website/`）已迁移至 poker_texas_air 仓库。本文中的
 > `python3 website/...` 命令需在该仓库根目录执行；本仓库 `design/` 下的评审素材保留原样。
