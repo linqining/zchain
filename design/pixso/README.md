@@ -2,7 +2,7 @@
 
 从两套已有设计稿自动抽取生成，剥离了「总览/交互」外壳与切换脚本，
 使每一屏都以**固定 380×600 画板**静态可见，供 Pixso `code_to_design` 导入。
-品牌 token 全部同源 `website/media-kit/v0.1`，未改动。
+品牌 token 全部同源 `website/media-kit/v0.1`（官网源码已迁移至 poker_texas_air 仓库的 website/），未改动。
 
 两套方向并排对照：
 

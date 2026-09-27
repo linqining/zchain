@@ -231,7 +231,7 @@ max(32KB, 首 3 轮均值×2%)——带内微小抖动不计为增长）。
 
 ---
 
-> **部署依赖项**：真机兼容矩阵（WALLET-ACC-1）、发布工程（WALLET-ACC-8）、WC 生产 relay 接入等条目集中登记于 [`../website/RELEASE_PREREQUISITES.md`](../website/RELEASE_PREREQUISITES.md)（B 组：钱包发布工程）。
+> **部署依赖项**：真机兼容矩阵（WALLET-ACC-1）、发布工程（WALLET-ACC-8）、WC 生产 relay 接入等条目集中登记于 poker_texas_air 仓库的 `website/RELEASE_PREREQUISITES.md`（B 组：钱包发布工程）。
 
 ---
 
@@ -330,7 +330,7 @@ capability matrix**。版本号 0.4.0-alpha（1.0 仍不宣称——外审/签�
 |---|---|---|
 | SNIP-12 会话密钥授权（0.3） | ✅（popup UI 面） | popup"会话密钥"页：创建授权（**delegated key 生成走 wallet-core** `wallet_session_key_create`——私钥只活在 wasm 会话，锁定即毁；scope 默认只勾 PLAY 低风险集 `play/buyin/bet/settle`、transfer 可显式勾选、withdraw 永不可选；单笔/每日限额、桌白名单可选、有效期默认 24h 上限 365d）→ 展示 SNIP-12 授权摘要（**摘要由 wallet-core** `wallet_snip12_authorize_digest` 计算，revision 1 poseidon，与 `account_binding.rs` 单实现；typed data 组装复用 adapters/starknet.js，encode_type 与 wallet-core 逐字一致）→ devnet 入口形态登记（扩展侧构造 AuthorizeZChainKey + 保存约束记录，evidence 如实标注 `devnet_local_entry`）→ 撤销页（revoke → JS 粘滞位 + wallet-core `wallet_binding_status` 状态机双重确认 → 后续签名拒）。测试：`tests/sessions.test.js` 11 例 + wasm_smoke 14-18 步 + E2E S3-S7/L6-L7 |
 | REAL 提现预览（0.3，展示态） | ✅ | `common/withdraw_preview.js`：金额/收款 owner/finality（所选 note 短板聚合，要求 finalized）/托管风险逐字段预览；**提交按钮恒禁用**——canSubmit 恒 false（wallet-core display.rs 展示门 vault_offline ∧ finality 合取），不开放真实提现提交（与 0.2 的 REAL 展示边界一致）。测试：`tests/withdraw_preview.test.js` 6 例 + E2E W1-W2 |
-| WalletConnect 生产 relay（0.3 表项） | ⛔（如实挂起） | 前置 **B5：projectId 外部注册**（@walletconnect/sign-client 打包入口 + relay 凭证）。适配核心 0.1 已备（注入 SignClient 即激活，缺省 dormant 如实展示）；capability matrix 的 WC 行如实报 dormant 并注明 B5 外部依赖。登记于 `website/RELEASE_PREREQUISITES.md` B 组 |
+| WalletConnect 生产 relay（0.3 表项） | ⛔（如实挂起） | 前置 **B5：projectId 外部注册**（@walletconnect/sign-client 打包入口 + relay 凭证）。适配核心 0.1 已备（注入 SignClient 即激活，缺省 dormant 如实展示）；capability matrix 的 WC 行如实报 dormant 并注明 B5 外部依赖。登记于 poker_texas_air 仓库 `website/RELEASE_PREREQUISITES.md` B 组 |
 | 授权簿/registry UI（0.4） | ✅ | popup"授权簿"页：按 origin 的权限列出/撤销（§6.12.4 "每个 origin 的权限、网络和账户选择单独保存"，授权簿按账户隔离）；会话密钥列表（scope/单笔每日限额/今日已用/桌白名单/有效期/状态 active-exhausted-revoked-expired-not_yet_valid/登记来源 evidence/撤销/删除）。**撤销 fail-closed**：JS 层（`common/sessions.js` governingBinding：origin+chain 最新 active/exhausted/revoked binding；revoked → 该 origin 签名一律拒，粘滞，删除记录是唯一清除路径且为显式用户动作）+ wallet-core wasm 层（`wallet_session_admit` 独立复检）双层校验。测试：sessions.test.js 04-06/10-11 + E2E R1-R4/L6-L9 |
 | 单笔/每日限额执行（0.4） | ✅ | 签名路径（handleSign）：预览后、弹窗前先过 **JS 第一层**（`admitOperation`，判定顺序与 wallet-core `session_admission` 逐条一致：撤销 → 换网 → 时间窗 → scope → 桌白名单 → 单笔限额 → 日限额；金额口径 = 预览 amount_in，BigInt 十进制比较），再过 **wallet-core wasm 第二层**（`wallet_session_admit` = `account_binding::binding_admission` 单实现；拒绝是结构化 verdict `{admitted:false, rejected_reason}`）。签名成功后 `recordSpend` 记账日限聚合（unix 天窗，跨天清零）。每类拒绝有稳定码：SessionRevoked/SessionChainMismatch/SessionNotYetValid/SessionExpired/SessionScopeNotAllowed/SessionTableNotAllowed/SessionOverPerTxLimit/SessionOverDailyLimit。测试：sessions.test.js 07-09 + wasm_smoke 16 步（每类负例）+ E2E L1-L5（限额内成功 + 记账 + 超限弹窗前拒） |
 | 执行语义（诚实声明） | ✅ | governing binding 只取 origin+chain 下**最新**登记的 active/exhausted/revoked 记录；expired/not_yet_valid（自然时间窗外）→ 授权不再适用，回到常规签名路径（origin 授权 + 显式确认不变），避免自然过期把 origin 永久锁死；revoked → 恒拒（粘滞），删除记录（显式用户动作）才回常规路径 |

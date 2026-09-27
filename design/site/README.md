@@ -1,5 +1,8 @@
 # ZChain 站点 · 账簿 Ledger 体系 v1.1
 
+> **迁移提示**：官网源码（`website/`）已迁移至 poker_texas_air 仓库。本文中的
+> `python3 website/...` 命令需在该仓库根目录执行；本仓库 `design/` 下的评审素材保留原样。
+
 把牌桌稿（`design/table/`）与钱包方向 B（`design/zchain-wallet-ui-b-ledger.html`）已成立的
 账簿体系，铺到**营销站 `website/`** 与**牌桌客户端其余页**。
 v1.0 已并入主样式并出齐全站 41 页逐页图；v1.1 是**移动端增量层**（尚未并入主样式，见末两节）。

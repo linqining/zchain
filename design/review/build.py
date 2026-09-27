@@ -6,6 +6,9 @@
 点卡片才打开原始 PNG。
 
 用法：python3 design/review/build.py
+
+注：官网源码已迁移至 poker_texas_air 仓库的 website/。本仓库无 website/dist 时
+title_of() 自动回退为 slug，脚本不报错，只是评审页页题退化为 slug 名。
 """
 import json
 import re
