@@ -22,6 +22,7 @@
 //! 进程（anchor / bridge 双模式），消费 explorer_gateway 的只读 API。
 
 pub mod abi;
+pub mod adapter;
 pub mod anchor;
 pub mod error;
 pub mod keccak;
@@ -36,6 +37,7 @@ pub use anchor::{
     aggregate_task, anchor_task, checkpoint_task, claim_task_key, AnchorKind,
     AnchorState, AnchorSubmitter, AnchorTask,
 };
+pub use adapter::MonadAdapter;
 pub use error::SettlementError;
 pub use l1::L1Rpc;
 pub use signer::Credentials;

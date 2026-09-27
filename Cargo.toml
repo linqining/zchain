@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker-settlement-core", "poker_l1", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge", "monad-settlement"]
+members = ["poker-settlement-core", "poker_l1", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge", "monad-settlement", "settlement-adapter"]
 # 架构决策（2026-09-27）：移除 poker_zkvm（通用 RISC-V zkVM）。ZK 证明全面
 # 采用 poker_texas_air 的自定义 AIR 实现（业务语义直写电路，不经过 VM）；
 # 共享横切关注点继续由 vm-common 承载。详见 docs/00-architecture-overview.md。
@@ -38,6 +38,8 @@ poker_protocol = { git = "ssh://git@github.com/linqining/poker_protocol.git", ta
 vm-common = { path = "vm-common" }
 # 结算语义唯一事实源（plan-appchain §5.2-1）：VM/appchain/verifier 共用。
 poker-settlement-core = { path = "poker-settlement-core" }
+# 链无关结算适配器 trait（多结算层架构；monad-settlement 实现MonadAdapter）。
+settlement-adapter = { path = "settlement-adapter" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bcs = "0.1.6"

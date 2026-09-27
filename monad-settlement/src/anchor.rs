@@ -159,6 +159,12 @@ impl AnchorSubmitter {
         self.expected_chain_id
     }
 
+    /// 底层 RPC URL（adapter 组装 watcher 等同源客户端用）。
+    #[must_use]
+    pub fn rpc_url(&self) -> &str {
+        self.rpc.url()
+    }
+
     /// 提交任务（key 已存在 → 幂等跳过返回 None）。
     ///
     /// # Errors

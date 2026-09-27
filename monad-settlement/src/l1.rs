@@ -32,6 +32,8 @@ pub struct RawLog {
     pub topics: Vec<[u8; 32]>,
     /// data 段。
     pub data: Vec<u8>,
+    /// 事件所在高度（getLogs 未返回时为 0）。
+    pub block_number: u64,
 }
 
 /// Monad L1 JSON-RPC 客户端。
@@ -229,7 +231,10 @@ impl L1Rpc {
                     .trim_start_matches("0x");
                 let data = hex::decode(data_hex)
                     .map_err(|e| SettlementError::shape("receipt.log", format!("data: {e}")))?;
-                logs.push(RawLog { address, topics, data });
+                let log_block = item.get("blockNumber").and_then(Value::as_str).map_or(0, |b| {
+                    u64::from_str_radix(b.trim_start_matches("0x"), 16).unwrap_or(0)
+                });
+                logs.push(RawLog { address, topics, data, block_number: log_block });
             }
         }
         Ok(Some(Receipt {
@@ -356,7 +361,10 @@ impl L1Rpc {
                 .trim_start_matches("0x");
             let data = hex::decode(data_hex)
                 .map_err(|e| SettlementError::shape("eth_getLogs", format!("data: {e}")))?;
-            logs.push(RawLog { address, topics, data });
+            let log_block = item.get("blockNumber").and_then(Value::as_str).map_or(0, |b| {
+                u64::from_str_radix(b.trim_start_matches("0x"), 16).unwrap_or(0)
+            });
+            logs.push(RawLog { address, topics, data, block_number: log_block });
         }
         Ok(logs)
     }

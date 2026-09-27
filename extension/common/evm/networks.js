@@ -4,6 +4,14 @@
 // 纯函数、零副作用（node --test 直覆盖）。预设链 + 用户自定义 RPC 覆盖
 // （per chainId，storage 由 SW 管）。默认 RPC 均为公开、CORS 开放的端点；
 // devnet 指向本机开发链（e2e/本地演示用），支持水龙头。
+//
+// 加链即用契约（docs/plan-multi-settlement-architecture.md §钱包）：
+// 新增结算链 = 在本表登记条目并携带
+//   { settlement: true, bridgeAddress: '0x…', inboxAddress: '0x…' }
+// ⇒ 登录（evmNetworkView：RPC/explorer/网络视图）与买入
+//   （common/evm/settlement.js buildDepositIntent：depositNative 锁入
+//   L1Bridge → L2 铸 note）**自动可用**，无需改其他代码。结算合约部署后
+//   回填 bridgeAddress/inboxAddress（部署前 null = 买入门位关闭，登录不受影响）。
 // =============================================================================
 
 export const EVM_NETWORKS = [
@@ -49,6 +57,9 @@ export const EVM_NETWORKS = [
     // zchain L2 的结算层（settlement layer）：L2 批次根/checkpoint 锚定
     // 到 Monad（docs/monad-l2-settlement.md）。
     settlement: true,
+    // 主网结算合约尚未部署：null = 买入门位关闭（登录/网络视图不受影响）。
+    bridgeAddress: null,
+    inboxAddress: null,
   },
   {
     id: 'monad-testnet',
@@ -60,6 +71,9 @@ export const EVM_NETWORKS = [
     explorerApiUrl: null,
     faucet: false,
     settlement: true,
+    // 结算合约（contracts/monad 测试网部署实例；见 monad-l2-settlement.md §6.3）。
+    bridgeAddress: '0xa3c06bc2ab43f57cd788f7213c5a83a45cd2743e',
+    inboxAddress: '0x3e4bfea829760e0f52c45f944c93053a6f695c0e',
   },
   {
     id: 'base',

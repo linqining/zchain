@@ -6,6 +6,8 @@ description = "Monad (L1) settlement adapter for the zchain poker appchain (L2):
 license = "BUSL-1.1"
 
 [dependencies]
+# 链无关结算适配器 trait（本 crate 提供 MonadAdapter 实现）。
+settlement-adapter = { workspace = true }
 # L1 JSON-RPC over HTTP(S)（Monad 主网为 https；rustls，workspace 统一版本）。
 # blocking 客户端：daemon 走 std 线程循环，不引入 tokio 运行时。
 reqwest = { workspace = true, features = ["blocking"] }

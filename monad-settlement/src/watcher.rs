@@ -50,7 +50,8 @@ impl DepositWatcher {
         )?;
         let mut events = Vec::new();
         for log in logs {
-            let event = parse_deposit_log(&log.topics, &log.data)?;
+            let mut event = parse_deposit_log(&log.topics, &log.data)?;
+            event.host_block = log.block_number;
             if self.seen.insert(event.nonce) {
                 events.push(event);
             }

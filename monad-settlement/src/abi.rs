@@ -237,6 +237,8 @@ pub struct DepositEvent {
     pub to: [u8; 20],
     /// 锁仓金额（wei / 最小单位）。
     pub amount: u128,
+    /// 事件所在宿主高度（getLogs 未携带时为 0）。
+    pub host_block: u64,
 }
 
 /// 从 log（topics + data）解析 [`DepositEvent`]。
@@ -272,6 +274,7 @@ pub fn parse_deposit_log(topics: &[[u8; 32]], data: &[u8]) -> Result<DepositEven
         token: topics[2][12..].try_into().expect("20 of 32"),
         to: topics[3][12..].try_into().expect("20 of 32"),
         amount,
+        host_block: 0,
     })
 }
 

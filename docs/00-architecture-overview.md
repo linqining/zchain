@@ -568,6 +568,7 @@ zchain 在安全审计中识别并修复了 28 项关键问题（3 CRITICAL + 7 
 | [37-9-assigned-validator-security.md](file:///Users/mac/projects/zchain/docs/37-9-assigned-validator-security.md) | assigned_validator 安全 |
 | [37-10-trust-layer-model.md](file:///Users/mac/projects/zchain/docs/37-10-trust-layer-model.md) | 三层信任模型详解 |
 | [monad-l2-settlement.md](file:///Users/mac/projects/zchain/docs/monad-l2-settlement.md) | Monad L2 结算层改造：研究结论 / 结算合约栈 / daemon / 钱包支持 / runbook |
+| [plan-multi-settlement-architecture.md](file:///Users/mac/projects/zchain/docs/plan-multi-settlement-architecture.md) | 多结算层架构：SettlementAdapter trait / host 差距矩阵 / poker_texas_air 适配面 / 钱包加链即用 |
 | [checklist.md](file:///Users/mac/projects/zchain/checklist.md) | Phase 1-8 实现检查清单 |
 
 ---
