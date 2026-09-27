@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["poker-settlement-core", "poker_l1", "poker_zkvm", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge"]
+members = ["poker-settlement-core", "poker_l1", "poker_zkvm", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge", "monad-settlement"]
 # guest_sdk 和 guests/texas_poker 是独立 crate（no_std + riscv32im target），
 # 不加入 workspace.members 以避免 target/feature 污染。
 # 用 exclude 而非 [workspace] 表，使它们可被 poker_zkvm 作为 path dev-dependency 引用。
@@ -66,7 +66,7 @@ tracing = "0.1"
 # ===== Phase 3: zkvm 服务化 HTTP 框架 =====
 axum = { version = "0.7", features = ["http1"] }
 tower = { version = "0.4" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
 # ===== Texas AIR 依赖 =====
 # v2 已完全放弃 Hypernova 证明系统，删除 ark-ec/ark-poly/ark-grumpkin/ark-groth16/
 # ark-r1cs-std/ark-relations/ark-snark 等 R1CS/Groth16 相关依赖。

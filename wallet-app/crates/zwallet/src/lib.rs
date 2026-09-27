@@ -32,7 +32,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use borsh::BorshDeserialize as _;
 use dto::{
     BackupInfoDto, BalancesDto, NoteDto, NotesPageDto, SignRequestDto, StatusDto, SignedDto,
-    ABI_VERSION, CHAIN_ID, DEFAULT_AUTO_LOCK_SECS, DOMAIN, REQUEST_TTL_SECS,
+    ABI_VERSION, CHAIN_ID, DEFAULT_AUTO_LOCK_SECS, DOMAIN, REQUEST_TTL_SECS, SETTLEMENT_L1,
+    SETTLEMENT_L1_CHAIN_ID,
 };
 use persist::{Settings, WalletPaths};
 use poker_appchain::note::{AssetClass, Note};
@@ -363,6 +364,8 @@ impl Wallet {
             domain: DOMAIN.into(),
             abi_version: ABI_VERSION,
             network_label: "ZChain devnet（本地 · 未连网）".into(),
+            settlement_l1: SETTLEMENT_L1.into(),
+            settlement_l1_chain_id: SETTLEMENT_L1_CHAIN_ID,
             owner_public_hex: unlocked
                 .then(|| {
                     hex::encode(

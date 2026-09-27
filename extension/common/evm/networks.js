@@ -38,6 +38,30 @@ export const EVM_NETWORKS = [
     faucet: false,
   },
   {
+    id: 'monad',
+    name: 'Monad',
+    chainIdHex: '0x8f', // 143
+    kind: 'mainnet',
+    rpcUrl: 'https://rpc.monad.xyz',
+    explorerUrl: 'https://monadvision.com',
+    explorerApiUrl: null,
+    faucet: false,
+    // zchain L2 的结算层（settlement layer）：L2 批次根/checkpoint 锚定
+    // 到 Monad（docs/monad-l2-settlement.md）。
+    settlement: true,
+  },
+  {
+    id: 'monad-testnet',
+    name: 'Monad 测试网',
+    chainIdHex: '0x279f', // 10143
+    kind: 'testnet',
+    rpcUrl: 'https://testnet-rpc.monad.xyz',
+    explorerUrl: 'https://testnet.monadvision.com',
+    explorerApiUrl: null,
+    faucet: false,
+    settlement: true,
+  },
+  {
     id: 'base',
     name: 'Base',
     chainIdHex: '0x2105',
@@ -105,5 +129,7 @@ export function evmNetworkView(network, rpcOverrides = {}, explorerOverrides = {
     explorerUrl: network.explorerUrl,
     explorerApiUrl: effectiveExplorerApi(network, explorerOverrides),
     faucet: network.faucet === true,
+    // 结算层标记（Monad = zchain L2 的 L1；见 docs/monad-l2-settlement.md）。
+    settlement: network.settlement === true,
   };
 }

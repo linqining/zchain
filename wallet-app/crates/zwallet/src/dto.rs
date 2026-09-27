@@ -8,6 +8,12 @@ use wallet_core::operation_signer::SigningPreview;
 
 /// 应用固定网络上下文：devnet（MVP 不连网，写明）。
 pub const CHAIN_ID: &str = "zchain-devnet-1";
+/// 结算层（L1）：zchain L2 的批次根 / checkpoint / 提现根锚定到 Monad
+/// （docs/monad-l2-settlement.md；contracts/monad/ 结算合约栈）。devnet
+/// 阶段为本地 EVM 模拟链；接入后分别为 Monad 测试网（10143）/ 主网（143）。
+pub const SETTLEMENT_L1: &str = "monad-devnet";
+/// 结算层 chainId（devnet 模拟 = 31337；Monad 测试网 10143 / 主网 143）。
+pub const SETTLEMENT_L1_CHAIN_ID: u64 = 31_337;
 /// 应用固定域标签（wallet-core `parse_domain` 只认 `zchain`）。
 pub const DOMAIN: &str = "zchain";
 /// Operation ABI 版本（wallet-core `SUPPORTED_ABI_VERSION`）。
@@ -32,6 +38,10 @@ pub struct StatusDto {
     pub abi_version: u32,
     /// 网络展示名。
     pub network_label: String,
+    /// 结算层（L1）标识：`SETTLEMENT_L1`（如 `monad-devnet`）。
+    pub settlement_l1: String,
+    /// 结算层 chainId（`SETTLEMENT_L1_CHAIN_ID`；hex 展示由 UI 负责）。
+    pub settlement_l1_chain_id: u64,
     /// owner 公钥（66 hex；锁定时 None）。
     pub owner_public_hex: Option<String>,
     /// 余额视图（锁定时 None）。

@@ -1,0 +1,19 @@
+[PASS] chain_id: expected 10143
+operator key: 0xbcd7ecd68d55ca2536f3f50dcbcb44edb0d97aa6 balance 1154720000000000000 wei（1.154 MON）
+[PASS] funded_key: 需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei
+[deploy] L1Bridge = 0xa3c06bc2ab43f57cd788f7213c5a83a45cd2743e（2840B code）
+[deploy] L1Outbox = 0xcedbb700063dcd13cba86654a8549564273cc2b7（6060B code）
+[deploy] L1Inbox = 0x3e4bfea829760e0f52c45f944c93053a6f695c0e（3217B code）
+[wire] outbox.setInbox ok
+[wire] outbox.setBridge ok
+[wire] inbox.setOutbox ok
+[wire] bridge.setOutbox ok
+[wire] outbox.setClaimDelayBlocks ok
+stack: inbox=0x3e4bfea829760e0f52c45f944c93053a6f695c0e outbox=0xcedbb700063dcd13cba86654a8549564273cc2b7 bridge=0xa3c06bc2ab43f57cd788f7213c5a83a45cd2743e
+[PASS] batch_count_zero: batchCount() = Some(0)
+[PASS] anchor_batch_root: finalized=true batchCount()=Some(1)
+[PASS] deposit_watcher: 0.1 MON 锁入 Bridge，DepositInitiated 已捕获 → /tmp/monad-e2e-deposits.jsonl（nonce=0 amount=100000000000000000）
+[PASS] withdrawal_claim: amount=50000000000000000 bridge_float=50000000000000000 wei：claim 成功，Bridge 浮存 -50000000000000000 wei（期望 50000000000000000）
+[PASS] large_payout_delay: 延迟未满被拒=true（ClaimTooEarly 预期）；期满后领取成功=true
+e2e_summary_json {"checks":[{"detail":"expected 10143","item":"chain_id","ok":true},{"detail":"需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei","item":"funded_key","ok":true},{"detail":"batchCount() = Some(0)","item":"batch_count_zero","ok":true},{"detail":"finalized=true batchCount()=Some(1)","item":"anchor_batch_root","ok":true},{"detail":"0.1 MON 锁入 Bridge，DepositInitiated 已捕获 → /tmp/monad-e2e-deposits.jsonl（nonce=0 amount=100000000000000000）","item":"deposit_watcher","ok":true},{"detail":"amount=50000000000000000 bridge_float=50000000000000000 wei：claim 成功，Bridge 浮存 -50000000000000000 wei（期望 50000000000000000）","item":"withdrawal_claim","ok":true},{"detail":"延迟未满被拒=true（ClaimTooEarly 预期）；期满后领取成功=true","item":"large_payout_delay","ok":true}],"e2e":"monad-testnet-settlement","failed":0,"passed":7}
+[e2e] 7/7 PASS

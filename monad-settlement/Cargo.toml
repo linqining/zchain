@@ -1,0 +1,33 @@
+[package]
+name = "monad-settlement"
+version = "0.1.0"
+edition = "2024"
+description = "Monad (L1) settlement adapter for the zchain poker appchain (L2): EIP-155 signer, batch/checkpoint anchoring with finality tracking, deposit watcher, withdrawal claim encoder"
+license = "BUSL-1.1"
+
+[dependencies]
+# L1 JSON-RPC over HTTP(S)（Monad 主网为 https；rustls，workspace 统一版本）。
+# blocking 客户端：daemon 走 std 线程循环，不引入 tokio 运行时。
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
+hex = { workspace = true }
+# keccak256（ABI selector / 签名摘要）
+sha3 = { workspace = true }
+# withdrawal root 镜像校验（RFC6962 sha256；与 poker-appchain 同一 crate）
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+# EIP-155 交易签名（secp256k1，workspace 统一版本）
+secp256k1 = { workspace = true }
+
+[dev-dependencies]
+# 交叉验证：Rust 真实 WithdrawalRootBuilder 产根/证明 → 本 crate 的
+# Solidity 等价 verifier 对拍（合约↔Rust 字节级一致性守卫）。
+poker-appchain = { path = "../poker-appchain" }
+rand = { workspace = true }
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "monad_settlementd"
+path = "src/bin/monad_settlementd.rs"

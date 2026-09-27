@@ -24,6 +24,10 @@ export const NETWORKS = {
     defaultGatewayUrl: 'http://127.0.0.1:18900',
     // explorer 链接基址（0.2 与网关同源）。
     explorerBase: 'http://127.0.0.1:18900',
+    // 结算层（L1）：本地开发 = EVM devnet 模拟 Monad；正式接入 Monad 见
+    // docs/monad-l2-settlement.md（monad_settlementd 守护进程）。
+    settlementL1: 'monad-devnet',
+    settlementChainIdHex: '0x7a69',
   },
   'zchain-testnet-1': {
     chainId: 'zchain-testnet-1',
@@ -33,6 +37,11 @@ export const NETWORKS = {
     // testnet 公共网关未部署：必须由用户显式设置，绝不静默回落 devnet。
     defaultGatewayUrl: null,
     explorerBase: null,
+    // 结算层（L1）：Monad 测试网（chainId 10143；官方 RPC
+    // https://testnet-rpc.monad.xyz）。批次根/checkpoint/提现根上锚落在
+    // Monad 结算合约栈（contracts/monad/）。
+    settlementL1: 'monad-testnet',
+    settlementChainIdHex: '0x279f',
   },
 };
 

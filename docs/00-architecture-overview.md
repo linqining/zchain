@@ -69,6 +69,7 @@ graph TD
 | `vm-common` | 跨 crate 共享层（gas / syscall_id / precompile / prove_task / catalog） | `stwo` |
 | `proving_service` | 离线证明 HTTP 服务（axum，消费 poker_texas_air Orchestrator） | `poker_l1`, `poker_texas_air`, `vm-common`, `axum` |
 | `poker-contracts` | 合约模块：poker_texas_air/poker_contracts（Starknet Cairo）的部署流水线与接入绑定（架构对标 Aztec：artifact/instance/deployer/bindings/registry） | `starknet`, `tokio`, `clap` |
+| `monad-settlement` | Monad（L1）结算适配层：EIP-155 签名、批次根/checkpoint/提现根上锚（finality 跟踪）、入金监听、提现树镜像校验 + `monad_settlementd` 守护进程（见 [monad-l2-settlement.md](monad-l2-settlement.md)） | `reqwest`(blocking), `secp256k1`, `sha3` |
 | `poker_protocol` | 协议类型库（外部仓库，非 workspace 成员） | `blstrs`, `sha2` |
 
 **ZK 依赖方向**（注意：与"链验证证明"直觉相反）：`poker_texas_air → poker_l1`（air 依赖 l1 以复用类型），`proving_service → poker_texas_air`。poker_l1 **不依赖** poker_texas_air——链上 `zk_verify` 当前 dormant，证明生成/验证走 `proving_service` 离线 host-verify。
@@ -554,6 +555,7 @@ zchain 在安全审计中识别并修复了 28 项关键问题（3 CRITICAL + 7 
 | [37-8-game-phase-protocol.md](file:///Users/mac/projects/zchain/docs/37-8-game-phase-protocol.md) | 游戏阶段协议 |
 | [37-9-assigned-validator-security.md](file:///Users/mac/projects/zchain/docs/37-9-assigned-validator-security.md) | assigned_validator 安全 |
 | [37-10-trust-layer-model.md](file:///Users/mac/projects/zchain/docs/37-10-trust-layer-model.md) | 三层信任模型详解 |
+| [monad-l2-settlement.md](file:///Users/mac/projects/zchain/docs/monad-l2-settlement.md) | Monad L2 结算层改造：研究结论 / 结算合约栈 / daemon / 钱包支持 / runbook |
 | [checklist.md](file:///Users/mac/projects/zchain/checklist.md) | Phase 1-8 实现检查清单 |
 
 ---

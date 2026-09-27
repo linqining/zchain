@@ -1,0 +1,137 @@
+// SPDX-License-Identifier: BUSL-1.1
+pragma solidity ^0.8.24;
+
+import {AuthorityOwnable} from "./AuthorityOwnable.sol";
+
+/// @title L1Bridge — Monad(L1) 侧资产资金库（deposit 锁仓 / withdrawal 支付）
+/// @notice 资产路径：
+///          - 入金：用户 `depositNative(to)` 锁 MON → `DepositInitiated` 事件
+///            → monad_settlementd bridge 模式监听 → L2 sequencer 以
+///            `DepositV2` op 铸 note（deposit_id 幂等，防重复铸造）；
+///            ERC-20 同理走 `depositToken`；
+///          - 出金：L1Outbox.claim 验证 Merkle 证明后调 `payoutNative` /
+///            `payoutToken`（onlyOutbox，单向授权），资金只出不进旁路。
+///         安全要点：入金 nonce 单调递增（L2 侧以此幂等）；支付仅限
+///         outbox；暂停时入金/支付全部停摆；无 owner 提款函数——资金
+///         只能经 Outbox 证明路径流出。
+contract L1Bridge is AuthorityOwnable {
+    // ------------------------------------------------------------------
+    // 存储
+    // ------------------------------------------------------------------
+
+    /// 入金 nonce（单调递增；L2 侧 DepositV2.deposit_id 幂等键的原料之一）。
+    uint256 public depositNonce;
+
+    /// L1Outbox 地址（唯一支付通道；一次性设置）。
+    address public outbox;
+
+    // ------------------------------------------------------------------
+    // 事件
+    // ------------------------------------------------------------------
+
+    /// token = address(0) 表示原生 MON。
+    event DepositInitiated(
+        uint256 indexed nonce,
+        address indexed token,
+        address indexed to,
+        uint256 amount
+    );
+    event OutboxSet(address indexed outbox);
+
+    // ------------------------------------------------------------------
+    // 错误
+    // ------------------------------------------------------------------
+
+    error NotOutbox();
+    error OutboxAlreadySet();
+    error OutboxNotSet();
+    error BadAmount();
+    error BadRecipient();
+    error TokenTransferFailed();
+
+    // ------------------------------------------------------------------
+    // 构造 / 一次性配置
+    // ------------------------------------------------------------------
+
+    constructor(address initialAuthority_) AuthorityOwnable(initialAuthority_) {}
+
+    function setOutbox(address outbox_) external onlyAuthority {
+        if (outbox_ == address(0)) revert ZeroAddress();
+        if (outbox != address(0)) revert OutboxAlreadySet();
+        outbox = outbox_;
+        emit OutboxSet(outbox_);
+    }
+
+    // ------------------------------------------------------------------
+    // 入金（用户入口）
+    // ------------------------------------------------------------------
+
+    /// 锁定原生 MON，指定 L2 收款人（<address to> 为 L2 owner 的 EVM 地址
+    /// 投影；L2 侧按运营配置映射到 OwnerRef）。
+    function depositNative(address to) external payable whenNotPaused {
+        if (msg.value == 0) revert BadAmount();
+        if (to == address(0)) revert BadRecipient();
+        uint256 nonce = depositNonce;
+        depositNonce = nonce + 1;
+        emit DepositInitiated(nonce, address(0), to, msg.value);
+    }
+
+    /// 锁定 ERC-20（须先 approve；USDT 等不返回 bool 的代币兼容）。
+    function depositToken(address token, address to, uint256 amount) external whenNotPaused {
+        if (amount == 0) revert BadAmount();
+        if (to == address(0)) revert BadRecipient();
+        if (token == address(0)) revert BadRecipient();
+        _pullToken(token, msg.sender, amount);
+        uint256 nonce = depositNonce;
+        depositNonce = nonce + 1;
+        emit DepositInitiated(nonce, token, to, amount);
+    }
+
+    // ------------------------------------------------------------------
+    // 支付通道（仅 Outbox；提现证明验证发生在 Outbox 侧）
+    // ------------------------------------------------------------------
+
+    function payoutNative(address to, uint256 amount) external onlyOutbox whenNotPaused {
+        if (to == address(0)) revert BadRecipient();
+        // 重入面：Outbox 在调用本函数前已写入 claimed 状态；本合约无状态
+        // 依赖，回拨重入最多重复请求同一笔支付 → Outbox nonReentrant 面
+        // （claimed 已置位 → AlreadyClaimed）兜底。
+        (bool ok,) = to.call{value: amount}("");
+        if (!ok) revert TokenTransferFailed();
+    }
+
+    function payoutToken(address token, address to, uint256 amount)
+        external
+        onlyOutbox
+        whenNotPaused
+    {
+        if (to == address(0)) revert BadRecipient();
+        _pushToken(token, to, amount);
+    }
+
+    // ------------------------------------------------------------------
+    // 内部
+    // ------------------------------------------------------------------
+
+    modifier onlyOutbox() {
+        if (msg.sender != outbox) revert NotOutbox();
+        _;
+    }
+
+    /// USDT 兼容的 transferFrom：调用成功且（无返回值 或 返回 true）即认成。
+    function _pullToken(address token, address from, uint256 amount) private {
+        (bool ok, bytes memory ret) =
+            token.call(abi.encodeWithSignature("transferFrom(address,address,uint256)", from, address(this), amount));
+        if (!ok || (ret.length != 0 && !(ret.length == 32 && abi.decode(ret, (bool))))) {
+            revert TokenTransferFailed();
+        }
+    }
+
+    function _pushToken(address token, address to, uint256 amount) private {
+        (bool ok, bytes memory ret) =
+            token.call(abi.encodeWithSignature("transfer(address,uint256)", to, amount));
+        if (!ok || (ret.length != 0 && !(ret.length == 32 && abi.decode(ret, (bool))))) {
+            revert TokenTransferFailed();
+        }
+    }
+}

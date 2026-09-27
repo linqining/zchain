@@ -27,3 +27,6 @@ cairo-bridge-poc/logs/*
 extension/tests/e2e*
 # 外部工具二进制/压缩包，体积过大不入库。
 tools_external/
+
+# contracts/monad solc 编译工件（build_solc.sh 可复现）
+contracts/monad/out/

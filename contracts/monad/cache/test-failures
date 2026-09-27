@@ -1,0 +1,1 @@
+{"version":1,"failures":[{"contract":"test/L1Settlement.t.sol:L1SettlementTest","test":"test_GoldenVector_LeafHashAndDigest"}]}

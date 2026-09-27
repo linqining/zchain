@@ -1,0 +1,19 @@
+[PASS] chain_id: expected 10143
+operator key: 0xbcd7ecd68d55ca2536f3f50dcbcb44edb0d97aa6 balance 3284320000000000000 wei（3.284 MON）
+[PASS] funded_key: 需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei
+[deploy] L1Bridge = 0xbfddc3ae754bd0da1150097a3d4436c4c11c4f7a（2840B code）
+[deploy] L1Outbox = 0x738caa1dbbdbf94457d53bfaa1173084dd564d39（6047B code）
+[deploy] L1Inbox = 0x43df3bed877eb00a181ed8da8ecfbf7c74619bd4（3217B code）
+[wire] outbox.setInbox ok
+[wire] outbox.setBridge ok
+[wire] inbox.setOutbox ok
+[wire] bridge.setOutbox ok
+[wire] outbox.setClaimDelayBlocks ok
+stack: inbox=0x43df3bed877eb00a181ed8da8ecfbf7c74619bd4 outbox=0x738caa1dbbdbf94457d53bfaa1173084dd564d39 bridge=0xbfddc3ae754bd0da1150097a3d4436c4c11c4f7a
+[PASS] batch_count_zero: batchCount() = Some(0)
+[PASS] anchor_batch_root: finalized=true batchCount()=Some(1)
+[PASS] deposit_watcher: 0.1 MON 锁入 Bridge，DepositInitiated 已捕获 → /tmp/monad-e2e-deposits.jsonl（nonce=0 amount=100000000000000000）
+[FAIL] withdrawal_claim: amount=50000000000000000 bridge_float=100000000000000000 wei：claim 回执失败（block 66078301）
+[FAIL] large_payout_delay: commitRoot(2) 失败: unexpected l1 response shape (commit): receipt failed
+e2e_summary_json {"checks":[{"detail":"expected 10143","item":"chain_id","ok":true},{"detail":"需要 > 0.1 MON：全流程（3 部署 + 12 笔交互 + 1 次回退）实测约 0.2 MON gas @112 gwei","item":"funded_key","ok":true},{"detail":"batchCount() = Some(0)","item":"batch_count_zero","ok":true},{"detail":"finalized=true batchCount()=Some(1)","item":"anchor_batch_root","ok":true},{"detail":"0.1 MON 锁入 Bridge，DepositInitiated 已捕获 → /tmp/monad-e2e-deposits.jsonl（nonce=0 amount=100000000000000000）","item":"deposit_watcher","ok":true},{"detail":"amount=50000000000000000 bridge_float=100000000000000000 wei：claim 回执失败（block 66078301）","item":"withdrawal_claim","ok":false},{"detail":"commitRoot(2) 失败: unexpected l1 response shape (commit): receipt failed","item":"large_payout_delay","ok":false}],"e2e":"monad-testnet-settlement","failed":2,"passed":5}
+[e2e] 5/7 PASS
