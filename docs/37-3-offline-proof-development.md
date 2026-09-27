@@ -1,5 +1,10 @@
 # 链下证明开发文档（Stwo / Groth16 / IPA + checkpoint 协议）
 
+> **架构决策（2026-09-27）**：poker_zkvm（通用 RISC-V zkVM）已从 workspace 移除。
+> 本文涉及的 zkVM 证明路径（zk_verify syscall / zkVM 侧 trace、guest 等）按历史
+> 文档保留记录；现行 ZK 策略 = poker_texas_air 全自定义 AIR（业务语义直写电路，
+> 不经 VM），见 docs/00-architecture-overview.md §4.2 决策记录。
+
 > SubTask 37.3：poker_l1 OffChain 执行模型 + ZK 证明结算开发文档
 >
 > **v2 更新**：Hypernova/CCS 折叠方案已废弃。链下证明现基于 **Stwo Circle-STARK**（`poker_zkvm`）+ **poker_texas_air 自定义 AIR 电路**（21 method AIR + host-verified receipts），经 `proving_service` 离线服务消费。链上 `zk_verify` scheme_id=1 统一为 Stwo（`SCHEME_STWO`）。

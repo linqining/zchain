@@ -12,7 +12,7 @@
 //! # 向后兼容策略
 //!
 //! **不强制改现有注册机制**：
-//! - poker_zkvm 的 `SyscallId`（0x01-0x0F）保留原样使用
+//! - zkVM 路线（已移除）的 `SyscallId`（0x01-0x0F）数值保留使用
 //! - poker_l1 的 syscall 通过 `declare_builtin_function!` 宏注册（不依赖枚举）
 //! - vm-common 的 `SyscallId` 仅供**新加 syscall** 与 ABI 文档使用，**不破坏现有路由**
 

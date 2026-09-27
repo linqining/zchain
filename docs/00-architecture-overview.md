@@ -5,8 +5,13 @@
 > 严格对齐源码实现：
 > - 仓库根 `Cargo.toml`（workspace 定义）、`src/main.rs`（节点二进制入口）
 > - `poker_l1/src/lib.rs`（L1 链核心库模块声明）
-> - `poker_zkvm/src/lib.rs`（ZK 虚拟机模块声明）
+> - `vm-common/src/lib.rs`（共享层模块声明）
 > - `docs/37-1 ~ 37-10`（已有运维 / 信任模型文档）
+>
+> **架构决策（2026-09-27）**：移除 poker_zkvm（通用 RISC-V zkVM 路线）。ZK 证明
+> 全面采用 poker_texas_air 的**自定义 AIR 实现**（业务语义直写电路，不经 VM 执行
+> ——StarkEx 路线而非 Starknet VM 路线）。多结算层架构见
+> [monad-l2-settlement.md](monad-l2-settlement.md)。
 
 ---
 
@@ -27,52 +32,61 @@ zchain 是面向**链下博弈与高吞吐游戏场景**的 L1 区块链，核�
 
 ## 2. Workspace 顶层架构
 
-zchain 是一个 Cargo workspace，包含 **5 个 crate + 1 个二进制入口**：
+zchain 是一个 Cargo workspace（8 个 crate + 1 个二进制入口；证明侧
+poker_texas_air / proving_service 为独立 lockfile 的外部 crate）：
 
 ```mermaid
 graph TD
     subgraph WS["zchain workspace (Cargo.toml)"]
         BIN["zchain (bin)<br/>src/main.rs<br/>节点 CLI + JSON-RPC + 多 validator BFT loop"]
         L1["poker_l1 (lib)<br/>L1 区块链核心库<br/>~20 模块 / ~1600 测试"]
-        AIR["poker_texas_air (lib)<br/>Texas Poker 自定义 AIR 电路<br/>21 method AIR + host-verify"]
-        ZKVM["poker_zkvm (lib)<br/>Stwo Circle-STARK zkVM<br/>CPU/memory/Poseidon/SHA256 AIR"]
+        SET["poker-settlement-core (lib)<br/>结算语义唯一事实源<br/>SettlementPlan / payout_root"]
+        APPC["poker-appchain (lib)<br/>扑克 appchain 引擎<br/>soft-confirm sequencer + 证明管道"]
+        WAL["poker-wallet (lib)<br/>wallet-core：keystore/note/签名"]
         VMC["vm-common (lib)<br/>共享: gas / syscall_id / precompile / prove_task"]
-        PSVC["proving_service (bin/lib)<br/>离线证明 HTTP 服务<br/>axum + poker_texas_air Orchestrator"]
-        PROTO["poker_protocol<br/>(外部 crate ../zgame)<br/>协议类型与 zk_shuffle"]
+        CONTR["poker-contracts (bin)<br/>Starknet Cairo 部署流水线"]
+        FBR["fact-bridge (bin)<br/>STARK 事实桥（zchain L1 fact registry）"]
+        MON["monad-settlement (bin/lib)<br/>Monad L1 结算适配层 + daemon"]
+        PROTO["poker_protocol<br/>(外部 crate)<br/>协议类型与 zk_shuffle"]
+        AIR["poker_texas_air<br/>(外部 crate，独立 lockfile)<br/>自定义 AIR 电路：21 method AIR<br/>+ Stwo prover/verifier"]
+        PSVC["proving_service<br/>(外部 crate)<br/>离线证明 HTTP 服务"]
     end
 
     BIN --> L1
-    L1 --> ZKVM
     L1 --> VMC
-    ZKVM --> VMC
-    AIR --> L1
-    AIR --> ZKVM
-    AIR --> VMC
-    PSVC --> L1
+    L1 --> SET
+    APPC --> SET
+    APPC --> VMC
+    MON --> APPC
     PSVC --> AIR
     L1 --> PROTO
 
     classDef bin fill:#fef3c7,stroke:#92400e
     classDef lib fill:#dbeafe,stroke:#1e40af
     classDef ext fill:#f3e8ff,stroke:#6b21a8
-    class BIN,PSVC bin
-    class L1,AIR,ZKVM,VMC lib
-    class PROTO ext
+    class BIN,PSVC,CONTR,FBR bin
+    class L1,SET,APPC,WAL,VMC,MON lib
+    class PROTO,AIR ext
 ```
 
 | crate | 角色 | 关键依赖 |
 | --- | --- | --- |
+| crate | 角色 | 关键依赖 |
+| --- | --- | --- |
 | `zchain` | 节点二进制入口（`node` / `keygen` / `test-e2e` / `poker-demo`） | `poker_l1`, `tokio`, `tracing-subscriber` |
-| `poker_l1` | L1 链核心库：交易 / 区块 / 共识 / VM / RPC / 节点 / 桥 / 治理 / slashing | `poker_zkvm`, `vm-common`, `poker_protocol`, `solana_rbpf`, `blstrs`, `secp256k1`, `ed25519-dalek`, `rocksdb`, `vrf` |
-| `poker_texas_air` | Texas Poker 自定义 AIR 电路（21 method AIR + Stwo prover/verifier + host-verified receipts） | `poker_l1`, `poker_zkvm`, `vm-common`, `stwo` |
-| `poker_zkvm` | 通用 Stwo Circle-STARK zkVM（CPU/memory/Poseidon/SHA256/range-check AIR + recursive） | `vm-common`, `stwo` |
+| `poker_l1` | L1 链核心库：交易 / 区块 / 共识 / VM / RPC / 节点 / 桥 / 治理 / slashing | `vm-common`, `poker_protocol`, `solana_rbpf`, `blstrs`, `secp256k1`, `ed25519-dalek`, `rocksdb`, `vrf` |
+| `poker-settlement-core` | 结算语义唯一事实源：SettlementPlan / side_pot / payout_root / deck_chain（VM 与 AIR 共用） | `blake2`, `sha2` |
+| `poker-appchain` | 扑克 appchain 引擎：soft-confirm sequencer、note 账本、证明管道（batch_root/aggregate）、withdrawal_root、watcher | `poker-settlement-core`, `vm-common`, `starknet-crypto` |
+| `poker-wallet` | wallet-core：keystore（Argon2id+ChaCha20）、note store、operation signer（chain_id 域绑定） | `borsh`, `secp256k1` |
 | `vm-common` | 跨 crate 共享层（gas / syscall_id / precompile / prove_task / catalog） | `stwo` |
-| `proving_service` | 离线证明 HTTP 服务（axum，消费 poker_texas_air Orchestrator） | `poker_l1`, `poker_texas_air`, `vm-common`, `axum` |
-| `poker-contracts` | 合约模块：poker_texas_air/poker_contracts（Starknet Cairo）的部署流水线与接入绑定（架构对标 Aztec：artifact/instance/deployer/bindings/registry） | `starknet`, `tokio`, `clap` |
-| `monad-settlement` | Monad（L1）结算适配层：EIP-155 签名、批次根/checkpoint/提现根上锚（finality 跟踪）、入金监听、提现树镜像校验 + `monad_settlementd` 守护进程（见 [monad-l2-settlement.md](monad-l2-settlement.md)） | `reqwest`(blocking), `secp256k1`, `sha3` |
-| `poker_protocol` | 协议类型库（外部仓库，非 workspace 成员） | `blstrs`, `sha2` |
+| `poker-contracts` | Starknet Cairo 合约部署流水线（architecture 对标 Aztec：artifact/instance/deployer/bindings/registry） | `starknet`, `tokio`, `clap` |
+| `fact-bridge` | STARK 事实桥：texas-hand 证明分片上 zchain L1 的 CairoFactRegistry | `cairo-air`, `secp256k1` |
+| `monad-settlement` | Monad（L1）结算适配层：EIP-155 签名、批次根/checkpoint/提现根上锚（finality 跟踪）、入金监听、提现树镜像校验 + `monad_settlementd` / `monad_e2e`（见 [monad-l2-settlement.md](monad-l2-settlement.md)） | `reqwest`(blocking), `secp256k1`, `sha3` |
+| `poker_texas_air` *(外部)* | Texas Poker 自定义 AIR 电路（21 method AIR + Stwo prover/verifier + host-verified receipts）——**唯一 ZK 证明路径**（自带 lockfile；`poker-appchain-texasair` 为其引擎适配器） | `poker-settlement-core`, `stwo`, `vm-common` |
+| `proving_service` *(外部)* | 离线证明 HTTP 服务（axum，消费 poker_texas_air Orchestrator） | `poker_texas_air`, `axum` |
+| `poker_protocol` *(外部)* | 协议类型库 | `blstrs`, `sha2` |
 
-**ZK 依赖方向**（注意：与"链验证证明"直觉相反）：`poker_texas_air → poker_l1`（air 依赖 l1 以复用类型），`proving_service → poker_texas_air`。poker_l1 **不依赖** poker_texas_air——链上 `zk_verify` 当前 dormant，证明生成/验证走 `proving_service` 离线 host-verify。
+**ZK 依赖方向**（注意：与"链验证证明"直觉相反）：`poker_texas_air → poker_l1`（air 依赖 l1 以复用类型），`proving_service → poker_texas_air`。poker_l1 **不依赖** poker_texas_air——链上 `zk_verify` 当前 dormant，证明生成/验证走 `proving_service` 离线 host-verify。**zkVM 路线（poker_zkvm）已于 2026-09-27 移除**：证明完备性路径 = 扩展 poker_texas_air 的自定义 AIR 覆盖全部业务语义 + 递归聚合，不经过任何 VM 执行。
 
 二进制入口 `src/main.rs` 提供 4 类节点角色（`validator` / `full` / `archive` / `light`），通过 newline-delimited JSON-RPC over TCP 暴露接口，支持 SIGINT/SIGTERM 优雅关闭、`--max-connections` 限流、`--genesis-validators` / `--genesis-alloc` / `--vrf-key-file` 多 validator 配置。
 
@@ -129,7 +143,6 @@ graph TD
     VM --> TX
     VM --> CRYPTO
     OFF --> VM
-    OFF --> ZKVM_EXT[poker_zkvm]
     NET --> CON
     NET --> TX
     NODE --> BLK
@@ -154,7 +167,7 @@ graph TD
     classDef aux fill:#f3e8ff,stroke:#6b21a8
     class OBJ,SIG,ACC,TX,ERR foundation
     class BLK,CON,STO,GOV ledger
-    class VM,CRYPTO,OFF,ZKVM_EXT exec
+    class VM,CRYPTO,OFF exec
     class NET,NODE,RPC,BRIDGE net
     class SYNC,IDX aux
 ```
@@ -186,7 +199,7 @@ graph TD
 
 ## 4. ZK 证明架构（Stwo Circle-STARK）
 
-zchain 的 ZK 层基于 **Stwo**（Circle-STARK + AIR + FRI over M31），**v2 已完全放弃 Hypernova/CCS 折叠方案**。ZK 能力分布在三个 crate：
+zchain 的 ZK 层基于 **Stwo**（Circle-STARK + AIR + FRI over M31），**v2 已完全放弃 Hypernova/CCS 折叠方案**。**架构决策（2026-09-27）：poker_zkvm（通用 RISC-V zkVM）已整体移除**——ZK 证明全面采用 poker_texas_air 的**自定义 AIR**（业务语义直写电路，不经 VM 执行；StarkEx 路线）。ZK 能力分布：
 
 ### 4.1 三层 ZK 架构
 
@@ -199,15 +212,12 @@ graph LR
     subgraph SVC["proving_service (离线)"]
         ORCH["Orchestrator<br/>消费 ProveTask"]
     end
-    subgraph AIR["poker_texas_air (自定义电路)"]
+    subgraph AIR["poker_texas_air (自定义电路，唯一证明路径)"]
         M21["21 method AIR<br/>lifecycle/actions/funds/crypto"]
         PROOF["Stwo proof<br/>(per-method)"]
         VCHR["host-verify receipt<br/>(VerifiedChain)"]
         AGG["Aggregator PoC<br/>(descriptor-only)"]
-    end
-    subgraph ZKVM["poker_zkvm (通用 zkVM)"]
-        CPU["CPU/memory/Poseidon/<br/>SHA256/range-check AIR"]
-        REC["recursive/<br/>(递归证明)"]
+        RECUR["最终递归<br/>(路线图：全部业务语义<br/>AIR 化 + 常量尺寸聚合)"]
     end
 
     TASK --> ORCH
@@ -215,32 +225,34 @@ graph LR
     M21 --> PROOF
     PROOF --> VCHR
     VCHR --> AGG
-    AIR --> ZKVM
+    AGG -.-> RECUR
 
     classDef chain fill:#fef3c7,stroke:#92400e
     classDef svc fill:#dcfce7,stroke:#166534
     classDef air fill:#dbeafe,stroke:#1e40af
-    classDef zkvm fill:#f3e8ff,stroke:#6b21a8
+    classDef plan fill:#e0e7ff,stroke:#3730a3
     class TASK,ZKV chain
     class ORCH svc
     class M21,PROOF,VCHR,AGG air
-    class CPU,REC zkvm
+    class RECUR plan
 ```
 
-### 4.2 poker_zkvm（通用 Stwo Circle-STARK zkVM）
+### 4.2 zkVM 路线（已移除，2026-09-27）
 
-`poker_zkvm` 是基于 Stwo 的通用 RISC-V zkVM，trace 在 M31（4×8-bit limb）中原生生成的电路。
+`poker_zkvm`（通用 RISC-V zkVM：CPU/memory/Poseidon/SHA256/range-check AIR +
+recursive + isa/trace/compiler）**已整体移除**。决策理由：
 
-| 模块 | 职责 |
-| --- | --- |
-| `stwo_backend/cpu_air.rs` | CPU 执行步骤 AIR |
-| `stwo_backend/memory_air.rs` | 内存读写 AIR |
-| `stwo_backend/poseidon_air.rs` / `poseidon_m31.rs` | Poseidon 哈希 AIR |
-| `stwo_backend/sha256_air.rs` | SHA-256 AIR |
-| `stwo_backend/range_check_air.rs` | 范围检查 AIR（被 poker_texas_air 复用） |
-| `stwo_backend/recursive/` | 递归证明（FRI verifier / transcript / recursion prover/verifier） |
-| `stwo_backend/prover.rs` | Stwo `prove()` 入口 |
-| `isa/` / `trace/` / `compiler/` | 指令集 / trace 模型 / ELF 加载 |
+1. **证明完备性路径重排**：多结算层架构（见 [monad-l2-settlement.md](monad-l2-settlement.md)）要求
+   "宿主链可验证的状态转移证明"。此前 zkVM 路线需要完成 rBPF 全量证明
+   （Phase 2-6 未动工），而业务侧 poker_texas_air 的自定义 AIR 已经覆盖结算
+   语义——**把证明完备性押在业务语义直写电路（StarkEx 路线）而非通用 VM
+   执行证明（Starknet 路线）上**，工程路径短得多。
+2. **无运行时依赖**：workspace 内无任何 crate 在代码上依赖 poker_zkvm
+   （poker_l1 的 gas/precompile 常量早已下沉到 vm-common）。
+3. **guest（riscv32 texas_poker）一并移除**。
+
+共享常量（syscall gas / range-check 等数值边界）由 vm-common 继续承载；
+需要递归证明时在 poker_texas_air 内自建（其 AIR 体系自带 transcript/FRI 面）。
 
 ### 4.3 poker_texas_air（Texas Poker 自定义 AIR 电路 — 真实证明实现）
 

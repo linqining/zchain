@@ -1,6 +1,6 @@
 //! poker_l1 集成测试公共辅助 — 跨测试文件共享的构造函数与工具。
 //!
-//! 沿用 poker_zkvm `tests/common/mod.rs` 模式：`#![allow(dead_code)]`
+//! 测试脚手架模式沿用自（已移除的）zkVM 路线 tests/common/mod.rs：`#![allow(dead_code)]`
 //! 因为不同测试文件仅使用本模块的部分函数。
 
 #![allow(dead_code)]

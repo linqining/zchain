@@ -17,7 +17,7 @@
 //!     ├── poker_l1::vm::precompile::Precompile (完整接口，含 ObjectID/ObjectDb)
 //!     │   └── 17 个业务合约（零修改）
 //!     │
-//!     └── poker_zkvm::precompiles::adapter::PrecompileCircuitAdapter
+//!     └── （已移除的）zkVM 路线 precompiles::adapter::PrecompileCircuitAdapter
 //!         └── 包装 9 个 PrecompileCircuit（poseidon/sha256/ecdsa/...）
 //! ```
 //!

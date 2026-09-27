@@ -1,13 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["poker-settlement-core", "poker_l1", "poker_zkvm", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge", "monad-settlement"]
-# guest_sdk 和 guests/texas_poker 是独立 crate（no_std + riscv32im target），
-# 不加入 workspace.members 以避免 target/feature 污染。
-# 用 exclude 而非 [workspace] 表，使它们可被 poker_zkvm 作为 path dev-dependency 引用。
-exclude = [
-    "poker_zkvm/guest_sdk",
-    "poker_zkvm/guests/texas_poker",
-]
+members = ["poker-settlement-core", "poker_l1", "poker-appchain", "vm-common", "poker-wallet", "poker-contracts", "fact-bridge", "monad-settlement"]
+# 架构决策（2026-09-27）：移除 poker_zkvm（通用 RISC-V zkVM）。ZK 证明全面
+# 采用 poker_texas_air 的自定义 AIR 实现（业务语义直写电路，不经过 VM）；
+# 共享横切关注点继续由 vm-common 承载。详见 docs/00-architecture-overview.md。
 
 # zchain root package 本身作为 workspace 的 bin 入口保留
 [package]

@@ -6,7 +6,7 @@
 //! # 设计
 //!
 //! 本模块是**只读目录**，不参与运行时分派。条目在编译期硬编码，
-//! 反映 `poker_l1/src/vm/contracts/` 与 `poker_zkvm/src/precompiles/` 的实际实现。
+//! 反映 `poker_l1/src/vm/contracts/` 的实际实现（zkVM 路线已移除）。
 //!
 //! # 用法
 //!
@@ -48,7 +48,7 @@ pub struct CatalogEntry {
     pub category: PrecompileCategory,
     /// poker_l1 是否可用。
     pub l1_available: bool,
-    /// poker_zkvm 是否可用。
+    /// zkVM 路线（已移除）。
     pub zkvm_available: bool,
     /// 是否 gas-free（GameTurn/CheckpointAnchor lane）。
     pub is_gas_free: bool,
@@ -70,7 +70,7 @@ pub struct PrecompileCatalog {
 impl PrecompileCatalog {
     /// 创建包含所有已知预编译的目录。
     ///
-    /// 条目反映 `poker_l1/src/vm/contracts/` 与 `poker_zkvm/src/precompiles/` 的实际实现。
+    /// 条目反映 `poker_l1/src/vm/contracts/` 的实际实现（zkVM 路线已移除）。
     #[must_use]
     pub fn default_catalog() -> Self {
         let mut entries = Vec::new();

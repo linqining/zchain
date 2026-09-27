@@ -9,7 +9,7 @@
 //! # 保留在各 crate 本地的 ISA 专有常量
 //!
 //! - `poker_l1`：`GAS_ARITHMETIC`、`GAS_MEMORY_BASE`、`GAS_MEMORY_PER_BYTE`、`GAS_BRANCH`（BPF 指令级）
-//! - `poker_zkvm`：`GAS_INSN_*` 系列（RV32I 指令级）、`SyscallGasArgs`、`syscall_gas()`、`instruction_gas()`、`total_step_gas()`
+//! - zkVM 路线（已移除）：`GAS_INSN_*` 系列（RV32I 指令级）、`SyscallGasArgs`、`syscall_gas()`、`instruction_gas()`、`total_step_gas()`
 //!
 //! # 严格遵循 spec.md（FROZEN 2026-06-27）
 //!

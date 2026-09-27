@@ -2,10 +2,10 @@
 //!
 //! # 设计目标
 //!
-//! - 统一 poker_l1（blstrs）与 poker_zkvm（ark-bn254）的密码学原语接口
+//! - 统一 poker_l1（blstrs）与业务电路（ark-bn254）的密码学原语接口
 //! - **字节级接口**：使用 `[u8; N]` 而非关联类型，保证 trait object 安全
 //! - vm-common 不依赖 blstrs/arkworks，仅定义接口
-//! - 业务 BLS 用 blstrs（poker_l1），zkvm 电路用 ark-bn254（poker_zkvm），双库共存
+//! - 业务 BLS 用 blstrs（poker_l1），业务电路用 ark-bn254（poker_texas_air 自定义 AIR），双库共存
 //!
 //! # 架构
 //!
@@ -18,7 +18,7 @@
 //!     │   └── 复用 crypto_precompiles/bls.rs（不重复造轮子）
 //!     │   └── BLS12-381: blstrs / ECDSA: secp256k1 / Ed25519: ed25519-dalek
 //!     │
-//!     └── poker_zkvm::crypto_arkworks::ArkworksCryptoProvider
+//!     └── （已移除的）zkVM 路线 crypto_arkworks::ArkworksCryptoProvider
 //!         └── BN254: ark-bn254 / ECDSA: secp256k1 / Ed25519: ed25519-dalek
 //!         └── BLS12-381: 返回 None/false（zkvm 不用 BLS12-381）
 //! ```

@@ -1,6 +1,6 @@
 //! poker_l1 形式化属性测试 — proptest 不变量验证。
 //!
-//! 参考 poker_zkvm `tests/formal_properties.rs` 模式，覆盖 5 类核心不变量：
+//! 模式参考（已移除的）zkVM 路线 tests/formal_properties.rs，覆盖 5 类核心不变量：
 //! 1. SMT — 插入/证明/验证往返、顺序无关性、删除恢复、篡改失败
 //! 2. 签名 — secp256k1 / ed25519 签名验证往返
 //! 3. 地址派生 — 确定性、跨 scheme 差异

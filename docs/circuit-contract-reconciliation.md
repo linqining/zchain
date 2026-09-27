@@ -1,5 +1,10 @@
 # 电路 ↔ 合约一致性核对报告
 
+> **架构决策（2026-09-27）**：poker_zkvm（通用 RISC-V zkVM）已从 workspace 移除。
+> 本文涉及的 zkVM 证明路径（zk_verify syscall / zkVM 侧 trace、guest 等）按历史
+> 文档保留记录；现行 ZK 策略 = poker_texas_air 全自定义 AIR（业务语义直写电路，
+> 不经 VM），见 docs/00-architecture-overview.md §4.2 决策记录。
+
 > 范围：`poker_texas_air/src/`（AIR 电路）vs `poker_l1/src/vm/contracts/texas_poker/`（rBPF 合约）。
 > 日期：2026-07-25。
 > 结论：**21 个方法 AIR 目前均为 PoC，仅约束"输入一致性 + 极少量输出 flag"，绝大多数业务算术/状态守卫未在电路中强制**。本报告逐方法列出差异，并标注哪些是"明确的语义错误（必修）"、哪些是"低悬挂果实（本轮补约束）"、哪些是"阶段 5 高级约束（本轮不做）"。

@@ -1,6 +1,6 @@
 //! poker_l1 Soundness 负向测试 — 验证安全边界与错误路径。
 //!
-//! 参考 poker_zkvm `tests/soundness_tests.rs` 模式，覆盖 6 类安全边界：
+//! 模式参考（已移除的）zkVM 路线 tests/soundness_tests.rs，覆盖 6 类安全边界：
 //! 1. 交易校验 — 输入/输出/签名/参数长度限制边界
 //! 2. 签名验证 — 篡改签名/非规范编码/错误长度/跨 scheme 路由
 //! 3. SMT — 篡改兄弟/截断路径/错误 key/空非空不一致

@@ -1,4 +1,4 @@
-//! vm-common — poker_l1 vm 与 poker_zkvm 的共享横切关注点。
+//! vm-common — poker_l1 vm 与 poker-appchain 的共享横切关注点。
 //!
 //! 严格不含 ISA 语义（BPF / RV32I），不依赖 solana_rbpf 或 arkworks。
 //! 仅含六大横切关注点：
@@ -12,7 +12,7 @@
 //! # 安全保证
 //!
 //! 本 crate 严格 `#![deny(unsafe_code)]`，不引入任何 unsafe 代码。
-//! 这与 poker_zkvm 的 `#![deny(unsafe_code)]` 保持一致，
+//! 这与 workspace 的 `#![deny(unsafe_code)]` 纪律保持一致，
 //! 且不影响 poker_l1 的 `#![allow(unsafe_code)]`（因 unsafe 仅在 poker_l1 内部）。
 
 #![deny(unsafe_code)]

@@ -3,7 +3,7 @@
 //! # 设计
 //!
 //! - `BpfGasStrategy`（poker_l1）：指令级 1 gas/条 + syscall 级按 gas_table 计费
-//! - `ZkvmGasStrategy`（poker_zkvm）：指令级 gas = 0（无 gas 费），仅 step_limit
+//! - `ZkvmGasStrategy`（zkVM 路线，已移除）：指令级 gas = 0（无 gas 费），仅 step_limit
 //!
 //! # 范围说明
 //!

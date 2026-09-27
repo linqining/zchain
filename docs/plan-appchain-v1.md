@@ -1,5 +1,10 @@
 # 自研扑克 L1（appchain）v1 技术方案
 
+> **架构决策（2026-09-27）**：poker_zkvm（通用 RISC-V zkVM）已从 workspace 移除。
+> 本文涉及的 zkVM 证明路径（zk_verify syscall / zkVM 侧 trace、guest 等）按历史
+> 文档保留记录；现行 ZK 策略 = poker_texas_air 全自定义 AIR（业务语义直写电路，
+> 不经 VM），见 docs/00-architecture-overview.md §4.2 决策记录。
+
 > 状态：2026-09-13 v1.4 增补稿（v1.3 产品化基础上：代币经济 + v1.5 共识 +
 > 钱包全线 + 外部评审采纳，排期与状态见 `docs/roadmap-schedule.md`）。
 > 功能模块 / 实现内容清单 / 验收测试 / 官网与文档发布四段式。
